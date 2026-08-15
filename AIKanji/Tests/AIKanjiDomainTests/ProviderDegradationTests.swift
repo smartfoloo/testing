@@ -104,14 +104,20 @@ final class ProviderDegradationTests: XCTestCase {
                     "restaurant-search",
                     options: FunctionInvokeOptions(
                         body: SearchRequest(event_id: nonexistentEventId)
-                    )
-                ) as Data
+                    ),
+                    decode: { data, response in
+                        XCTAssertEqual(response.statusCode, 200)
+                        return data
+                    }
+                )
             }
             XCTFail("restaurant-search should reject a nonexistent event")
         } catch is TimeoutError {
             XCTFail("restaurant-search timed out for a nonexistent event")
+        } catch let FunctionsError.httpError(code, _) {
+            XCTAssertEqual(code, 404)
         } catch {
-            XCTAssertFalse(error.localizedDescription.isEmpty)
+            XCTFail("restaurant-search returned an unexpected error: \(error)")
         }
     }
 
