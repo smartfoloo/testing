@@ -124,7 +124,8 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare v_run_id uuid; v_feasible_count int := 0; v_candidate record;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
-    and auth.uid() is not null and not exists (
+    and nullif(current_setting('request.jwt.claims', true), '') is not null
+    and not exists (
     select 1 from public.participants
     where event_id = p_event_id and auth_user_id = auth.uid())
   then raise exception 'not a participant of this event'; end if;
@@ -152,7 +153,8 @@ create or replace function public.fn_count_unlocked_if_relaxed(
 declare v_constraint record; v_relaxed jsonb; v_baseline int; v_relaxed_count int;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
-    and auth.uid() is not null and not exists (
+    and nullif(current_setting('request.jwt.claims', true), '') is not null
+    and not exists (
     select 1 from public.participants
     where event_id = p_event_id and auth_user_id = auth.uid())
   then raise exception 'not a participant of this event'; end if;
@@ -182,7 +184,8 @@ declare v_negotiation_id uuid; v_candidate record; v_best_constraint record;
   v_best_unlocked int := -1; v_unlocked int;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
-    and auth.uid() is not null and not exists (
+    and nullif(current_setting('request.jwt.claims', true), '') is not null
+    and not exists (
     select 1 from public.participants
     where event_id = p_event_id and auth_user_id = auth.uid())
   then raise exception 'not a participant of this event'; end if;
@@ -284,3 +287,19 @@ revoke execute on function public.fn_candidate_is_feasible(uuid, text, uuid, jso
   from public, anon, authenticated;
 revoke execute on function public.fn_count_unlocked_if_relaxed(uuid, uuid)
   from public, anon, authenticated;
+revoke execute on function public.fn_recompute_feasibility(uuid) from public, anon;
+revoke execute on function public.fn_propose_relaxation(uuid) from public, anon;
+grant execute on function public.fn_recompute_feasibility(uuid)
+  to authenticated, service_role;
+grant execute on function public.fn_propose_relaxation(uuid)
+  to authenticated, service_role;
+grant execute on function public.fn_count_unlocked_if_relaxed(uuid, uuid)
+  to service_role;
+revoke execute on function public.fn_get_response_count(uuid)
+  from public, anon;
+revoke execute on function public.fn_get_pending_negotiation_count(uuid)
+  from public, anon;
+grant execute on function public.fn_get_response_count(uuid)
+  to authenticated, service_role;
+grant execute on function public.fn_get_pending_negotiation_count(uuid)
+  to authenticated, service_role;

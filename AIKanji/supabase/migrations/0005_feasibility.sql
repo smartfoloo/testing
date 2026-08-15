@@ -187,7 +187,7 @@ declare
   v_candidate record;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
-     and auth.uid() is not null
+     and nullif(current_setting('request.jwt.claims', true), '') is not null
      and not exists (
        select 1 from public.participants
        where event_id = p_event_id and auth_user_id = auth.uid()
@@ -236,7 +236,7 @@ declare
   v_relaxed_count int;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
-     and auth.uid() is not null
+     and nullif(current_setting('request.jwt.claims', true), '') is not null
      and not exists (
        select 1 from public.participants
        where event_id = p_event_id and auth_user_id = auth.uid()
@@ -285,7 +285,7 @@ declare
   v_unlocked int;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
-     and auth.uid() is not null
+     and nullif(current_setting('request.jwt.claims', true), '') is not null
      and not exists (
        select 1 from public.participants
        where event_id = p_event_id and auth_user_id = auth.uid()
@@ -333,3 +333,14 @@ begin
 
   return v_negotiation_id;
 end; $$;
+
+revoke execute on function public.fn_recompute_feasibility(uuid) from public, anon;
+revoke execute on function public.fn_propose_relaxation(uuid) from public, anon;
+revoke execute on function public.fn_count_unlocked_if_relaxed(uuid, uuid)
+  from public, anon, authenticated;
+grant execute on function public.fn_recompute_feasibility(uuid)
+  to authenticated, service_role;
+grant execute on function public.fn_propose_relaxation(uuid)
+  to authenticated, service_role;
+grant execute on function public.fn_count_unlocked_if_relaxed(uuid, uuid)
+  to service_role;
