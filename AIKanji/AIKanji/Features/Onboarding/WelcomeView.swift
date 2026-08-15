@@ -1,6 +1,9 @@
 import SwiftUI
 
 struct WelcomeView: View {
+    @State private var isLoginPresented = false
+    @State private var signedInEmail: String?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -42,12 +45,41 @@ struct WelcomeView: View {
                         .clipShape(Capsule())
                         .accessibilityIdentifier("join-event")
                     }
+                    VStack(spacing: AppSpacing.xs) {
+                        Button(AppCopy.login) {
+                            isLoginPresented = true
+                        }
+                        .font(AppTypography.body.weight(.semibold))
+                        .foregroundStyle(AppColors.accent)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("login")
+                        Text(AppCopy.optionalLogin)
+                            .font(AppTypography.caption)
+                            .foregroundStyle(AppColors.ink.opacity(0.72))
+                            .multilineTextAlignment(.center)
+                        if let signedInEmail {
+                            Text(signedInEmail)
+                                .font(AppTypography.caption)
+                                .foregroundStyle(AppColors.ink.opacity(0.72))
+                                .accessibilityIdentifier("signed-in-email")
+                        }
+                    }
                     Spacer()
                 }
                 .padding(.horizontal, AppSpacing.xl)
                 .padding(.vertical, AppSpacing.lg)
             }
             .toolbar(.hidden, for: .navigationBar)
+        }
+        .task {
+            signedInEmail = await Supa.currentEmail()
+        }
+        .sheet(isPresented: $isLoginPresented) {
+            LoginSheet(
+                currentEmail: signedInEmail,
+                onSignedIn: { signedInEmail = $0 },
+                onSignedOut: { signedInEmail = nil }
+            )
         }
     }
 }
