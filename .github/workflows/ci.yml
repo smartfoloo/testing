@@ -51,10 +51,14 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      # A generic destination, not a named device: the job only compiles, and pinning a
+      # concrete simulator makes it hostage to which runtimes the runner image happens to
+      # ship — 'iPhone 16' vanished from macos-15 mid-day and the build failed at
+      # destination resolution without ever reaching the compiler.
       - name: Build for the iOS Simulator
         run: |
           xcodebuild build \
             -project AIKanji/AIKanji.xcodeproj \
             -scheme AIKanji \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO
