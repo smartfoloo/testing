@@ -37,7 +37,7 @@ struct CreateEventView: View {
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text("どんな集まりですか？").font(AppTypography.title)
                 TextField("例：忘年会", text: $name)
-                    .textFieldStyle(.roundedBorder)
+                    .appInputFieldStyle()
                     .accessibilityIdentifier("event-name")
             }
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
@@ -52,7 +52,7 @@ struct CreateEventView: View {
             VStack(alignment: .leading, spacing: AppSpacing.xs) {
                 Text("あなたの名前").font(AppTypography.section)
                 TextField("例：田中", text: $displayName)
-                    .textFieldStyle(.roundedBorder)
+                    .appInputFieldStyle()
                     .accessibilityIdentifier("display-name")
             }
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
