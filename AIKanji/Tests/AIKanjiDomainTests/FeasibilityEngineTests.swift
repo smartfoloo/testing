@@ -86,7 +86,13 @@ final class FeasibilityEngineTests: XCTestCase {
     func test04_sensitiveMustIsNeverProposed() async throws {
         let organizer = try await DemoFixture.client(as: .alice)
         let created: CreatedEvent = try await organizer
-            .rpc("fn_create_event", params: ["p_name": "scratch allergy fixture"])
+            .rpc("fn_create_event", params: CreateEventParams(
+                p_name: "scratch allergy fixture",
+                p_display_name: "Alice",
+                p_travel_reference: "office",
+                p_travel_reference_place_id: nil,
+                p_objective: "balanced"
+            ))
             .execute()
             .value
         addTeardownBlock { [eventId = created.eventId] in
@@ -238,6 +244,14 @@ final class FeasibilityEngineTests: XCTestCase {
             case eventId = "event_id"
             case inviteCode = "invite_code"
         }
+    }
+
+    private struct CreateEventParams: Encodable {
+        let p_name: String
+        let p_display_name: String
+        let p_travel_reference: String
+        let p_travel_reference_place_id: String?
+        let p_objective: String
     }
 
     private struct PendingRow: Decodable {

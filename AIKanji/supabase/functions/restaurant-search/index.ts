@@ -11,6 +11,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const GOOGLE_PLACES_API_KEY = Deno.env.get("GOOGLE_PLACES_API_KEY") ?? "";
 const GOOGLE_ROUTES_API_KEY = Deno.env.get("GOOGLE_ROUTES_API_KEY") ??
   GOOGLE_PLACES_API_KEY;
@@ -42,6 +43,7 @@ interface ParticipantRow {
 
 interface Candidate {
   place_id: string;
+  name: string | null;
   hotpepper_id: string | null;
   price_yen_estimate: number | null;
   room_type: "private" | "semi_private" | "open" | null;
@@ -133,6 +135,10 @@ async function searchRestaurants(
     .filter((p) => typeof p.id === "string")
     .map((p) => ({
       place_id: p.id as string,
+      name: typeof (p.displayName as { text?: unknown } | undefined)?.text ===
+          "string"
+        ? (p.displayName as { text: string }).text
+        : null,
       hotpepper_id: null,
       price_yen_estimate: priceLevelToYen(p.priceLevel as string | undefined),
       room_type: null,
@@ -217,53 +223,56 @@ async function travelMatrix(
 ): Promise<Map<string, Record<string, number>>> {
   const byPlace = new Map<string, Record<string, number>>();
   if (origins.length === 0 || destinations.length === 0) return byPlace;
-  const res = await fetch(
-    "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": GOOGLE_ROUTES_API_KEY,
-        "X-Goog-FieldMask": "originIndex,destinationIndex,duration,condition",
+  for (let offset = 0; offset < destinations.length; offset += 20) {
+    const chunk = destinations.slice(offset, offset + 20);
+    const res = await fetch(
+      "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": GOOGLE_ROUTES_API_KEY,
+          "X-Goog-FieldMask": "originIndex,destinationIndex,duration,condition",
+        },
+        body: JSON.stringify({
+          origins: origins.map((o) => ({
+            waypoint: {
+              location: {
+                latLng: { latitude: o.location.lat, longitude: o.location.lng },
+              },
+            },
+          })),
+          destinations: chunk.map((d) => ({
+            waypoint: {
+              location: {
+                latLng: { latitude: d.location.lat, longitude: d.location.lng },
+              },
+            },
+          })),
+          travelMode: "TRANSIT",
+        }),
       },
-      body: JSON.stringify({
-        origins: origins.map((o) => ({
-          waypoint: {
-            location: {
-              latLng: { latitude: o.location.lat, longitude: o.location.lng },
-            },
-          },
-        })),
-        destinations: destinations.map((d) => ({
-          waypoint: {
-            location: {
-              latLng: { latitude: d.location.lat, longitude: d.location.lng },
-            },
-          },
-        })),
-        travelMode: "TRANSIT",
-      }),
-    },
-  );
-  if (!res.ok) return byPlace;
-  const rows: {
-    originIndex?: number;
-    destinationIndex?: number;
-    duration?: string;
-  }[] = await res.json();
-  for (const row of Array.isArray(rows) ? rows : []) {
-    if (
-      row.originIndex == null || row.destinationIndex == null ||
-      typeof row.duration !== "string"
-    ) continue;
-    const seconds = Number(row.duration.replace(/s$/, ""));
-    if (!Number.isFinite(seconds)) continue;
-    const dest = destinations[row.destinationIndex];
-    const origin = origins[row.originIndex];
-    if (!dest || !origin) continue;
-    const entry = byPlace.get(dest.placeId) ?? {};
-    entry[origin.participantId] = Math.round(seconds / 60);
-    byPlace.set(dest.placeId, entry);
+    );
+    if (!res.ok) continue;
+    const rows: {
+      originIndex?: number;
+      destinationIndex?: number;
+      duration?: string;
+    }[] = await res.json();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (
+        row.originIndex == null || row.destinationIndex == null ||
+        typeof row.duration !== "string"
+      ) continue;
+      const seconds = Number(row.duration.replace(/s$/, ""));
+      if (!Number.isFinite(seconds)) continue;
+      const dest = chunk[row.destinationIndex];
+      const origin = origins[row.originIndex];
+      if (!dest || !origin) continue;
+      const entry = byPlace.get(dest.placeId) ?? {};
+      entry[origin.participantId] = Math.round(seconds / 60);
+      byPlace.set(dest.placeId, entry);
+    }
   }
   return byPlace;
 }
@@ -319,10 +328,6 @@ Deno.serve(async (req: Request) => {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     return json({ error: "server misconfigured" }, 500);
   }
-  if (!GOOGLE_PLACES_API_KEY) {
-    return json({ error: "GOOGLE_PLACES_API_KEY not configured" }, 500);
-  }
-
   let body: unknown;
   try {
     body = await req.json();
@@ -345,6 +350,24 @@ Deno.serve(async (req: Request) => {
     return json({ error: "event has no participants" }, 404);
   }
 
+  const caller = createClient(SUPABASE_URL, ANON_KEY, {
+    global: {
+      headers: { Authorization: req.headers.get("Authorization") ?? "" },
+    },
+  });
+  const { data: membership, error: membershipError } = await caller
+    .from("participants")
+    .select("id")
+    .eq("event_id", eventId)
+    .limit(1);
+  if (membershipError || !membership || membership.length === 0) {
+    return json({ error: "not a participant of this event" }, 403);
+  }
+
+  if (!GOOGLE_PLACES_API_KEY) {
+    return json({ error: "GOOGLE_PLACES_API_KEY not configured" }, 500);
+  }
+
   const { data: wants, error: wErr } = await supabase
     .from("participant_constraints")
     .select("normalized_type, normalized_value")
@@ -354,8 +377,12 @@ Deno.serve(async (req: Request) => {
 
   const cuisineTags = (wants ?? [])
     .filter((w) => w.normalized_type === "cuisine")
-    .map((w) => (w.normalized_value as { cuisine?: string })?.cuisine)
-    .filter((c): c is string => typeof c === "string");
+    .flatMap((w) => {
+      const value = w.normalized_value as { include?: unknown };
+      return Array.isArray(value.include)
+        ? value.include.filter((c): c is string => typeof c === "string")
+        : [];
+    });
 
   // 1. Resolve each participant's travel reference to a location.
   const origins: { participantId: string; location: LatLng }[] = [];
@@ -426,6 +453,7 @@ Deno.serve(async (req: Request) => {
   const { error: rErr } = await supabase.from("restaurants").upsert(
     candidates.map((c) => ({
       place_id: c.place_id,
+      name: c.name,
       hotpepper_id: c.hotpepper_id,
       last_fetched_at: new Date().toISOString(),
     })),
@@ -435,6 +463,7 @@ Deno.serve(async (req: Request) => {
   const { error: fErr } = await supabase.from("restaurant_features").upsert(
     candidates.map((c) => ({
       place_id: c.place_id,
+      name: c.name,
       price_yen_estimate: c.price_yen_estimate,
       room_type: c.room_type,
       cuisine_tags: c.cuisine_tags,

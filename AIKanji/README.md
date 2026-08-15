@@ -9,7 +9,7 @@ the data foundation (schema + RLS + RPC) and the create/join flow.
 AIKanji.xcodeproj          Xcode project (SPM dependency on supabase-swift)
 Config.xcconfig            SUPABASE_URL / SUPABASE_ANON_KEY (override in Secrets.xcconfig)
 AIKanji/                   App sources
-supabase/migrations/       0001_init.sql … 0005_feasibility.sql
+supabase/migrations/       0001_init.sql … 0007_security_hardening.sql
 supabase/functions/        llm-assist (parse), restaurant-search Edge Functions
 supabase/seed.sql          Deterministic demo fixture for the feasibility engine
 project.yml                XcodeGen spec, kept in sync with the checked-in project
@@ -38,6 +38,16 @@ project.yml                XcodeGen spec, kept in sync with the checked-in proje
    `https://`.
 5. Open `AIKanji.xcodeproj` and run on an iOS 17+ simulator. Xcode resolves `supabase-swift` on
    first build.
+
+### Hosted domain-test personas
+
+The hosted domain suite signs in five test personas (`alice`, `bob`, `charlie`, `david`, and
+`emma`) using the password supplied through `AIKANJI_TEST_PASSWORD`; never put that password in
+this repository. Create the five users in Supabase Authentication → Users with addresses
+`<persona>@aikanji.demo`, then update the seeded participant rows so each `auth_user_id` points
+to the corresponding Auth user UUID. The rows are identified by their stable participant IDs in
+`supabase/seed.sql`. Export `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and
+`AIKANJI_TEST_PASSWORD` before running the hosted suite.
 
 ## Security boundary
 
@@ -82,3 +92,11 @@ Requires Docker; no Xcode or macOS needed.
   received so this can be checked on the wire.
 - **PRIVATE never broadcasts:** insert a `visibility = 'PRIVATE'` row via the SQL editor; no
   broadcast arrives and the row is absent from `fn_get_sanitized_feed`.
+
+## Deliberate follow-up punch list
+
+- **B3:** scope restaurant candidates and cached features to the event rather than sharing a
+  global `restaurant_features` pool.
+- **B4:** add a needs-confirmation evidence tier for live provider data whose dietary/allergy
+  attributes are not verified.
+- Add read-through caching based on `last_fetched_at` before making provider calls.

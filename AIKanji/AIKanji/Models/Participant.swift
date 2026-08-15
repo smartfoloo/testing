@@ -13,12 +13,7 @@ enum TravelReference: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var label: String {
-        switch self {
-        case .office: return "Office"
-        case .home: return "Home"
-        case .station: return "Station"
-        case .doesntMatter: return "Doesn't matter"
-        }
+        AppCopy.travel(self)
     }
 }
 

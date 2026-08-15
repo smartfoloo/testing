@@ -13,8 +13,8 @@ final class CriticalScreensUITests: XCTestCase {
 
     func test01_welcomeOffersCreateAndJoin() {
         app.launch()
-        XCTAssertTrue(app.buttons["Create Event"].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.buttons["Join Event"].exists)
+        XCTAssertTrue(app.buttons["create-event"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["join-event"].exists)
         captureScreenshot(named: "welcome")
     }
 
@@ -33,17 +33,17 @@ final class CriticalScreensUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-AIKanjiResetSession"]
         app.launch()
-        app.buttons["Join Event"].tap()
-        let field = app.textFields["6-character code"]
+        app.buttons["join-event"].tap()
+        let field = app.textFields["invite-code"]
         XCTAssertTrue(field.waitForExistence(timeout: 20))
         field.tap()
         field.typeText(code)
-        app.textFields["Your name"].tap()
-        app.textFields["Your name"].typeText("Bob")
-        app.buttons["Join Event"].tap()
+        app.textFields["join-display-name"].tap()
+        app.textFields["join-display-name"].typeText("Bob")
+        app.buttons["join-submit"].tap()
 
         XCTAssertTrue(
-            app.buttons["Continue"].waitForExistence(timeout: 30),
+            app.buttons["continue-event"].waitForExistence(timeout: 30),
             "joining with a manually typed code lands on the event"
         )
     }
@@ -51,14 +51,14 @@ final class CriticalScreensUITests: XCTestCase {
     func test04_submittedConstraintReachesTheGroupFeed() {
         app.launch()
         _ = createEvent(named: "UI feed event", as: "Alice")
-        app.buttons["Continue"].tap()
+        app.buttons["continue-event"].tap()
 
-        XCTAssertTrue(app.buttons["Budget"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["next-MUST"].waitForExistence(timeout: 20))
         captureScreenshot(named: "constraint-entry")
-        app.buttons["Budget"].tap()
+        app.buttons["next-MUST"].tap()
         app.buttons["next-MUST"].tap()
 
-        let save = app.buttons["Save"]
+        let save = app.buttons["save-constraint"]
         XCTAssertTrue(save.waitForExistence(timeout: 30), "the parse-confirmation sheet is presented")
         save.tap()
 
@@ -66,8 +66,8 @@ final class CriticalScreensUITests: XCTestCase {
             waitUntil(timeout: 20) { !save.exists },
             "the parse-confirmation sheet dismisses after saving"
         )
-        app.buttons["Group"].tap()
-        let empty = app.staticTexts["No shared requirements yet."]
+        app.buttons["tab-group"].tap()
+        let empty = app.staticTexts["まだ共有された希望はありません"]
         XCTAssertTrue(
             waitUntil(timeout: 30) { !empty.exists && app.cells.count > 0 },
             "the submitted requirement shows up in the group feed"
@@ -83,9 +83,9 @@ final class CriticalScreensUITests: XCTestCase {
         as displayName: String,
         captureForm: Bool = false
     ) -> String {
-        app.buttons["Create Event"].tap()
+        app.buttons["create-event"].tap()
 
-        let eventName = app.textFields["Event name"]
+        let eventName = app.textFields["event-name"]
         XCTAssertTrue(eventName.waitForExistence(timeout: 20))
         if captureForm {
             captureScreenshot(named: "create-event-form")
@@ -93,11 +93,11 @@ final class CriticalScreensUITests: XCTestCase {
         eventName.tap()
         eventName.typeText(name)
 
-        let yourName = app.textFields["Your name"]
+        let yourName = app.textFields["display-name"]
         yourName.tap()
         yourName.typeText(displayName)
 
-        app.buttons["Create Event"].firstMatch.tap()
+        app.buttons["create-submit"].tap()
 
         let code = app.staticTexts["inviteCode"]
         if !code.waitForExistence(timeout: 30) {

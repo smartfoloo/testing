@@ -73,7 +73,7 @@ normalized_value shape by type:
   dietary      {"tags": string[]}          e.g. ["vegetarian","halal"]
   allergy      {"allergens": string[]}
   smoking      {"preference": "non_smoking"|"smoking_ok"}
-  room         {"type": "private"|"semi_private"|"open"}
+  room         {"room": "private"|"semi_private"|"open"}
   travel_time  {"max_minutes": number}
   accessibility{"needs": string[]}         e.g. ["step_free","wheelchair"]
   atmosphere   {"tags": string[]}          e.g. ["quiet","lively"]
