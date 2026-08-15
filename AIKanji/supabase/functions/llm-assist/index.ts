@@ -1,8 +1,15 @@
-// llm-assist — normalizes a participant's free-text MUST/WANT into a typed constraint.
+// llm-assist — two modes:
+//   parse   normalizes a participant's free-text MUST/WANT into a typed constraint.
+//   explain writes a grounded explanation for one recommended restaurant.
 //
 // The LLM key never leaves the server: set it with `supabase secrets set LLM_API_KEY=...`.
 // The client only ever calls this function.
 
+import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
+
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";
 const LLM_BASE_URL = Deno.env.get("LLM_BASE_URL") ??
   "https://api.openai.com/v1";
@@ -141,11 +148,11 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-async function callModel(
-  rawText: string,
-  kind: string,
-  language: string,
-): Promise<unknown> {
+async function chat(
+  systemPrompt: string,
+  userPrompt: string,
+  jsonMode = false,
+): Promise<string> {
   const response = await fetch(`${LLM_BASE_URL}/chat/completions`, {
     method: "POST",
     headers: {
@@ -155,23 +162,226 @@ async function callModel(
     body: JSON.stringify({
       model: LLM_MODEL,
       temperature: 0,
-      response_format: { type: "json_object" },
+      ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: `kind: ${kind}\nlanguage: ${language}\ntext: ${rawText}`,
-        },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
       ],
     }),
   });
 
   if (!response.ok) throw new Error(`LLM HTTP ${response.status}`);
-
   const body = await response.json();
   const content = body?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new Error("LLM returned no content");
-  return JSON.parse(content);
+  if (typeof content !== "string" || content.trim() === "") {
+    throw new Error("LLM returned no content");
+  }
+  return content.trim();
+}
+
+async function callModel(
+  rawText: string,
+  kind: string,
+  language: string,
+): Promise<unknown> {
+  return JSON.parse(
+    await chat(
+      SYSTEM_PROMPT,
+      `kind: ${kind}\nlanguage: ${language}\ntext: ${rawText}`,
+      true,
+    ),
+  );
+}
+
+// --- explain mode ----------------------------------------------------------
+
+const EXPLAIN_SYSTEM_PROMPT =
+  `You write one short recommendation blurb for a Tokyo coworker group choosing a restaurant.
+
+You are given a JSON object of verified facts about one candidate. Use only those facts:
+never invent a name, dish, price, review, station, cuisine or amenity that is not in the JSON.
+An empty tag array means "unverified", never "confirmed". Do not restate raw score numbers.
+Reply with 1-2 plain sentences, at most 45 words, no markdown, no quotes.`;
+
+interface Grounding {
+  label: string | null;
+  fairness_score: number | null;
+  satisfaction_score: number | null;
+  quality_score: number | null;
+  price_yen_estimate: number | null;
+  room_type: string | null;
+  cuisine_tags: string[];
+  dietary_tags: string[];
+  allergy_safe_tags: string[];
+  atmosphere_tags: string[];
+  travel_minutes: number[];
+  group_wants: { normalized_type: string; normalized_value: unknown }[];
+}
+
+interface ScoreRow {
+  id: string;
+  label: string | null;
+  fairness_score: number | null;
+  satisfaction_score: number | null;
+  quality_score: number | null;
+}
+
+interface FeatureRow {
+  price_yen_estimate: number | null;
+  room_type: string | null;
+  cuisine_tags: string[] | null;
+  dietary_tags: string[] | null;
+  allergy_safe_tags: string[] | null;
+  atmosphere_tags: string[] | null;
+  travel_minutes_by_participant: Record<string, unknown> | null;
+}
+
+interface WantRow {
+  normalized_type: string;
+  normalized_value: unknown;
+}
+
+const LABEL_PHRASES: Record<string, string> = {
+  fairest: "the most balanced choice for the group",
+  best_access: "the easiest to reach for everyone",
+  best_value: "the best value for the budget",
+  best_experience: "the most memorable setting",
+  crowd_pleaser: "the option matching the most preferences",
+};
+
+/// Deterministic blurb from the same grounding data, used when the model is
+/// unavailable so a card never renders without an explanation.
+function fallbackExplanation(g: Grounding): string {
+  const parts: string[] = [];
+  if (g.price_yen_estimate !== null) {
+    parts.push(`around ¥${g.price_yen_estimate} per person`);
+  }
+  if (g.room_type) parts.push(`${g.room_type.replace("_", " ")} seating`);
+  if (g.atmosphere_tags.length > 0) {
+    parts.push(`${g.atmosphere_tags.join(", ")} atmosphere`);
+  }
+  if (g.travel_minutes.length > 0) {
+    parts.push(`${Math.max(...g.travel_minutes)} min at worst to get there`);
+  }
+
+  const lead = g.label && LABEL_PHRASES[g.label]
+    ? `Picked as ${LABEL_PHRASES[g.label]}`
+    : "Meets every stated requirement";
+  return parts.length > 0 ? `${lead}: ${parts.join(", ")}.` : `${lead}.`;
+}
+
+/// Grounding is fetched server-side with the service-role key. The request body
+/// contributes only identifiers — a client-supplied evidence blob could make the
+/// model assert anything, which would defeat the point of a grounded explanation.
+async function loadGrounding(
+  admin: SupabaseClient,
+  runId: string,
+  placeId: string,
+): Promise<{ grounding: Grounding; scoreId: string } | null> {
+  const { data: score } = await admin
+    .from("recommendation_scores")
+    .select("id, label, fairness_score, satisfaction_score, quality_score")
+    .eq("run_id", runId)
+    .eq("restaurant_place_id", placeId)
+    .returns<ScoreRow[]>()
+    .maybeSingle();
+  if (!score) return null;
+
+  const { data: run } = await admin
+    .from("recommendation_runs")
+    .select("event_id")
+    .eq("id", runId)
+    .returns<{ event_id: string }[]>()
+    .maybeSingle();
+  if (!run) return null;
+
+  const { data: features } = await admin
+    .from("restaurant_features")
+    .select(
+      "price_yen_estimate, room_type, cuisine_tags, dietary_tags, allergy_safe_tags, atmosphere_tags, travel_minutes_by_participant",
+    )
+    .eq("place_id", placeId)
+    .returns<FeatureRow[]>()
+    .maybeSingle();
+  if (!features) return null;
+
+  // WANT rows only: a MUST is already guaranteed by feasibility, and its raw text
+  // can carry the private detail (allergy, diet) that must not reach the model.
+  const { data: wants } = await admin
+    .from("participant_constraints")
+    .select("normalized_type, normalized_value")
+    .eq("event_id", run.event_id)
+    .eq("kind", "WANT")
+    .returns<WantRow[]>();
+
+  const travel = features.travel_minutes_by_participant ?? {};
+  return {
+    scoreId: score.id,
+    grounding: {
+      label: score.label,
+      fairness_score: score.fairness_score,
+      satisfaction_score: score.satisfaction_score,
+      quality_score: score.quality_score,
+      price_yen_estimate: features.price_yen_estimate,
+      room_type: features.room_type,
+      cuisine_tags: features.cuisine_tags ?? [],
+      dietary_tags: features.dietary_tags ?? [],
+      allergy_safe_tags: features.allergy_safe_tags ?? [],
+      atmosphere_tags: features.atmosphere_tags ?? [],
+      travel_minutes: Object.values(travel).map(Number).filter(
+        Number.isFinite,
+      ),
+      group_wants: (wants ?? []).filter((want) =>
+        want.normalized_type === "cuisine" ||
+        want.normalized_type === "atmosphere"
+      ),
+    },
+  };
+}
+
+async function handleExplain(
+  req: Request,
+  runId: string,
+  placeId: string,
+): Promise<Response> {
+  const authorization = req.headers.get("Authorization") ?? "";
+  if (authorization === "") {
+    return json({ error: "missing authorization" }, 401);
+  }
+
+  // The caller must be able to see the run under RLS, i.e. be a participant of its event.
+  const caller = createClient(SUPABASE_URL, ANON_KEY, {
+    global: { headers: { Authorization: authorization } },
+  });
+  const { data: visibleRun } = await caller
+    .from("recommendation_runs")
+    .select("id")
+    .eq("id", runId)
+    .maybeSingle();
+  if (!visibleRun) return json({ error: "run not found" }, 403);
+
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+  const loaded = await loadGrounding(admin, runId, placeId);
+  if (!loaded) return json({ error: "no score row for this run" }, 404);
+
+  let explanation = fallbackExplanation(loaded.grounding);
+  if (LLM_API_KEY !== "") {
+    try {
+      explanation = await chat(
+        EXPLAIN_SYSTEM_PROMPT,
+        JSON.stringify(loaded.grounding),
+      );
+    } catch (error) {
+      console.error("llm-assist explain failed", error);
+    }
+  }
+
+  await admin
+    .from("recommendation_scores")
+    .update({ explanation })
+    .eq("id", loaded.scoreId);
+
+  return json({ explanation });
 }
 
 Deno.serve(async (req) => {
@@ -187,7 +397,19 @@ Deno.serve(async (req) => {
     return json({ error: "invalid JSON body" }, 400);
   }
 
-  const { mode, raw_text, kind, language } = request;
+  const { mode, raw_text, kind, language, run_id, restaurant_place_id } =
+    request;
+
+  if (mode === "explain") {
+    if (typeof run_id !== "string" || typeof restaurant_place_id !== "string") {
+      return json(
+        { error: "run_id and restaurant_place_id are required" },
+        400,
+      );
+    }
+    return await handleExplain(req, run_id, restaurant_place_id);
+  }
+
   if (mode !== "parse") return json({ error: "unsupported mode" }, 400);
   if (typeof raw_text !== "string") {
     return json({ error: "raw_text must be a string" }, 400);

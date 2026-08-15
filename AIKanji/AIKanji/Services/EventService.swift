@@ -38,6 +38,21 @@ struct EventService {
             .value
     }
 
+    private struct RoleRow: Decodable {
+        let role: ParticipantRole
+    }
+
+    func role(participantId: UUID) async throws -> ParticipantRole {
+        let row: RoleRow = try await client
+            .from("participants")
+            .select("role")
+            .eq("id", value: participantId)
+            .single()
+            .execute()
+            .value
+        return row.role
+    }
+
     func joinEvent(
         inviteCode: String,
         displayName: String,

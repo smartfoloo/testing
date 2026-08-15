@@ -23,6 +23,14 @@
 		A10001140000000000000001 /* ConstraintEntryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002150000000000000001 /* ConstraintEntryView.swift */; };
 		A10001150000000000000001 /* GroupActivityFeedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002160000000000000001 /* GroupActivityFeedView.swift */; };
 		A10001160000000000000001 /* EventHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002170000000000000001 /* EventHomeView.swift */; };
+		A10001170000000000000001 /* Negotiation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002180000000000000001 /* Negotiation.swift */; };
+		A10001180000000000000001 /* Recommendation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002190000000000000001 /* Recommendation.swift */; };
+		A10001190000000000000001 /* NegotiationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002200000000000000001 /* NegotiationService.swift */; };
+		A10001200000000000000001 /* RecommendationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002210000000000000001 /* RecommendationService.swift */; };
+		A10001210000000000000001 /* NegotiationConsentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002220000000000000001 /* NegotiationConsentView.swift */; };
+		A10001220000000000000001 /* OrganizerDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002230000000000000001 /* OrganizerDashboardView.swift */; };
+		A10001230000000000000001 /* RecommendationListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002240000000000000001 /* RecommendationListView.swift */; };
+		A10001240000000000000001 /* RecommendationCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002250000000000000001 /* RecommendationCardView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -44,6 +52,14 @@
 		A10002150000000000000001 /* ConstraintEntryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConstraintEntryView.swift; sourceTree = "<group>"; };
 		A10002160000000000000001 /* GroupActivityFeedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupActivityFeedView.swift; sourceTree = "<group>"; };
 		A10002170000000000000001 /* EventHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventHomeView.swift; sourceTree = "<group>"; };
+		A10002180000000000000001 /* Negotiation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Negotiation.swift; sourceTree = "<group>"; };
+		A10002190000000000000001 /* Recommendation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recommendation.swift; sourceTree = "<group>"; };
+		A10002200000000000000001 /* NegotiationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NegotiationService.swift; sourceTree = "<group>"; };
+		A10002210000000000000001 /* RecommendationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationService.swift; sourceTree = "<group>"; };
+		A10002220000000000000001 /* NegotiationConsentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NegotiationConsentView.swift; sourceTree = "<group>"; };
+		A10002230000000000000001 /* OrganizerDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrganizerDashboardView.swift; sourceTree = "<group>"; };
+		A10002240000000000000001 /* RecommendationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationListView.swift; sourceTree = "<group>"; };
+		A10002250000000000000001 /* RecommendationCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationCardView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -103,6 +119,9 @@
 				A10002003000000000000001 /* Event.swift */,
 				A10002004000000000000001 /* Participant.swift */,
 				A10002005000000000000001 /* JSONValue.swift */,
+		A10002130000000000000001 /* Constraint.swift */,
+		A10002180000000000000001 /* Negotiation.swift */,
+		A10002190000000000000001 /* Recommendation.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -111,6 +130,11 @@
 			isa = PBXGroup;
 			children = (
 				A10003006000000000000001 /* Onboarding */,
+		A10003080000000000000001 /* Constraints */,
+		A10003090000000000000001 /* Activity */,
+		A10003100000000000000001 /* Negotiation */,
+		A10003110000000000000001 /* Organizer */,
+		A10003120000000000000001 /* Recommendations */,
 			);
 			path = Features;
 			sourceTree = "<group>";
@@ -121,6 +145,7 @@
 				A10002006000000000000001 /* WelcomeView.swift */,
 				A10002007000000000000001 /* CreateEventView.swift */,
 				A10002008000000000000001 /* JoinEventView.swift */,
+		A10002170000000000000001 /* EventHomeView.swift */,
 			);
 			path = Onboarding;
 			sourceTree = "<group>";
@@ -129,6 +154,9 @@
 			isa = PBXGroup;
 			children = (
 				A10002009000000000000001 /* EventService.swift */,
+		A10002140000000000000001 /* ConstraintService.swift */,
+		A10002200000000000000001 /* NegotiationService.swift */,
+		A10002210000000000000001 /* RecommendationService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -147,6 +175,31 @@
 				A10002160000000000000001 /* GroupActivityFeedView.swift */,
 			);
 			path = Activity;
+			sourceTree = "<group>";
+		};
+		A10003100000000000000001 /* Negotiation */ = {
+			isa = PBXGroup;
+			children = (
+				A10002220000000000000001 /* NegotiationConsentView.swift */,
+			);
+			path = Negotiation;
+			sourceTree = "<group>";
+		};
+		A10003110000000000000001 /* Organizer */ = {
+			isa = PBXGroup;
+			children = (
+				A10002230000000000000001 /* OrganizerDashboardView.swift */,
+			);
+			path = Organizer;
+			sourceTree = "<group>";
+		};
+		A10003120000000000000001 /* Recommendations */ = {
+			isa = PBXGroup;
+			children = (
+				A10002240000000000000001 /* RecommendationListView.swift */,
+				A10002250000000000000001 /* RecommendationCardView.swift */,
+			);
+			path = Recommendations;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -233,6 +286,19 @@
 				A10001007000000000000001 /* CreateEventView.swift in Sources */,
 				A10001008000000000000001 /* JoinEventView.swift in Sources */,
 				A10001009000000000000001 /* EventService.swift in Sources */,
+				A10001120000000000000001 /* Constraint.swift in Sources */,
+				A10001130000000000000001 /* ConstraintService.swift in Sources */,
+				A10001140000000000000001 /* ConstraintEntryView.swift in Sources */,
+				A10001150000000000000001 /* GroupActivityFeedView.swift in Sources */,
+				A10001160000000000000001 /* EventHomeView.swift in Sources */,
+				A10001170000000000000001 /* Negotiation.swift in Sources */,
+				A10001180000000000000001 /* Recommendation.swift in Sources */,
+				A10001190000000000000001 /* NegotiationService.swift in Sources */,
+				A10001200000000000000001 /* RecommendationService.swift in Sources */,
+				A10001210000000000000001 /* NegotiationConsentView.swift in Sources */,
+				A10001220000000000000001 /* OrganizerDashboardView.swift in Sources */,
+				A10001230000000000000001 /* RecommendationListView.swift in Sources */,
+				A10001240000000000000001 /* RecommendationCardView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
