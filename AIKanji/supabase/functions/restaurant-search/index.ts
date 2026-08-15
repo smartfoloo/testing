@@ -135,7 +135,8 @@ async function searchRestaurants(
     .filter((p) => typeof p.id === "string")
     .map((p) => ({
       place_id: p.id as string,
-      name: typeof (p.displayName as { text?: unknown } | undefined)?.text === "string"
+      name: typeof (p.displayName as { text?: unknown } | undefined)?.text ===
+          "string"
         ? (p.displayName as { text: string }).text
         : null,
       hotpepper_id: null,
@@ -350,7 +351,9 @@ Deno.serve(async (req: Request) => {
   }
 
   const caller = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: req.headers.get("Authorization") ?? "" } },
+    global: {
+      headers: { Authorization: req.headers.get("Authorization") ?? "" },
+    },
   });
   const { data: membership, error: membershipError } = await caller
     .from("participants")

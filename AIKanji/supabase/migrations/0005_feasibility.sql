@@ -187,6 +187,7 @@ declare
   v_candidate record;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
+     and auth.uid() is not null
      and not exists (
        select 1 from public.participants
        where event_id = p_event_id and auth_user_id = auth.uid()
@@ -235,6 +236,7 @@ declare
   v_relaxed_count int;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
+     and auth.uid() is not null
      and not exists (
        select 1 from public.participants
        where event_id = p_event_id and auth_user_id = auth.uid()
@@ -283,6 +285,7 @@ declare
   v_unlocked int;
 begin
   if coalesce(auth.role(), '') <> 'service_role'
+     and auth.uid() is not null
      and not exists (
        select 1 from public.participants
        where event_id = p_event_id and auth_user_id = auth.uid()

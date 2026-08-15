@@ -123,7 +123,8 @@ create or replace function public.fn_recompute_feasibility(p_event_id uuid)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare v_run_id uuid; v_feasible_count int := 0; v_candidate record;
 begin
-  if coalesce(auth.role(), '') <> 'service_role' and not exists (
+  if coalesce(auth.role(), '') <> 'service_role'
+    and auth.uid() is not null and not exists (
     select 1 from public.participants
     where event_id = p_event_id and auth_user_id = auth.uid())
   then raise exception 'not a participant of this event'; end if;
@@ -150,7 +151,8 @@ create or replace function public.fn_count_unlocked_if_relaxed(
 ) returns int language plpgsql security definer set search_path = '' as $$
 declare v_constraint record; v_relaxed jsonb; v_baseline int; v_relaxed_count int;
 begin
-  if coalesce(auth.role(), '') <> 'service_role' and not exists (
+  if coalesce(auth.role(), '') <> 'service_role'
+    and auth.uid() is not null and not exists (
     select 1 from public.participants
     where event_id = p_event_id and auth_user_id = auth.uid())
   then raise exception 'not a participant of this event'; end if;
@@ -179,7 +181,8 @@ returns uuid language plpgsql security definer set search_path = '' as $$
 declare v_negotiation_id uuid; v_candidate record; v_best_constraint record;
   v_best_unlocked int := -1; v_unlocked int;
 begin
-  if coalesce(auth.role(), '') <> 'service_role' and not exists (
+  if coalesce(auth.role(), '') <> 'service_role'
+    and auth.uid() is not null and not exists (
     select 1 from public.participants
     where event_id = p_event_id and auth_user_id = auth.uid())
   then raise exception 'not a participant of this event'; end if;
