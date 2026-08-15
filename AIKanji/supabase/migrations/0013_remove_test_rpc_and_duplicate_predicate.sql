@@ -1,3 +1,5 @@
+drop function if exists public.fn_create_event(text);
+
 create or replace function public.fn_candidate_is_feasible(
   p_event_id uuid, p_place_id text, p_override_constraint_id uuid default null,
   p_override_value jsonb default null

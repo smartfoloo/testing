@@ -6,6 +6,7 @@ final class RecommendationListViewModel: ObservableObject {
     @Published var scores: [RecommendationScore] = []
     @Published var features: [String: RestaurantFeature] = [:]
     @Published var explanations: [String: String] = [:]
+    @Published var explainingPlaceIds: Set<String> = []
     @Published var isLoading = false
     @Published var errorMessage: String?
 
@@ -44,6 +45,8 @@ final class RecommendationListViewModel: ObservableObject {
     /// features are already rendered, and a neutral fallback fills the text.
     func explain(score: RecommendationScore, runId: UUID) async {
         guard explanations[score.restaurantPlaceId] == nil else { return }
+        explainingPlaceIds.insert(score.restaurantPlaceId)
+        defer { explainingPlaceIds.remove(score.restaurantPlaceId) }
         do {
             let explanation = try await service.explanation(
                 runId: runId,
@@ -74,7 +77,8 @@ struct RecommendationListView: View {
                     RecommendationCardView(
                         score: score,
                         feature: viewModel.features[score.restaurantPlaceId],
-                        explanation: viewModel.explanations[score.restaurantPlaceId]
+                        explanation: viewModel.explanations[score.restaurantPlaceId],
+                        isExplaining: viewModel.explainingPlaceIds.contains(score.restaurantPlaceId)
                     )
                     .task { await viewModel.explain(score: score, runId: runId) }
                 }

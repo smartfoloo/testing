@@ -80,6 +80,14 @@ final class ProviderDegradationTests: XCTestCase {
         }
     }
 
+    private struct CreateEventParams: Encodable {
+        let p_name: String
+        let p_display_name: String
+        let p_travel_reference: String
+        let p_travel_reference_place_id: String?
+        let p_objective: String
+    }
+
     private struct ConstraintInsert: Encodable {
         let event_id: UUID
         let participant_id: UUID
@@ -201,7 +209,13 @@ final class ProviderDegradationTests: XCTestCase {
     func test04_parseInsertAndRecomputeContract() async throws {
         let client = try await DemoFixture.client(as: .alice)
         let created: ScratchEvent = try await client
-            .rpc("fn_create_event", params: ["p_name": "parse contract scratch"])
+            .rpc("fn_create_event", params: CreateEventParams(
+                p_name: "parse contract scratch",
+                p_display_name: "Alice",
+                p_travel_reference: "office",
+                p_travel_reference_place_id: nil,
+                p_objective: "balanced"
+            ))
             .execute()
             .value
         addTeardownBlock {

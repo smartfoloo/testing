@@ -4,6 +4,7 @@ struct RecommendationCardView: View {
     let score: RecommendationScore
     let feature: RestaurantFeature?
     let explanation: String?
+    let isExplaining: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -27,6 +28,11 @@ struct RecommendationCardView: View {
 
             if let explanation {
                 Text(explanation).font(.body)
+            } else if isExplaining {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Writing a summary…").font(.footnote).foregroundStyle(.secondary)
+                }
             } else {
                 Text(RecommendationListViewModel.fallbackExplanation).font(.body)
             }
