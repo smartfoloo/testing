@@ -1,0 +1,348 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10001001000000000000001 /* AIKanjiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002001000000000000001 /* AIKanjiApp.swift */; };
+		A10001002000000000000001 /* SupabaseClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002002000000000000001 /* SupabaseClient.swift */; };
+		A10001003000000000000001 /* Event.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002003000000000000001 /* Event.swift */; };
+		A10001004000000000000001 /* Participant.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002004000000000000001 /* Participant.swift */; };
+		A10001005000000000000001 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002005000000000000001 /* JSONValue.swift */; };
+		A10001006000000000000001 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002006000000000000001 /* WelcomeView.swift */; };
+		A10001007000000000000001 /* CreateEventView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002007000000000000001 /* CreateEventView.swift */; };
+		A10001008000000000000001 /* JoinEventView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002008000000000000001 /* JoinEventView.swift */; };
+		A10001009000000000000001 /* EventService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002009000000000000001 /* EventService.swift */; };
+		A10001010000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10002010000000000000001 /* Assets.xcassets */; };
+		A10001011000000000000001 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = A10007001000000000000001 /* Supabase */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A10002000000000000000001 /* AIKanji.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AIKanji.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10002001000000000000001 /* AIKanjiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIKanjiApp.swift; sourceTree = "<group>"; };
+		A10002002000000000000001 /* SupabaseClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseClient.swift; sourceTree = "<group>"; };
+		A10002003000000000000001 /* Event.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Event.swift; sourceTree = "<group>"; };
+		A10002004000000000000001 /* Participant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Participant.swift; sourceTree = "<group>"; };
+		A10002005000000000000001 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
+		A10002006000000000000001 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
+		A10002007000000000000001 /* CreateEventView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateEventView.swift; sourceTree = "<group>"; };
+		A10002008000000000000001 /* JoinEventView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinEventView.swift; sourceTree = "<group>"; };
+		A10002009000000000000001 /* EventService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventService.swift; sourceTree = "<group>"; };
+		A10002010000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A10002011000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10002012000000000000001 /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10004000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10001011000000000000001 /* Supabase in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10003000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A10002012000000000000001 /* Config.xcconfig */,
+				A10003001000000000000001 /* AIKanji */,
+				A10003002000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10003001000000000000001 /* AIKanji */ = {
+			isa = PBXGroup;
+			children = (
+				A10003003000000000000001 /* App */,
+				A10003004000000000000001 /* Models */,
+				A10003005000000000000001 /* Features */,
+				A10003007000000000000001 /* Services */,
+				A10002010000000000000001 /* Assets.xcassets */,
+				A10002011000000000000001 /* Info.plist */,
+			);
+			path = AIKanji;
+			sourceTree = "<group>";
+		};
+		A10003002000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10002000000000000000001 /* AIKanji.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A10003003000000000000001 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A10002001000000000000001 /* AIKanjiApp.swift */,
+				A10002002000000000000001 /* SupabaseClient.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		A10003004000000000000001 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				A10002003000000000000001 /* Event.swift */,
+				A10002004000000000000001 /* Participant.swift */,
+				A10002005000000000000001 /* JSONValue.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		A10003005000000000000001 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				A10003006000000000000001 /* Onboarding */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		A10003006000000000000001 /* Onboarding */ = {
+			isa = PBXGroup;
+			children = (
+				A10002006000000000000001 /* WelcomeView.swift */,
+				A10002007000000000000001 /* CreateEventView.swift */,
+				A10002008000000000000001 /* JoinEventView.swift */,
+			);
+			path = Onboarding;
+			sourceTree = "<group>";
+		};
+		A10003007000000000000001 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				A10002009000000000000001 /* EventService.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10005000000000000000001 /* AIKanji */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10006003000000000000001 /* Build configuration list for PBXNativeTarget "AIKanji" */;
+			buildPhases = (
+				A10005001000000000000001 /* Sources */,
+				A10004000000000000000001 /* Frameworks */,
+				A10005002000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AIKanji;
+			packageProductDependencies = (
+				A10007001000000000000001 /* Supabase */,
+			);
+			productName = AIKanji;
+			productReference = A10002000000000000000001 /* AIKanji.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					A10005000000000000000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = A10006000000000000000001 /* Build configuration list for PBXProject "AIKanji" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10003000000000000000001;
+			packageReferences = (
+				A10007000000000000000001 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
+			productRefGroup = A10003002000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10005000000000000000001 /* AIKanji */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10005002000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10001010000000000000001 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10005001000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10001001000000000000001 /* AIKanjiApp.swift in Sources */,
+				A10001002000000000000001 /* SupabaseClient.swift in Sources */,
+				A10001003000000000000001 /* Event.swift in Sources */,
+				A10001004000000000000001 /* Participant.swift in Sources */,
+				A10001005000000000000001 /* JSONValue.swift in Sources */,
+				A10001006000000000000001 /* WelcomeView.swift in Sources */,
+				A10001007000000000000001 /* CreateEventView.swift in Sources */,
+				A10001008000000000000001 /* JoinEventView.swift in Sources */,
+				A10001009000000000000001 /* EventService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10006001000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A10002012000000000000001 /* Config.xcconfig */;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A10006002000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = A10002012000000000000001 /* Config.xcconfig */;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A10006004000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = "";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AIKanji/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aikanji.AIKanji;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A10006005000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = "";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AIKanji/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.aikanji.AIKanji;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10006000000000000000001 /* Build configuration list for PBXProject "AIKanji" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10006001000000000000001 /* Debug */,
+				A10006002000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10006003000000000000001 /* Build configuration list for PBXNativeTarget "AIKanji" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10006004000000000000001 /* Debug */,
+				A10006005000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A10007000000000000000001 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10007001000000000000001 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10007000000000000000001 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A10000000000000000000001 /* Project object */;
+}

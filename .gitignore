@@ -1,4 +1,6 @@
+.DS_Store
 build/
 DerivedData/
+*.xcuserstate
 xcuserdata/
-.DS_Store
+AIKanji/Secrets.xcconfig
