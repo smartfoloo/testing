@@ -38,16 +38,26 @@ enum Supa {
 
     static func currentEmail() async -> String? {
         guard let session = try? await client.auth.session else { return nil }
-        return session.user.email
+        return authenticatedEmail(from: session)
     }
 
     static func signIn(email: String, password: String) async throws -> String? {
         let session = try await client.auth.signIn(email: email, password: password)
-        return session.user.email
+        return authenticatedEmail(from: session)
     }
 
     static func signOutToAnonymous() async throws {
         try await client.auth.signOut()
         _ = try await client.auth.signInAnonymously()
+    }
+
+    private static func authenticatedEmail(from session: Session) -> String? {
+        guard !session.user.isAnonymous,
+              let email = session.user.email?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !email.isEmpty
+        else {
+            return nil
+        }
+        return email
     }
 }
