@@ -9,7 +9,7 @@ struct JoinEventView: View {
     @State private var travelReference: TravelReference = .office
     @State private var isScanning = false
     @State private var isSubmitting = false
-    @State private var participantId: UUID?
+    @State private var joined: (eventId: UUID, participantId: UUID)?
     @State private var errorMessage: String?
 
     private var canSubmit: Bool {
@@ -44,8 +44,16 @@ struct JoinEventView: View {
                 .disabled(!canSubmit)
             }
 
-            if let participantId {
-                Section { Text("Joined as \(participantId.uuidString)") }
+            if let joined {
+                Section {
+                    NavigationLink("Continue") {
+                        EventHomeView(
+                            eventId: joined.eventId,
+                            participantId: joined.participantId,
+                            inviteCode: inviteCode
+                        )
+                    }
+                }
             }
             if let errorMessage {
                 Section { Text(errorMessage).foregroundStyle(.red) }
@@ -65,11 +73,13 @@ struct JoinEventView: View {
         isSubmitting = true
         errorMessage = nil
         do {
-            participantId = try await service.joinEvent(
+            let participantId = try await service.joinEvent(
                 inviteCode: inviteCode.trimmed,
                 displayName: displayName.trimmed,
                 travelReference: travelReference
             )
+            let event = try await service.event(inviteCode: inviteCode.trimmed)
+            joined = (event.id, participantId)
         } catch {
             errorMessage = error.localizedDescription
         }
