@@ -62,11 +62,24 @@ struct JoinEventView: View {
         .navigationTitle("Join Event")
         .sheet(isPresented: $isScanning) {
             QRScannerView { scanned in
-                inviteCode = String(scanned.lowercased().prefix(6))
+                inviteCode = Self.extractInviteCode(from: scanned)
                 isScanning = false
             }
             .ignoresSafeArea()
         }
+    }
+
+    /// Accepts either a bare invite code or a URL carrying one (`?code=` query item
+    /// or last path component), so QR payloads can evolve without breaking the scanner.
+    static func extractInviteCode(from payload: String) -> String {
+        let trimmed = payload.trimmed
+        if let components = URLComponents(string: trimmed), components.scheme != nil {
+            let candidate = components.queryItems?.first(where: { $0.name == "code" })?.value
+                ?? components.path.split(separator: "/").last.map(String.init)
+                ?? trimmed
+            return String(candidate.lowercased().prefix(6))
+        }
+        return String(trimmed.lowercased().prefix(6))
     }
 
     private func join() async {
