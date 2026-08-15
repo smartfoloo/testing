@@ -18,6 +18,11 @@
 		A10001009000000000000001 /* EventService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002009000000000000001 /* EventService.swift */; };
 		A10001010000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10002010000000000000001 /* Assets.xcassets */; };
 		A10001011000000000000001 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = A10007001000000000000001 /* Supabase */; };
+		A10001120000000000000001 /* Constraint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002130000000000000001 /* Constraint.swift */; };
+		A10001130000000000000001 /* ConstraintService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002140000000000000001 /* ConstraintService.swift */; };
+		A10001140000000000000001 /* ConstraintEntryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002150000000000000001 /* ConstraintEntryView.swift */; };
+		A10001150000000000000001 /* GroupActivityFeedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002160000000000000001 /* GroupActivityFeedView.swift */; };
+		A10001160000000000000001 /* EventHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002170000000000000001 /* EventHomeView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +39,11 @@
 		A10002010000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10002011000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10002012000000000000001 /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
+		A10002130000000000000001 /* Constraint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constraint.swift; sourceTree = "<group>"; };
+		A10002140000000000000001 /* ConstraintService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConstraintService.swift; sourceTree = "<group>"; };
+		A10002150000000000000001 /* ConstraintEntryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConstraintEntryView.swift; sourceTree = "<group>"; };
+		A10002160000000000000001 /* GroupActivityFeedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupActivityFeedView.swift; sourceTree = "<group>"; };
+		A10002170000000000000001 /* EventHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventHomeView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -121,6 +131,22 @@
 				A10002009000000000000001 /* EventService.swift */,
 			);
 			path = Services;
+			sourceTree = "<group>";
+		};
+		A10003080000000000000001 /* Constraints */ = {
+			isa = PBXGroup;
+			children = (
+				A10002150000000000000001 /* ConstraintEntryView.swift */,
+			);
+			path = Constraints;
+			sourceTree = "<group>";
+		};
+		A10003090000000000000001 /* Activity */ = {
+			isa = PBXGroup;
+			children = (
+				A10002160000000000000001 /* GroupActivityFeedView.swift */,
+			);
+			path = Activity;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */

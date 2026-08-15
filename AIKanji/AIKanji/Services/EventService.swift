@@ -27,6 +27,17 @@ struct EventService {
             .value
     }
 
+    /// Readable only once the caller is a participant of the event (RLS on `events`).
+    func event(inviteCode: String) async throws -> Event {
+        try await client
+            .from("events")
+            .select()
+            .eq("invite_code", value: inviteCode)
+            .single()
+            .execute()
+            .value
+    }
+
     func joinEvent(
         inviteCode: String,
         displayName: String,

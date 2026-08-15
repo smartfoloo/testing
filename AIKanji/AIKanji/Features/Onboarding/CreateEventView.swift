@@ -9,6 +9,7 @@ struct CreateEventView: View {
     @State private var objective: EventObjective = .balanced
     @State private var travelReference: TravelReference = .office
     @State private var inviteCode: String?
+    @State private var created: (eventId: UUID, participantId: UUID)?
     @State private var isSubmitting = false
     @State private var errorMessage: String?
 
@@ -26,6 +27,15 @@ struct CreateEventView: View {
                             .scaledToFit()
                             .frame(maxWidth: 220)
                             .frame(maxWidth: .infinity)
+                    }
+                    if let created {
+                        NavigationLink("Continue") {
+                            EventHomeView(
+                                eventId: created.eventId,
+                                participantId: created.participantId,
+                                inviteCode: inviteCode
+                            )
+                        }
                     }
                 }
             } else {
@@ -60,13 +70,14 @@ struct CreateEventView: View {
         isSubmitting = true
         errorMessage = nil
         do {
-            let created = try await service.createEvent(name: name.trimmed, objective: objective)
-            _ = try await service.joinEvent(
-                inviteCode: created.inviteCode,
+            let event = try await service.createEvent(name: name.trimmed, objective: objective)
+            let participantId = try await service.joinEvent(
+                inviteCode: event.inviteCode,
                 displayName: displayName.trimmed,
                 travelReference: travelReference
             )
-            inviteCode = created.inviteCode
+            created = (event.eventId, participantId)
+            inviteCode = event.inviteCode
         } catch {
             errorMessage = error.localizedDescription
         }
