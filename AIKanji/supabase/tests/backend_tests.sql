@@ -15,6 +15,22 @@ create table if not exists test_results (
 );
 truncate test_results restart identity;
 
+-- `test_results` is the harness's own bookkeeping, not part of the schema — but most
+-- blocks below call t_check while impersonating (`t_as_user`), so the impersonated role
+-- has to be able to append to it. On a database that behaves the way Supabase now does
+-- by default (new entities in `public` are NOT auto-exposed to the Data API roles — see
+-- 0024_table_privileges.sql) a table created by `postgres` grants those roles nothing,
+-- and this suite could not record its very first result: `permission denied for table
+-- test_results` on check 1, whatever the schema itself does.
+--
+-- Stated explicitly rather than inherited from whatever default privileges the host
+-- database happens to carry, because that inheritance is precisely what hid the missing
+-- table grants for twenty-three migrations. It cannot mask anything: the privilege
+-- assertions in the 0024 blocks below scope themselves to RLS-protected app tables, and
+-- this is neither.
+grant insert, select on table test_results to authenticated, service_role;
+grant usage, select on sequence test_results_seq_seq to authenticated, service_role;
+
 create or replace function t_check(p_name text, p_passed boolean, p_detail text default null)
 returns void language plpgsql as $$
 begin
@@ -1514,6 +1530,479 @@ begin
   perform t_check('and exactly 001, 002 and 004 after the relaxation — never 003',
                   v_places = array['demo_place_001','demo_place_002','demo_place_004'],
                   v_places::text);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0024 (A): the app's real access pattern, under the roles PostgREST actually uses.
+--
+-- Everything above this point proves RLS, and thoroughly — but none of it could ever
+-- have failed on a missing GRANT. `t_as_user` does `set role authenticated`, yet the
+-- containers this suite runs in hand every new table full CRUD through `alter default
+-- privileges`, so the privilege layer was always wide open underneath the policies.
+-- On a hosted project it is not: migrations are applied as `postgres` while the
+-- default privileges that grant CRUD belong to `supabase_admin`, so every table from
+-- 0001-0016 arrived in production with `Dxtm` and no SELECT at all, and the app could
+-- not read a single one of its own tables. 0024_table_privileges.sql is the fix; these
+-- three blocks are the reason it cannot silently come undone.
+--
+-- A grant and a policy are two different gates. The blocks below assert the privilege
+-- gate: the allow side runs the reads and writes the clients and the Edge Functions
+-- actually issue, as the role they actually issue them as, and the deny side matches
+-- on `permission denied for table …` rather than on any 42501 — an RLS refusal raises
+-- 42501 too, so a looser assertion would pass for the wrong reason and prove nothing
+-- about privileges.
+--
+-- Three mechanics decide how this is written:
+--   * `set role` inside a DO block takes effect for the rest of the block and is
+--     undone by `reset role` (t_as_admin) — but an aborting subtransaction rolls the
+--     GUC stack back too, so a role is always assumed OUTSIDE an exception block,
+--     never inside one.
+--   * a failed statement aborts the whole block, so every probe expected to fail is
+--     wrapped in `begin … exception when insufficient_privilege then … end`, and every
+--     probe expected to succeed captures `sqlerrm` so a regression is reported as a
+--     FAIL with its exact message instead of killing the run.
+--   * `t_check` writes to `test_results`, which is itself a privileged INSERT. Results
+--     are therefore collected into variables while impersonating and only recorded
+--     after `t_as_admin()`, so these probes do not depend on the client roles being
+--     able to append to the harness's own bookkeeping.
+--
+-- The fixture is private (its own event, its own participants) and adds no venue —
+-- `recommendation_scores` points at a seeded place — so the global candidate pool the
+-- blocks above assert on is left exactly as it was.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00240000-0000-0000-0000-000000000024';
+  v_pid uuid := '00240000-0000-0000-0000-0000000000a1';
+  v_other_pid uuid := '00240000-0000-0000-0000-0000000000b1';
+  v_uid uuid := '00240000-0000-0000-0000-00000000aaaa';
+  v_other_uid uuid := '00240000-0000-0000-0000-00000000bbbb';
+  v_run uuid := '00240000-0000-0000-0000-0000000000f1';
+  v_constraint uuid;
+  -- Every table the two clients read directly (web/src/backend/supabase.ts and
+  -- AIKanji/AIKanji/Services/*.swift), plus the four 0017 caches whose SELECT grant
+  -- has to survive 0024's revoke-then-grant pass.
+  v_reads text[] := array[
+    'events', 'participants', 'participant_constraints', 'negotiations',
+    'recommendation_runs', 'recommendation_scores', 'restaurants',
+    'restaurant_features', 'event_restaurant_candidates', 'travel_matrix_cache',
+    'meeting_zones', 'provider_incidents'];
+  v_errors text[] := '{}';
+  v_tbl text;
+  -- Seeded with a value no assertion accepts, so a probe that could not run at all
+  -- reports a FAIL carrying the reason instead of a null comparison.
+  v_events int := -1; v_parts int := -1; v_own int := -1; v_negs int := -1;
+  v_runs int := -1; v_scores int := -1; v_after_insert int := -1;
+  v_updated int := -1; v_feed int := -1;
+  v_rls_err text; v_insert_err text; v_update_err text; v_feed_err text;
+begin
+  perform t_as_admin();
+
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA 0024 privileges', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role,
+                            travel_reference)
+  values (v_pid, v_event, v_uid, 'Grantee', 'organizer', 'office'),
+         (v_other_pid, v_event, v_other_uid, 'Somebody else', 'participant', 'station');
+  update events set organizer_participant_id = v_pid where id = v_event;
+
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'budget under 5000 yen',
+          'budget', '{"max_yen":5000}', 'PUBLIC')
+  returning id into v_constraint;
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_other_pid, 'MUST', 'not mine to read',
+          'other', '{}', 'PRIVATE');
+
+  insert into recommendation_runs (id, event_id, feasible_count, input_snapshot)
+  values (v_run, v_event, 1, '{}');
+  insert into recommendation_scores (run_id, restaurant_place_id, fairness_score,
+                                     satisfaction_score, quality_score, label)
+  values (v_run, 'demo_place_001', 0.5, 0.5, 0.5, 'fairest');
+  insert into negotiations (event_id, constraint_id, participant_id, proposed_value,
+                            unlocked_count)
+  values (v_event, v_constraint, v_pid, '{"max_yen":6000}', 1);
+
+  -- --- as the signed-in client ------------------------------------------------
+  perform t_as_user(v_uid);
+
+  -- Can the ROLE touch the table at all? One probe per table, so a regression names
+  -- the table it broke instead of failing the run at whichever read came first.
+  foreach v_tbl in array v_reads loop
+    begin
+      execute format('select count(*) from public.%I', v_tbl);
+      v_errors := v_errors || ''::text;
+    exception when others then
+      v_errors := v_errors || sqlerrm;
+    end;
+  end loop;
+
+  -- And the rows it may then see, which is RLS's half of the same question.
+  -- `events` is the interesting one: its policy subqueries `participants`, and a
+  -- policy predicate is evaluated with the caller's privileges — without SELECT on
+  -- `participants` this read fails with "permission denied for table participants"
+  -- before RLS is reached at all.
+  begin
+    select count(*) into v_events from events where id = v_event;
+    select count(*) into v_parts from participants where event_id = v_event;
+    select count(*) into v_own from participant_constraints where event_id = v_event;
+    select count(*) into v_negs from negotiations where participant_id = v_pid;
+    select count(*) into v_runs from recommendation_runs where event_id = v_event;
+    select count(*) into v_scores from recommendation_scores where run_id = v_run;
+  exception when others then
+    v_rls_err := sqlerrm;
+  end;
+
+  -- The one table a client writes directly: `insertConstraint` in supabase.ts and
+  -- ConstraintService.swift's `.insert(ConstraintInsert(...))`.
+  begin
+    insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                         normalized_type, normalized_value, visibility)
+    values (v_event, v_pid, 'WANT', 'italian would be nice',
+            'cuisine', '{"include":["italian"]}', 'PUBLIC');
+    select count(*) into v_after_insert
+      from participant_constraints where participant_id = v_pid;
+  exception when others then
+    v_insert_err := sqlerrm;
+  end;
+
+  -- UPDATE is the privilege behind 0007's "participant updates own raw constraints"
+  -- policy, re-stated by 0018 with the post-close closure check. Without it the
+  -- policy could never fire.
+  begin
+    update participant_constraints set raw_text = raw_text || ' (edited)'
+     where id = v_constraint;
+    get diagnostics v_updated = row_count;
+  exception when others then
+    v_update_err := sqlerrm;
+  end;
+
+  -- The definer RPC path, which needs no table privilege of its own — asserted here
+  -- so a failure of the grants above cannot be mistaken for a failure of the RPCs.
+  begin
+    select count(*) into v_feed from fn_get_sanitized_feed(v_event);
+  exception when others then
+    v_feed_err := sqlerrm;
+  end;
+
+  perform t_as_admin();
+
+  for v_i in 1 .. array_length(v_reads, 1) loop
+    perform t_check(format('authenticated may read public.%s', v_reads[v_i]),
+                    v_errors[v_i] = '', v_errors[v_i]);
+  end loop;
+
+  perform t_check('and the events read returns the caller''s own event',
+                  v_events = 1, coalesce(v_rls_err, v_events::text));
+  perform t_check('participants read returns the whole membership list',
+                  v_parts = 2, coalesce(v_rls_err, v_parts::text));
+  perform t_check('while RLS still hides the other participant''s raw constraint',
+                  v_own = 1, coalesce(v_rls_err, v_own::text));
+  perform t_check('the caller''s open negotiation is readable',
+                  v_negs = 1, coalesce(v_rls_err, v_negs::text));
+  perform t_check('the latest run is readable', v_runs = 1,
+                  coalesce(v_rls_err, v_runs::text));
+  perform t_check('and its scores are readable', v_scores = 1,
+                  coalesce(v_rls_err, v_scores::text));
+  perform t_check('authenticated may insert its own constraint',
+                  v_insert_err is null, v_insert_err);
+  perform t_check('and the row is really there', v_after_insert = 2,
+                  coalesce(v_insert_err, v_after_insert::text));
+  perform t_check('authenticated may update its own constraint',
+                  v_update_err is null and v_updated = 1,
+                  coalesce(v_update_err, v_updated::text));
+  perform t_check('and the sanitized feed RPC still answers the same caller',
+                  v_feed_err is null and v_feed = 2,
+                  coalesce(v_feed_err, v_feed::text));
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0024 (B): what must stay out, stays out — and stays out by privilege.
+--
+-- Each probe below is refused with `permission denied for table …`, i.e. by the ACL,
+-- before RLS is consulted. The distinction is the whole point: RLS also raises 42501,
+-- so asserting only "it failed" would let a table that quietly regained INSERT pass as
+-- long as some policy happened to refuse the row.
+--
+-- The statements are inert even if a regression let one through: the writes carry
+-- `where false`, and the TRUNCATE probe targets `events`, which `participants`
+-- references — so the FK web would refuse it (with a different message, failing the
+-- check) rather than emptying the fixture. TRUNCATE is probed because it ignores RLS
+-- completely: the inherited `Dxtm` handed it to both client roles, where no policy
+-- could ever have contained it.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00240000-0000-0000-0000-000000000024';
+  v_pid uuid := '00240000-0000-0000-0000-0000000000a1';
+  v_uid uuid := '00240000-0000-0000-0000-00000000aaaa';
+  v_labels text[];
+  v_stmts text[];
+  v_msgs text[] := '{}';
+  -- Every app table, for the anon sweep: a Supabase anonymous sign-in issues an
+  -- `authenticated` JWT, `ensureSession()` guarantees a session before any query, and
+  -- restaurant-search's caller-side client forwards the caller's own token — so
+  -- nothing in this app ever speaks as `anon`, and `anon` is granted nothing.
+  v_all text[] := array[
+    'events', 'participants', 'participant_constraints', 'negotiations',
+    'recommendation_runs', 'recommendation_scores', 'restaurants',
+    'restaurant_features', 'event_restaurant_candidates', 'travel_matrix_cache',
+    'meeting_zones', 'provider_incidents', 'restaurant_source_records'];
+  v_anon_errors text[] := '{}';
+  v_stmt text;
+  v_tbl text;
+  v_leaks text;
+begin
+  perform t_as_admin();
+
+  v_labels := array[
+    'a client cannot read the raw provider payloads (0017/0023)',
+    'a client cannot insert a participant — fn_join_event does that (0020)',
+    'a client cannot update a participant — fn_set_travel_reference does (0020)',
+    'a client cannot delete a participant (0020)',
+    'a client cannot delete a constraint: there is no client delete path at all',
+    'a client cannot create an event outside fn_create_event',
+    'a client cannot rewrite an event: status, choice and close are all RPCs',
+    'a client cannot forge a negotiation for itself',
+    'a client cannot answer one by hand instead of fn_respond_negotiation',
+    'a client cannot invent a recommendation run',
+    'a client cannot rescore a candidate',
+    'a client cannot rewrite provider venue data',
+    'a client cannot rewrite the provider attributions it is required to display',
+    'and TRUNCATE, which no policy could have contained, is gone as well'];
+  v_stmts := array[
+    'select 1 from public.restaurant_source_records',
+    format('insert into public.participants (event_id, auth_user_id, display_name) '
+           'select %L, %L, ''forged'' where false', v_event, v_uid),
+    'update public.participants set display_name = display_name where false',
+    'delete from public.participants where false',
+    'delete from public.participant_constraints where false',
+    'insert into public.events (name) select ''forged'' where false',
+    'update public.events set status = status where false',
+    format('insert into public.negotiations (event_id, constraint_id, participant_id, '
+           'proposed_value) select %L, id, %L, ''{}''::jsonb '
+           'from public.participant_constraints where false', v_event, v_pid),
+    'update public.negotiations set status = ''ACCEPTED'' where false',
+    format('insert into public.recommendation_runs (event_id, feasible_count, '
+           'input_snapshot) select %L, 99, ''{}''::jsonb where false', v_event),
+    'update public.recommendation_scores set quality_score = 1 where false',
+    'update public.restaurant_features set price_yen_estimate = 1 where false',
+    'update public.restaurant_features set provider_attributions = ''[]''::jsonb '
+      'where false',
+    'truncate public.events'];
+
+  perform t_as_user(v_uid);
+  foreach v_stmt in array v_stmts loop
+    begin
+      execute v_stmt;
+      v_msgs := v_msgs || null::text;
+    exception when others then
+      v_msgs := v_msgs || sqlerrm;
+    end;
+  end loop;
+
+  -- `anon` next. Still no t_check while impersonating: appending to test_results is a
+  -- privileged write, and anon must not have one.
+  execute 'set role anon';
+  foreach v_tbl in array v_all loop
+    begin
+      execute format('select 1 from public.%I limit 1', v_tbl);
+      v_anon_errors := v_anon_errors || null::text;
+    exception when others then
+      v_anon_errors := v_anon_errors || sqlerrm;
+    end;
+  end loop;
+  perform t_as_admin();
+
+  for v_i in 1 .. array_length(v_stmts, 1) loop
+    perform t_check(v_labels[v_i],
+                    coalesce(v_msgs[v_i], '') like 'permission denied for table%',
+                    coalesce(v_msgs[v_i], 'NOT REFUSED: ' || v_stmts[v_i]));
+  end loop;
+
+  perform t_check('anon is refused on every app table, without exception',
+                  (select bool_and(coalesce(v_anon_errors[i], '')
+                                     like 'permission denied for table%')
+                     from generate_subscripts(v_all, 1) i),
+                  (select string_agg(v_all[i] || ' -> ' ||
+                                     coalesce(v_anon_errors[i], 'NOT REFUSED'), ', ')
+                     from generate_subscripts(v_all, 1) i
+                    where coalesce(v_anon_errors[i], '')
+                            not like 'permission denied for table%'));
+
+  -- Belt and braces, straight from the catalog: not one ACL entry for `anon` — nor for
+  -- PUBLIC, which would reach anon just as well — on any RLS-protected table in
+  -- `public`. A privilege granted but not covered by a probe above still shows up here.
+  select string_agg(c.relname || ':' || a.grantee::regrole::text || ':' ||
+                    a.privilege_type, ', ' order by c.relname, a.privilege_type)
+    into v_leaks
+    from pg_class c
+    cross join aclexplode(c.relacl) a
+   where c.relnamespace = 'public'::regnamespace
+     and c.relkind = 'r'
+     and c.relrowsecurity
+     and (a.grantee = 'anon'::regrole or a.grantee = 0);
+  perform t_check('and holds no privilege on them in the catalog either',
+                  v_leaks is null, v_leaks);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0024 (C): service_role, the privilege inventory, and the sequences.
+--
+-- service_role is the trusted server-side identity — the two Edge Functions' clients
+-- and scripts/bootstrap-hosted-fixture.mjs — and it bypasses RLS, so its table
+-- privileges are the only boundary it has. It was as broken as the client roles: the
+-- same default-ACL gap left it with `Dxtm`, so `select count(*) from participants`
+-- raised 42501 and restaurant-search could not read the origins it exists to route.
+--
+-- The last checks are what make this section a guard rather than a snapshot: an
+-- inventory of exactly which privileges the client roles hold on the core tables (so a
+-- later blanket `grant all` fails here, loudly), and the sequence invariant — an INSERT
+-- on a serial column also needs `usage` on the sequence behind it, a separate ACL the
+-- same default-privilege gap would swallow. There is no sequence in `public` today, so
+-- 0024 grants none; this is what fails the day somebody adds one and grants only the
+-- table.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00240000-0000-0000-0000-000000000024';
+  v_pid uuid := '00240000-0000-0000-0000-0000000000a1';
+  -- The server side's read set: restaurant-search reads participants and the WANT
+  -- constraints, llm-assist reads the run, its scores and the venue's features, and the
+  -- fixture script reads whatever it PATCHes because it sends return=representation.
+  v_reads text[] := array[
+    'events', 'participants', 'participant_constraints', 'recommendation_runs',
+    'recommendation_scores', 'restaurants', 'restaurant_features',
+    'restaurant_source_records', 'event_restaurant_candidates',
+    'travel_matrix_cache', 'meeting_zones', 'provider_incidents'];
+  v_read_errors text[] := '{}';
+  v_write_errors text[] := '{}';
+  v_labels text[];
+  v_stmts text[];
+  v_stmt text;
+  v_tbl text;
+  v_expected text[];
+  v_actual text[];
+  v_sequences text;
+begin
+  perform t_as_admin();
+
+  v_labels := array[
+    'service_role may rewire a seeded participant to a real Auth uid',
+    'service_role may put a room MUST back for the next demo run',
+    'service_role may reset the event lifecycle and the decision',
+    'service_role may clear the negotiations a demo run left behind',
+    'service_role may clear the recommendation runs (scores cascade)'];
+  v_stmts := array[
+    format('update public.participants set auth_user_id = auth_user_id '
+           'where id = %L', v_pid),
+    format('update public.participant_constraints set normalized_value = '
+           '''{"max_yen":5000}''::jsonb where event_id = %L '
+           'and normalized_type = ''budget''', v_event),
+    format('update public.events set status = ''collecting'', chosen_place_id = null, '
+           'chosen_at = null, preferences_closed_at = null where id = %L', v_event),
+    format('delete from public.negotiations where event_id = %L', v_event),
+    format('delete from public.recommendation_runs where event_id = %L', v_event)];
+
+  execute 'set role service_role';
+  foreach v_tbl in array v_reads loop
+    begin
+      execute format('select count(*) from public.%I', v_tbl);
+      v_read_errors := v_read_errors || ''::text;
+    exception when others then
+      v_read_errors := v_read_errors || sqlerrm;
+    end;
+  end loop;
+  foreach v_stmt in array v_stmts loop
+    begin
+      execute v_stmt;
+      v_write_errors := v_write_errors || ''::text;
+    exception when others then
+      v_write_errors := v_write_errors || sqlerrm;
+    end;
+  end loop;
+  perform t_as_admin();
+
+  perform t_check('service_role may read every table its server-side callers read',
+                  (select bool_and(e = '') from unnest(v_read_errors) e),
+                  (select string_agg(v_reads[i] || ' -> ' || v_read_errors[i], ', ')
+                     from generate_subscripts(v_reads, 1) i
+                    where v_read_errors[i] <> ''));
+  for v_i in 1 .. array_length(v_stmts, 1) loop
+    perform t_check(v_labels[v_i], v_write_errors[v_i] = '', v_write_errors[v_i]);
+  end loop;
+
+  -- The inventory, for the two roles a leaked publishable key can reach.
+  -- `has_table_privilege` rather than information_schema.table_privileges so the same
+  -- expectation holds on PG16 and PG17 (MAINTAIN exists only on 17, and 0024's
+  -- `revoke all` takes it away there too).
+  v_expected := array[
+    'events|anon|',
+    'events|authenticated|SELECT',
+    'participants|anon|',
+    'participants|authenticated|SELECT',
+    'participant_constraints|anon|',
+    'participant_constraints|authenticated|SELECT,INSERT,UPDATE',
+    'negotiations|anon|',
+    'negotiations|authenticated|SELECT',
+    'recommendation_runs|anon|',
+    'recommendation_runs|authenticated|SELECT',
+    'recommendation_scores|anon|',
+    'recommendation_scores|authenticated|SELECT',
+    'restaurants|anon|',
+    'restaurants|authenticated|SELECT',
+    'restaurant_features|anon|',
+    'restaurant_features|authenticated|SELECT'];
+  select array_agg(t || '|' || r || '|' ||
+                   coalesce((select string_agg(p, ',' order by ord)
+                               from unnest(array['SELECT','INSERT','UPDATE','DELETE',
+                                                 'TRUNCATE','REFERENCES','TRIGGER'])
+                                    with ordinality as priv(p, ord)
+                              where has_table_privilege(r, 'public.' || t, p)), '')
+                   order by tord, rord)
+    into v_actual
+    from unnest(array['events','participants','participant_constraints','negotiations',
+                      'recommendation_runs','recommendation_scores','restaurants',
+                      'restaurant_features']) with ordinality as tab(t, tord)
+    cross join unnest(array['anon','authenticated']) with ordinality as rl(r, rord);
+  perform t_check('the client roles hold exactly the privileges 0024 states, no more',
+                  v_actual = v_expected,
+                  (select string_agg(a, ', ') from unnest(v_actual) a
+                    where a <> all (v_expected)));
+
+  -- service_role is asserted on the allow side only: it is the secret key, so its
+  -- boundary is key custody, not the ACL. What must hold is that 0024's revokes hit
+  -- the client roles and nothing else — 0017's provider-cache CRUD is still there.
+  perform t_check('and 0017''s service_role CRUD on the provider cache is intact',
+                  (select bool_and(has_table_privilege('service_role',
+                                                       'public.' || t, p))
+                     from unnest(array['event_restaurant_candidates',
+                                       'travel_matrix_cache', 'meeting_zones',
+                                       'restaurant_source_records',
+                                       'provider_incidents']) t
+                     cross join unnest(array['SELECT','INSERT','UPDATE','DELETE']) p));
+
+  -- No sequence may be reachable by an INSERT the role is allowed to make and still be
+  -- unusable. Restricted to the RLS-protected app tables, so the harness's own
+  -- `test_results` serial is not read as part of the schema's contract.
+  select string_agg(s.relname || ' (behind ' || t.relname || ')', ', ')
+    into v_sequences
+    from pg_class s
+    join pg_depend d
+      on d.classid = 'pg_class'::regclass and d.objid = s.oid
+     and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i')
+    join pg_class t on t.oid = d.refobjid
+   where s.relkind = 'S'
+     and s.relnamespace = 'public'::regnamespace
+     and t.relrowsecurity
+     and ((has_table_privilege('authenticated', t.oid, 'INSERT')
+           and not has_sequence_privilege('authenticated', s.oid, 'USAGE'))
+       or (has_table_privilege('service_role', t.oid, 'INSERT')
+           and not has_sequence_privilege('service_role', s.oid, 'USAGE')));
+  perform t_check('every sequence behind a table a role may INSERT into is usable',
+                  v_sequences is null, v_sequences);
 end $$;
 
 \set QUIET off

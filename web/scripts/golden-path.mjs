@@ -160,11 +160,31 @@ export default async function (api) {
   const cards = await api.evaluate(`(() => {
     const badges = [...document.querySelectorAll('.bg-yellow')].map(b => b.textContent.trim())
     const titles = [...document.querySelectorAll('h3')].map(h => h.textContent.trim())
-    return { badges, titles, grounded: /必須条件をすべて満たしています/.test(document.body.textContent) }
+    // A7 asks that every explanation be grounded in STORED score/evidence data, so assert
+    // the stored numbers reach the screen rather than grepping one backend's prose: the
+    // mock writes 「必須条件をすべて満たしています」 while llm-assist returns its own
+    // sentence, so a text match could only ever pass against the mock.
+    const breakdowns = document.querySelectorAll('[data-testid="score-breakdown"]').length
+    const measured = [...document.querySelectorAll('[data-testid^="dimension-value-"]')]
+      .map((cell) => cell.textContent.trim())
+    return {
+      badges,
+      titles,
+      breakdowns,
+      // A per-dimension figure read out of score_breakdown. 未確認 is the honest
+      // "unverified" reading, so it does not count as a grounded number.
+      // [0-9] rather than \\d: this source is a template literal, and \\d collapses to a
+      // plain 'd' before the browser ever sees it — which silently tested for the letter.
+      measuredCount: measured.filter((text) => /[0-9]/.test(text)).length,
+    }
   })()`)
   assertThat('three alternatives are shown', cards.titles.length >= 3, JSON.stringify(cards.titles))
   assert('every alternative has a distinct label', new Set(cards.badges).size, cards.badges.length)
-  assertThat('explanations are grounded in stored data', cards.grounded)
+  assertThat(
+    'explanations are grounded in stored data',
+    cards.breakdowns >= 3 && cards.measuredCount >= 3,
+    `breakdowns=${cards.breakdowns} measured=${cards.measuredCount}`,
+  )
   await api.screenshot('/tmp/gp-4-recommendations.png')
 
   /* -------------------------------------------------------- PRD 6 step 11 */

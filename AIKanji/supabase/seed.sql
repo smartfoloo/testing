@@ -18,6 +18,17 @@ insert into participants (id, event_id, auth_user_id, display_name, role, travel
 ('00000000-0000-0000-0000-0000000000d1','00000000-0000-0000-0000-000000000001',gen_random_uuid(),'David','participant','home'),
 ('00000000-0000-0000-0000-0000000000e1','00000000-0000-0000-0000-000000000001',gen_random_uuid(),'Emma','participant','office');
 
+-- Alice is the organizer, and the event has to SAY so. fn_choose_restaurant (0015) decides
+-- organizer-ness only from events.organizer_participant_id -> participants.auth_user_id,
+-- while both clients decide which UI to show from participants.role. Leaving this null made
+-- those two disagree: Alice saw the 「このお店に決める」 button and the RPC answered 'only the
+-- organizer can choose the restaurant', so PRD §6 step 11 — the human decision the whole
+-- flow builds towards — was impossible on a real backend. It could not be reproduced by the
+-- SQL suite, which creates its events through fn_create_event (that sets the column itself).
+-- Set after the insert because the column references participants(id).
+update events set organizer_participant_id = '00000000-0000-0000-0000-0000000000a1'
+ where id = '00000000-0000-0000-0000-000000000001';
+
 insert into participant_constraints (event_id, participant_id, kind, raw_text, normalized_type, normalized_value, visibility) values
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','MUST','budget under 4000 yen','budget','{"max_yen":4000}','PUBLIC'),
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','WANT','yakitori','cuisine','{"include":["yakitori"],"exclude":[]}','PUBLIC'),

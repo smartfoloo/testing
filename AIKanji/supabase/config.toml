@@ -382,8 +382,16 @@ inspector_port = 8083
 # The Deno major version to use.
 deno_version = 2
 
-# [edge_runtime.secrets]
-# secret_key = "env(SECRET_VALUE)"
+# Provider keys for the Edge Functions. Values are read from the shell environment, so no
+# key is ever written into this file. Export them (or source a gitignored env file) before
+# `supabase start`; the functions degrade gracefully when one is absent — llm-assist answers
+# with a needs_clarification fallback and restaurant-search returns 500 for a missing
+# Places key, so a partial set is usable.
+[edge_runtime.secrets]
+LLM_API_KEY = "env(LLM_API_KEY)"
+GOOGLE_PLACES_API_KEY = "env(GOOGLE_PLACES_API_KEY)"
+GOOGLE_ROUTES_API_KEY = "env(GOOGLE_ROUTES_API_KEY)"
+HOTPEPPER_API_KEY = "env(HOTPEPPER_API_KEY)"
 
 [analytics]
 enabled = false

@@ -85,6 +85,22 @@ Order matters, because each step is a precondition for the next:
    AIKANJI_TEST_PASSWORD=… APP_URL=http://localhost:5173 npm run verify:hosted
    ```
 
+Two things will waste your time if nobody says them:
+
+- **Re-run the bootstrap before every hosted run.** The golden path ends by *choosing* a
+  restaurant, which closes the event — and `fn_join_event` refuses a closed one, so the next
+  run dies at the join with `400`. The bootstrap resets that (and Bob's MUST, and the cache
+  stamps), which is why it is the reset tool as well as the setup tool.
+- **Wait for Realtime after `supabase db reset`.** The reset restarts the containers, and a
+  run started against a cold `supabase_realtime` logs
+  `WebSocket … failed: Unexpected response code: 502` and fails the "no console errors"
+  check while every other assertion passes. Poll
+  `docker inspect --format '{{.State.Health.Status}}' supabase_realtime_<project>` until it
+  reads `healthy` first. (With Colima, export
+  `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` — the Supabase CLI looks for
+  `/var/run/docker.sock`, which Colima does not create, and fails with a bare
+  `failed to inspect container health`.)
+
 The hosted *mechanism* can be rehearsed without a project at all, which is how it was
 developed: the mock's `signIn` accepts the same `<persona>@aikanji.demo` addresses, so
 `AIKANJI_MODE=hosted AIKANJI_TEST_PASSWORD=anything npm run verify:hosted` against the mock
