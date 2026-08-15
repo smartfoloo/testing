@@ -81,6 +81,56 @@ import type {
 const STORAGE_KEY = 'matomeshi.mock.db.v2'
 const USER_KEY = 'matomeshi.mock.user.v1'
 
+/* -------------------------------------------------------------------------- */
+/* The five seeded personas as login identities                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * seed.sql identifies its five participants by `auth_user_id`, so "act as Bob" means a
+ * different thing in each backend: here it is the stored `matomeshi.mock.user.v1` value,
+ * against a real project it is a Supabase session. The addresses below are the bridge —
+ * they are the SAME ones the hosted fixture creates (`DemoFixture.Persona.email` and
+ * `AIKanji/supabase/scripts/bootstrap-hosted-fixture.mjs`: `<persona>@aikanji.demo`) — so
+ * signing in through the login sheet lands on the seeded persona either way.
+ *
+ * That equivalence is the point: one browser scenario can drive the real login screen in
+ * mock mode and against a hosted project, instead of the mock run reaching the persona by
+ * writing localStorage behind the app's back and leaving the login UI untested.
+ *
+ * The password is deliberately ignored — the mock has no credential to check against, and
+ * inventing one would make the mock's failure mode differ from the real project's.
+ */
+const PERSONA_SLUGS = ['alice', 'bob', 'charlie', 'david', 'emma'] as const
+
+type PersonaSlug = (typeof PERSONA_SLUGS)[number]
+
+/** The `demo-user-alice` … `demo-user-emma` ids seed.sql's participants carry. */
+function personaUserId(slug: string): string {
+  return `demo-user-${slug}`
+}
+
+function personaEmail(slug: PersonaSlug): string {
+  return `${slug}@aikanji.demo`
+}
+
+/** The persona a typed address names, or undefined for anything else. */
+function personaForEmail(email: string): PersonaSlug | undefined {
+  const address = email.trim().toLowerCase()
+  return PERSONA_SLUGS.find((slug) => personaEmail(slug) === address)
+}
+
+/**
+ * The mock's answer to `authenticatedEmail(from:)`. The identity IS the stored auth user
+ * id, so a persona id is a signed-in persona and anything else — the random uuid
+ * `loadUser()` mints, which is this backend's anonymous session — has no address at all.
+ * Derived rather than stored alongside, so the two can never disagree and a scenario that
+ * sets the id directly still sees the same signed-in state as one that used the sheet.
+ */
+function personaEmailForUserId(authUserId: string): string | null {
+  const slug = PERSONA_SLUGS.find((candidate) => personaUserId(candidate) === authUserId)
+  return slug ? personaEmail(slug) : null
+}
+
 /** Invite-code alphabet from fn_generate_invite_code (0007): 31 unambiguous chars. */
 const INVITE_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'
 
@@ -187,8 +237,10 @@ export function createSeedDb(): Db {
       id: id as string,
       event_id: DEMO_EVENT_ID,
       // Stable stand-ins for seed.sql's gen_random_uuid(); no visitor ever matches these,
-      // so the demo event stays invisible until you join it with its invite code.
-      auth_user_id: `demo-user-${slug}`,
+      // so the demo event stays invisible until you join it with its invite code. Built by
+      // the same helper `signIn` maps `<persona>@aikanji.demo` onto, so the fixture and the
+      // login path cannot drift apart.
+      auth_user_id: personaUserId(slug as string),
       display_name: displayName as string,
       role: role as ParticipantRole,
       travel_reference: travel as 'office' | 'home' | 'station',
@@ -584,6 +636,15 @@ export class MockBackend implements Backend {
     }
   }
 
+  /** Persists the current identity, the mock's equivalent of the SDK's session storage. */
+  private persistUser(): void {
+    try {
+      localStorage.setItem(USER_KEY, this.authUserId)
+    } catch {
+      // Same contract as persist(): storage failures keep the identity in memory only.
+    }
+  }
+
   /** Wipes the fixture, used by the "reset" affordance in mock mode. */
   static reset(): void {
     localStorage.removeItem(STORAGE_KEY)
@@ -642,6 +703,46 @@ export class MockBackend implements Backend {
 
   async ensureSession(): Promise<void> {
     await this.latency(40)
+  }
+
+  /**
+   * Null unless the stored identity is one of the five seeded personas — the random uuid a
+   * first visit mints is this backend's anonymous session, and an anonymous session has no
+   * address, exactly as `authenticatedEmail(from:)` decides it on the real client.
+   */
+  async currentEmail(): Promise<string | null> {
+    await this.latency(20)
+    return personaEmailForUserId(this.authUserId)
+  }
+
+  /**
+   * Accepts the five persona addresses (`alice@aikanji.demo` … `emma@aikanji.demo`) and
+   * becomes that seeded participant by swapping the stored auth user id — the mock's whole
+   * notion of identity. Everything else is refused with GoTrue's own wording, so the same
+   * typo produces the same Japanese message here as against a real project.
+   *
+   * The seeded fixture is untouched: only the identity moves, so signing in as Bob shows
+   * Bob's existing participant row (and his room MUST) rather than creating anything.
+   */
+  async signIn(email: string, _password: string): Promise<string | null> {
+    await this.latency()
+    const slug = personaForEmail(email)
+    // Verbatim GoTrue: errorMessage() branches on this text, not on an error type.
+    if (!slug) throw new Error('Invalid login credentials')
+    this.authUserId = personaUserId(slug)
+    this.persistUser()
+    return personaEmail(slug)
+  }
+
+  /**
+   * A fresh anonymous identity, mirroring signOut() + signInAnonymously(): the app keeps
+   * working, just as somebody who never logged in. The seeded fixture is deliberately NOT
+   * cleared — logging out of a demo persona must not destroy the demo event.
+   */
+  async signOutToAnonymous(): Promise<void> {
+    await this.latency(40)
+    this.authUserId = newId()
+    this.persistUser()
   }
 
   /* --------------------------------------------------------- EventService */

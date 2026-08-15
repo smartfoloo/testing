@@ -3,18 +3,25 @@
  * tests A1-A7, driven in a real browser against the deterministic five-persona
  * fixture from AIKanji/supabase/seed.sql.
  *
- * The mock backend identifies the current user by localStorage `matomeshi.mock.user.v1`,
- * and the seeded participants have stable auth ids (`demo-user-alice` ... `demo-user-emma`).
- * Swapping that key and reloading therefore gives six genuinely distinct sessions
- * (organizer + five participants) in one browser, exercising the real authorization-shaped
- * code paths rather than mocked screen transitions.
+ * Six genuinely distinct sessions (organizer + five participants) run in one browser, so the
+ * authorization-shaped code paths are actually exercised rather than mocked screen
+ * transitions. How a session is obtained depends on the backend, and `personas.mjs` owns that
+ * difference: against the mock the identity is a localStorage value, against a real project
+ * it is a Supabase session obtained through the login screen.
  *
- * Usage: node scripts/cdp.mjs scripts/golden-path.mjs
+ * Usage:
+ *   node scripts/cdp.mjs scripts/golden-path.mjs                    # mock backend
+ *   AIKANJI_MODE=hosted AIKANJI_TEST_PASSWORD=... APP_URL=... \
+ *     node scripts/cdp.mjs scripts/golden-path.mjs                  # real Supabase project
+ *
+ * The hosted run needs the project bootstrapped first — see
+ * AIKanji/supabase/scripts/bootstrap-hosted-fixture.mjs — and it asserts the same 21 checks,
+ * which is the point: one definition of the golden path, two backends.
  */
 
+import { actAsPersona, mode } from './personas.mjs'
+
 const BASE = process.env.APP_URL ?? 'http://localhost:5173'
-const USER_KEY = 'matomeshi.mock.user.v1'
-const DEMO_CODE = 'demo01'
 
 let checks = 0
 let failures = 0
@@ -43,26 +50,19 @@ function assertThat(label, condition, detail = '') {
 
 /** Become one of the seeded personas and re-enter the demo event. */
 async function actAs(api, authUserId) {
-  await api.evaluate(
-    `(() => { localStorage.setItem('${USER_KEY}', ${JSON.stringify(authUserId)}); return true })()`,
-  )
-  await api.goto(BASE)
-  await api.waitFor('join-event')
-  await api.click('join-event')
-  await api.fill('invite-code', DEMO_CODE)
-  // fn_join_event is idempotent, so a seeded participant gets their existing row back.
-  await api.fill('join-display-name', 'demo')
-  await api.click('join-submit')
-  await api.waitFor('continue-event')
-  await api.click('continue-event')
-  await api.waitFor('tab-requirements')
+  // The callers name personas by their mock id, which is the vocabulary this scenario has
+  // always used; personas.mjs maps it to whatever the current backend needs.
+  await actAsPersona(api, authUserId.replace(/^demo-user-/, ''), BASE)
 }
 
 export default async function (api) {
   await api.viewport()
   await api.theme(false)
   await api.goto(BASE)
+  // Only clears this browser's own state. Against a hosted project the fixture is reset by
+  // bootstrap-hosted-fixture.mjs instead — a browser cannot, and must not, be able to.
   await api.resetState()
+  console.log(`backend: ${mode()}  (${BASE})`)
 
   /* ---------------------------------------------------------------- A1 / A2 */
   console.log('\nA1/A2 - five seeded participants and the privacy boundary')
