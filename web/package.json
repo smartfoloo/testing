@@ -10,7 +10,10 @@
     "typecheck": "tsc -b && tsc -p tsconfig.scripts.json",
     "verify:engine": "tsc -p tsconfig.scripts.json && vite build --config vite.verify.config.ts && node node_modules/.verify/verify-engine.mjs",
     "icons": "node scripts/generate-icons.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verify:golden": "node scripts/cdp.mjs scripts/golden-path.mjs",
+    "verify:p0": "node scripts/cdp.mjs scripts/p0-features.mjs",
+    "verify:hosted": "AIKANJI_MODE=hosted node scripts/cdp.mjs scripts/golden-path.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.112.2",

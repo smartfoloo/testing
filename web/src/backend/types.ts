@@ -102,6 +102,40 @@ export interface Backend {
   /** Anonymous sign-in, matching Supa.ensureSession(). */
   ensureSession(): Promise<void>
 
+  /*
+   * Optional email login (PR #12 on iOS, Supa.currentEmail / signIn / signOutToAnonymous).
+   *
+   * Login is never required — `ensureSession()` above stays the primary flow — but an
+   * anonymous session is unrecoverable: clearing the browser, or opening the app on a
+   * second device, loses the event for good. Signing in is what makes a session portable.
+   */
+
+  /**
+   * The address of the signed-in account, or null when there is nothing to show.
+   *
+   * Mirrors `authenticatedEmail(from:)` in SupabaseClient.swift: an ANONYMOUS session is
+   * not a login even if a row somewhere carries an address, and a session with no (or a
+   * blank) email yields null too. So a non-null answer means exactly one thing — this
+   * session can be signed into again from somewhere else.
+   */
+  currentEmail(): Promise<string | null>
+
+  /**
+   * Signs in with a password, replacing whatever session exists. Returns the same
+   * `currentEmail()` answer for the new session, so the caller never has to re-read it.
+   *
+   * Throws with the provider's own wording ('Invalid login credentials'), which
+   * `errorMessage()` in design/copy.ts maps to Japanese — including in `mock.ts`, so the
+   * failure path reads identically in both backends.
+   */
+  signIn(email: string, password: string): Promise<string | null>
+
+  /**
+   * Signs out to an ANONYMOUS session, never to no session — the app must keep working
+   * after a logout, exactly as Supa.signOutToAnonymous() guarantees on iOS.
+   */
+  signOutToAnonymous(): Promise<void>
+
   // MARK: - EventService
   createEvent(input: {
     name: string

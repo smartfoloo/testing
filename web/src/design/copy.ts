@@ -22,6 +22,19 @@ export const AppCopy = {
   tagline: 'みんなの条件から、ちょうどいい店を。',
   create: 'お店選びをはじめる',
   join: '招待コードで参加',
+  /* Optional email login (LoginSheet / Welcome), verbatim from AppCopy.swift. */
+  login: 'ログイン',
+  logout: 'ログアウト',
+  optionalLogin: 'ログインは任意です。匿名のままでも利用できます。',
+  loginCaveat: '匿名で参加した集まりは、ログイン後のアカウントには引き継がれません。',
+  email: 'メールアドレス',
+  password: 'パスワード',
+  loginSubmit: 'ログインする',
+  /**
+   * The signed-in heading. Inlined in LoginSheet.swift's `signedInView` rather than named
+   * in AppCopy, so it is added here to keep the two sheets word-for-word identical.
+   */
+  signedIn: 'ログイン中',
   retry: 'もう一度試す',
   networkError: '通信できませんでした。時間をおいて、もう一度お試しください。',
   save: '保存する',
@@ -44,6 +57,8 @@ export const AppCopy = {
   writingSummary: 'お店の特徴をまとめています…',
   fallbackExplanation: '条件を満たす候補ですが、詳しい説明を取得できませんでした。',
   permissionError: 'この操作を行う権限がありません。',
+  /** Verbatim from AppCopy.invalidCredentialsError on iOS. */
+  invalidCredentialsError: 'メールアドレスまたはパスワードが正しくありません。',
   invalidRequestError:
     'この操作は完了できませんでした。内容を確認して、もう一度お試しください。',
 
@@ -316,6 +331,17 @@ export function cuisineLabel(value: string): string | null {
  */
 export function errorMessage(error: unknown): string {
   const description = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase()
+  // Credentials first, and before the generic `invalid` branch below would swallow it:
+  // GoTrue answers a wrong password with "Invalid login credentials", and telling somebody
+  // 「内容を確認して、もう一度お試しください」 when the actual problem is their password is
+  // unhelpful. Same order and same three probes as AppCopy.errorMessage(for:) on iOS.
+  if (
+    description.includes('invalid login credentials') ||
+    description.includes('invalid email') ||
+    description.includes('invalid password')
+  ) {
+    return AppCopy.invalidCredentialsError
+  }
   if (
     description.includes('only the organizer') ||
     description.includes('not permitted') ||

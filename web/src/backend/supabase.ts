@@ -8,7 +8,12 @@
  *    never a table read, because RLS hides other participants' constraint rows.
  */
 
-import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js'
+import {
+  createClient,
+  type RealtimeChannel,
+  type SupabaseClient,
+  type User,
+} from '@supabase/supabase-js'
 import { NoTravelOriginError } from './types'
 import type {
   Backend,
@@ -45,6 +50,23 @@ function unwrap<T>({ data, error }: { data: T | null; error: { message: string }
   if (error) throw new Error(error.message)
   if (data === null) throw new Error('empty response')
   return data
+}
+
+/**
+ * `authenticatedEmail(from:)` in SupabaseClient.swift, verbatim: an address is reported
+ * only for a session that can actually be signed into again.
+ *
+ * The anonymous flag is checked FIRST and on its own. `signInAnonymously()` is allowed to
+ * produce a user carrying an email (GoTrue keeps whatever the anonymous user was later
+ * updated with, and a project may write one), so "has an email" does not mean "has an
+ * account" — an anonymous session must never make the welcome screen claim the event is
+ * recoverable. supabase-js exposes it as the optional `is_anonymous`, which is absent on a
+ * password user, so only an explicit `true` counts as anonymous.
+ */
+function authenticatedEmail(user: User | null | undefined): string | null {
+  if (!user || user.is_anonymous === true) return null
+  const email = user.email?.trim() ?? ''
+  return email.length > 0 ? email : null
 }
 
 /**
@@ -186,6 +208,37 @@ export class SupabaseBackend implements Backend {
   async ensureSession(): Promise<void> {
     const { data } = await this.client.auth.getSession()
     if (data.session) return
+    const { error } = await this.client.auth.signInAnonymously()
+    if (error) throw new Error(error.message)
+  }
+
+  /** Supa.currentEmail(). Reads the persisted session, so it costs no network call. */
+  async currentEmail(): Promise<string | null> {
+    const { data } = await this.client.auth.getSession()
+    return authenticatedEmail(data.session?.user)
+  }
+
+  /**
+   * Supa.signIn(email:password:). supabase-js v2 names it `signInWithPassword`; the
+   * returned session replaces the anonymous one in the SDK's storage, so every later RPC
+   * runs as this account — which is exactly how a browser becomes one of the seeded
+   * personas against a real project.
+   */
+  async signIn(email: string, password: string): Promise<string | null> {
+    const { data, error } = await this.client.auth.signInWithPassword({ email, password })
+    // GoTrue's own 'Invalid login credentials', preserved so errorMessage() can map it.
+    if (error) throw new Error(error.message)
+    return authenticatedEmail(data.user ?? data.session?.user)
+  }
+
+  /**
+   * Supa.signOutToAnonymous(). Back to an ANONYMOUS session rather than no session at all:
+   * every screen assumes a JWT (RLS gives an unauthenticated caller nothing), so leaving
+   * the client sessionless would break the app instead of logging somebody out of it.
+   */
+  async signOutToAnonymous(): Promise<void> {
+    const { error: signOutError } = await this.client.auth.signOut()
+    if (signOutError) throw new Error(signOutError.message)
     const { error } = await this.client.auth.signInAnonymously()
     if (error) throw new Error(error.message)
   }

@@ -1,7 +1,9 @@
 /** Ported from Features/Onboarding/WelcomeView.swift. */
 
+import { useEffect, useState } from 'react'
 import { useBackend } from '../backend'
 import { AppCopy } from '../design/copy'
+import { LoginSheet } from './LoginSheet'
 
 interface WelcomeProps {
   onCreate: () => void
@@ -10,6 +12,27 @@ interface WelcomeProps {
 
 export function Welcome({ onCreate, onJoin }: WelcomeProps) {
   const backend = useBackend()
+  const [isLoginPresented, setIsLoginPresented] = useState(false)
+  const [signedInEmail, setSignedInEmail] = useState<string | null>(null)
+
+  // WelcomeView's `.task { signedInEmail = await Supa.currentEmail() }`. Null for an
+  // anonymous session, which is the normal state — creating and joining never need this.
+  useEffect(() => {
+    let cancelled = false
+    void backend
+      .currentEmail()
+      .then((email) => {
+        if (!cancelled) setSignedInEmail(email)
+      })
+      .catch(() => {
+        // A session that cannot be read is not a login; the app runs anonymously anyway.
+        if (!cancelled) setSignedInEmail(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [backend])
+
   return (
     <div className="relative flex min-h-dvh flex-col overflow-hidden bg-background">
       {/* The two decorative circles from WelcomeView's ZStack */}
@@ -52,6 +75,30 @@ export function Welcome({ onCreate, onJoin }: WelcomeProps) {
         </div>
 
         {/*
+          The optional-login affordance from WelcomeView: a plain accent button, the caption
+          that says it is optional, and — once signed in — the address underneath, so the
+          answer to 「this session is recoverable」 is visible without opening the sheet.
+        */}
+        <div className="flex flex-col items-center gap-xs">
+          <button
+            type="button"
+            onClick={() => setIsLoginPresented(true)}
+            data-testid="login"
+            className="min-h-[44px] px-sm text-body font-semibold text-accent active:opacity-80"
+          >
+            {AppCopy.login}
+          </button>
+          <p className="max-w-[30ch] text-center text-caption text-ink/72">
+            {AppCopy.optionalLogin}
+          </p>
+          {signedInEmail !== null && (
+            <p data-testid="signed-in-email" className="text-center text-caption text-ink/72">
+              {signedInEmail}
+            </p>
+          )}
+        </div>
+
+        {/*
           Not part of the iOS design — the only affordance added for the web build, so a
           reviewer running without Supabase credentials knows the data is the seed.sql
           fixture and can reach the demo event. Safe to delete once wired to a project.
@@ -63,6 +110,19 @@ export function Welcome({ onCreate, onJoin }: WelcomeProps) {
           </p>
         )}
       </div>
+
+      {/*
+        `.sheet(isPresented:)`: mounted only while presented, so each presentation starts
+        with empty fields and no stale error, the way @State does on iOS.
+      */}
+      {isLoginPresented && (
+        <LoginSheet
+          currentEmail={signedInEmail}
+          onDismiss={() => setIsLoginPresented(false)}
+          onSignedIn={setSignedInEmail}
+          onSignedOut={() => setSignedInEmail(null)}
+        />
+      )}
     </div>
   )
 }

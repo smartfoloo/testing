@@ -38,7 +38,63 @@ anonymous sign-ins, disable public Realtime access, and deploy the `llm-assist` 
 | `npm run lint` | oxlint |
 | `npm run typecheck` | `tsc -b --noEmit` |
 | `npm run verify:engine` | Asserts the ported feasibility engine against the seed fixture |
+| `npm run verify:golden` | The §6 golden path + A1–A7, in a real browser (needs `npm run dev`) |
+| `npm run verify:p0` | The P0 features added around the golden path |
+| `npm run verify:hosted` | The same golden path against a real Supabase project — see below |
 | `npm run icons` | Regenerates the PWA icon set from the design tokens |
+
+## Verifying against a real Supabase project
+
+Every suite above except `verify:hosted` runs against the in-browser mock. That is genuinely
+useful — the mock is a faithful port of the SQL engine, and `verify:engine` asserts the two
+agree — but it cannot prove the hosted path, and three classes of bug found in this codebase
+were invisible to it: an invite code the join screen could never match, a cast that raised in
+Postgres but not in TypeScript, and two realtime channels sharing one topic. PRD §34 asks for
+A1–A10 against the deployed environment for exactly this reason.
+
+`verify:hosted` runs **the same scenario file** as `verify:golden`; only the way a session is
+obtained differs, and `scripts/personas.mjs` owns that difference. Against the mock a persona
+is a localStorage value; against a real project it is a Supabase session obtained through the
+login screen, as `<persona>@aikanji.demo`. One definition of the golden path, two backends.
+
+Order matters, because each step is a precondition for the next:
+
+1. **Apply the migrations and the seed** to the project (`0001` … `0023`, then `seed.sql`).
+   `postgis` and `vector` must be available.
+2. **Authentication → Providers → enable Anonymous sign-ins**, and in Realtime settings
+   **disable "Allow public access"** so the `event-{id}` topics stay private (`0004`'s policy
+   on `realtime.messages` is what authorizes a join).
+3. **Deploy all three Edge Functions** and set their secrets — `GOOGLE_PLACES_API_KEY`,
+   `HOTPEPPER_API_KEY`, `LLM_API_KEY`. Migration `0023` must be applied *before or with* the
+   `restaurant-search` deploy: the function calls two RPCs that migration adds.
+4. **Bootstrap the fixture.** `seed.sql` fills `auth_user_id` with `gen_random_uuid()`, so
+   until this runs the seeded event belongs to nobody and every RLS check fails:
+   ```
+   SUPABASE_URL=… SUPABASE_SERVICE_ROLE_KEY=… AIKANJI_TEST_PASSWORD=… \
+     node ../AIKanji/supabase/scripts/bootstrap-hosted-fixture.mjs --dry-run
+   ```
+   Drop `--dry-run` once the plan looks right. It is idempotent, so it is also how you reset
+   between runs — it clears the negotiations, runs, decision and lifecycle columns the demo
+   mutates, and re-stamps the seeded provider cache so it stays inside `restaurant-search`'s
+   TTLs (6h for discovery, 24h for travel). A demo seeded in the morning and run in the
+   afternoon would otherwise need a provider call it cannot make.
+5. **Point the app at the project** — `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in
+   `.env.local` — and run it (`npm run dev`, or `npm run build && npm run preview`).
+6. **Run it:**
+   ```
+   AIKANJI_TEST_PASSWORD=… APP_URL=http://localhost:5173 npm run verify:hosted
+   ```
+
+The hosted *mechanism* can be rehearsed without a project at all, which is how it was
+developed: the mock's `signIn` accepts the same `<persona>@aikanji.demo` addresses, so
+`AIKANJI_MODE=hosted AIKANJI_TEST_PASSWORD=anything npm run verify:hosted` against the mock
+drives the real login sheet six times and still asserts all 21 checks. That proves the harness
+— sign-in, sign-out between personas, and the event re-entry — leaving only Supabase's own
+behaviour (RLS, Realtime authorization, the Edge Functions) as the part a real project
+actually tests. Worth running after any change to `scripts/personas.mjs`.
+
+The service-role key appears in step 4 only. It bypasses RLS, which is the only way to rewire
+another user's rows, so it is a setup tool and must never reach the app or an assertion.
 
 ## Layout
 
