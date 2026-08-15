@@ -128,6 +128,24 @@ extension JSONValue {
         case .null: return "—"
         }
     }
+
+    /// The members of a tag-style value, kept separate so each can be labelled on its own —
+    /// `displayText` above would hand back one 「quiet, lively」 string. A single stored string
+    /// counts as a one-member list; anything else has no members, which is what the callers
+    /// already treat as "nothing stated". Mirrors `tagList` in web/src/models/format.ts.
+    var tagList: [String] {
+        switch self {
+        case .array(let values):
+            return values
+                .map { $0.displayText.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        case .string(let value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? [] : [trimmed]
+        default:
+            return []
+        }
+    }
 }
 
 enum ConstraintFormatter {
@@ -143,18 +161,31 @@ enum ConstraintFormatter {
         case .travelTime:
             if let minutes = value["max_minutes"]?.displayText { return "\(type.label)：\(minutes)分以内" }
         case .cuisine:
-            if let include = value["include"]?.displayText, !include.isEmpty {
-                return "\(type.label)：\(include)"
-            }
-        case .dietary, .atmosphere:
-            if let tags = value["tags"]?.displayText, !tags.isEmpty { return "\(type.label)：\(tags)" }
+            let include = value["include"]?.tagList ?? []
+            if !include.isEmpty { return "\(type.label)：\(labelled(include, AppCopy.cuisine))" }
+        // dietary and atmosphere share the {"tags": []} shape but not the vocabulary, so they
+        // no longer share a branch.
+        case .dietary:
+            let tags = value["tags"]?.tagList ?? []
+            if !tags.isEmpty { return "\(type.label)：\(labelled(tags, AppCopy.dietary))" }
+        case .atmosphere:
+            let tags = value["tags"]?.tagList ?? []
+            if !tags.isEmpty { return "\(type.label)：\(labelled(tags, AppCopy.atmosphere))" }
         case .allergy:
-            if let allergens = value["allergens"]?.displayText, !allergens.isEmpty {
-                return "\(type.label)：\(allergens)"
-            }
+            let allergens = value["allergens"]?.tagList ?? []
+            if !allergens.isEmpty { return "\(type.label)：\(labelled(allergens, AppCopy.allergen))" }
         default: break
         }
         return "\(type.label)：\(value.values.map(\.displayText).joined(separator: "、"))"
+    }
+
+    /// Japanese labels for a tag list, falling back to the tag exactly as stored when the
+    /// vocabulary does not know it. Unknown tags are printed, never dropped and never guessed
+    /// at: an allergy or dietary tag that vanished would be a safety problem, and an invented
+    /// translation would be worse than the English. Mirrors `labelTags` in
+    /// web/src/models/format.ts.
+    private static func labelled(_ tags: [String], _ label: (String) -> String?) -> String {
+        tags.map { label($0) ?? $0 }.joined(separator: "・")
     }
 
     static func feedLine(_ item: FeedItem) -> String {

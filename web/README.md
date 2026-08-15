@@ -101,7 +101,9 @@ preview` — service workers do not run in dev.
 
 ## Provider attribution — a licence obligation, not decoration
 
-Venue attributes come from two providers, and one of them requires a credit.
+Venue attributes come from two providers, and both of them require a credit. They are separate
+obligations with separate wording, and neither discharges the other; both are rendered together
+at the foot of the shortlist by `ProviderAttribution`.
 
 `AIKanji/supabase/functions/restaurant-search/index.ts` discovers candidates through the
 **Google Places** API (`displayName`, location, `rating`/`userRatingCount`, `priceLevel`) and
@@ -136,15 +138,63 @@ Rules for anyone touching it:
    Places-sourced names, locations and ratings — as theirs.
 4. It is hidden only when the shortlist is empty, since then no sourced attribute is on screen.
 
-### Not covered: Google Maps/Places attribution
+### Google Maps attribution — the shortlist is covered, the rest is not (B5)
 
-Google's Maps Platform terms impose their **own, separate** attribution requirements on
-Places content (broadly: display "Powered by Google" / the Google logo where Places data or
-Maps imagery appears, and preserve the `attributions`/third-party notices a Place returns).
-Those obligations are **not** discharged by the Hot Pepper credit and are **not implemented**
-here. Nothing was guessed at: the exact placement and asset rules need to be read off the
-current Maps Platform policy before anything ships. Tracked in `AIKanji/README.md`'s
-follow-up punch list.
+Google's Maps Platform terms impose their **own, separate** requirements on Places content, none
+of which the Hot Pepper credit discharges. Two of them apply to this app:
+
+1. Places content displayed **without a Google map** must carry Google Maps attribution — the
+   Google logo, or the text "Google Maps" where space is limited — unmodified and legible. The
+   shortlist is exactly that case: a list of venues, and the app draws no map anywhere.
+2. The per-place third-party **`attributions`** a Place returns must be displayed with the
+   content they belong to.
+
+Requirement 1 is now met **on the recommendation shortlist**:
+
+| | |
+| --- | --- |
+| Rendered by | `ProviderAttribution` in `src/features/Recommendations.tsx` (iOS: `RecommendationListView.swift`), directly below the Hot Pepper credit in the same block |
+| Wording | `AttributionCopy.googleScope` and `AttributionCopy.googleCredit` in `src/design/copy.ts` (iOS: `AppCopy.swift`) — same strings on both clients |
+| Says | 「お店探しと、店名・場所・口コミ評価（評価の件数を含む）などのお店の情報は、Google Maps から取得しています。」 and then, on its own line, `Google Maps` |
+| `data-testid` | `google-attribution`, `google-attribution-credit` (iOS `accessibilityIdentifier`s match) |
+| Form | The **text** form, not a hosted logo asset — see below. Latin script, unmodified, at full `text-ink` contrast rather than the `/72` used for our own footnotes, and not a link |
+
+The scope sentence exists for the same reason Hot Pepper's does: `restaurant-search` discovers
+the candidates through Places and stores the `displayName`, location and
+`rating`/`userRatingCount`, so this names what Google supplies instead of leaving the existing
+「別の提供元」 anonymous. Keep both sentences — each is what stops the other credit over-claiming.
+
+**Still not satisfied.** This is a partial, not a completed obligation:
+
+- **The logo.** We ship the sanctioned text form because Google's brand rules govern the asset,
+  its clear space and its colour variants, and none of that can be verified from this repo — a
+  wrong or stale logo would be a worse violation than the text they allow where space is
+  limited. Someone with the current brand guidance in front of them should decide whether the
+  asset is required here.
+- **Per-place `attributions` are stored but not yet displayed.** The provider side landed
+  separately: `restaurant-search` now requests `places.attributions` and records it verbatim in
+  `restaurant_features.provider_attributions` (jsonb, migration 0023). The client half is
+  missing — `RestaurantFeature` in `src/models/types.ts` has no such field and
+  `backend.features()` does not select it — so nothing can reach the screen yet.
+  `ProviderAttribution` takes an optional `placeAttributions: string[]` and renders it inside the
+  Google block when non-empty, so wiring it up is (a) adding the field where the type lives and
+  (b) deciding how an element that arrives as an **object** (Places (New) documents a provider
+  name plus a provider URI; the column also accepts the historical HTML-ish string) becomes one
+  displayable line. Neither the field name nor that mapping is invented here, because rewriting
+  a credit is a misattribution. Note the rendering: the component prints each line as **text**
+  (`dangerouslySetInnerHTML` is not an option for third-party markup, and the iOS side avoids
+  `AttributedString(markdown:)` for the same reason), so markup inside a string shows as its
+  characters rather than as a link — check that against the policy once real data flows.
+- **The travel-reference place picker is not covered.** `place-search` returns Places
+  `displayName`/`formattedAddress`, and `TravelReferenceField` (`src/features/CreateEvent.tsx`,
+  reused by `JoinEvent`) plus the travel editor in `ConstraintEntry.tsx` print those suggestions
+  with no map and no attribution. Same obligation, different screens; those views were out of
+  scope for this change.
+- **EEA/regional variations and the rest of the terms** (the EEA terms differ, and there are
+  separate rules for caching, photos and reviews — we display neither photos nor review text)
+  have not been reviewed here.
+
+Tracked as B5 in `AIKanji/README.md`'s follow-up punch list.
 
 ## Deliberate deviations
 

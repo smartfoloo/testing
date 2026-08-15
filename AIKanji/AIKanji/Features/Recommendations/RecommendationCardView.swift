@@ -300,7 +300,12 @@ struct RecommendationCardView: View {
         var values: [String] = []
         if let price = feature.priceYenEstimate { values.append("\(price)円前後") }
         if let room = feature.roomDescription { values.append(room) }
-        values.append(contentsOf: feature.cuisineTags.prefix(2))
+        // Cuisine tags are stored as English identifiers, so they go through the lookup
+        // before reaching a Japanese-only screen — otherwise the card reads
+        // 「3800円前後・半個室・yakitori」. An unrecognised tag still prints verbatim rather
+        // than vanishing, matching ConstraintFormatter's rule. Mirrors
+        // web/src/features/RecommendationCard.tsx.
+        values.append(contentsOf: feature.cuisineTags.prefix(2).map { AppCopy.cuisine($0) ?? $0 })
         return values
     }
 }

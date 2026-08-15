@@ -189,6 +189,127 @@ export function roomLabel(value: string): string | null {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Taxonomy tag vocabularies (the app has no English surface)                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * `normalized_value` stores taxonomy tags as English identifiers — llm-assist's
+ * SYSTEM_PROMPT fixes the shapes (dietary/atmosphere `{"tags": []}`, allergy
+ * `{"allergens": []}`, cuisine `{"include": [], "exclude": []}`) and its examples are English
+ * words — so printing them verbatim put 「雰囲気：quiet」 and 「アレルギー：shellfish」 in an
+ * otherwise fully Japanese interface. Each vocabulary therefore gets a lookup with the same
+ * contract as `roomLabel` / `smokingLabel` / `accessibilityNeedLabel` above: a Japanese label
+ * for a value we actually produce, and `null` for everything else so the caller falls through
+ * to the stored tag.
+ *
+ * The vocabularies are read off the code, not invented: `DIETARY_WORDS`, `ALLERGEN_WORDS`,
+ * `ATMOSPHERE_WORDS` and `CUISINE_WORDS` in `src/backend/mock.ts` (the deterministic parser,
+ * which is the fullest enumeration), the tags `AIKanji/supabase/seed.sql` stores, and
+ * `ATMOSPHERE_JA` in `mock.ts` for the atmosphere register. Nothing outside that is guessed:
+ * an unrecognised tag prints as stored, because a dietary or allergy tag that silently
+ * disappeared would be a safety problem and an invented translation is worse than the English.
+ *
+ * Mirrored 1:1 by `AppCopy.dietary/allergen/atmosphere/cuisine` in AppCopy.swift.
+ */
+
+/** `DIETARY_WORDS` in mock.ts; `vegetarian` is also the tag seed.sql stores on venues. */
+export function dietaryLabel(value: string): string | null {
+  switch (value) {
+    case 'vegan':
+      return 'ヴィーガン'
+    case 'vegetarian':
+      return 'ベジタリアン'
+    case 'halal':
+      return 'ハラル'
+    case 'gluten_free':
+      return 'グルテンフリー'
+    default:
+      return null
+  }
+}
+
+/**
+ * `ALLERGEN_WORDS` in mock.ts, labelled with the terms Japanese food labelling uses
+ * (消費者庁の特定原材料: 卵・乳・小麦・そば・落花生), so the word on screen is the word on a
+ * menu rather than an approximation of one.
+ *
+ * `shellfish` is the parser's crustacean tag — its own comment reads 「えび/かに are
+ * crustaceans, mapped onto the fixture's `shellfish_free` tag」 — so it is 甲殻類 exactly.
+ * (That regex also routes 貝 to `shellfish`, which is a parser-side imprecision on the
+ * venue-matching side; widening the label to cover molluscs would misstate what the tag means,
+ * so it is left alone here.)
+ */
+export function allergenLabel(value: string): string | null {
+  switch (value) {
+    case 'shellfish':
+      return '甲殻類'
+    case 'egg':
+      return '卵'
+    case 'milk':
+      return '乳'
+    case 'peanut':
+      return '落花生（ピーナッツ）'
+    case 'wheat':
+      return '小麦'
+    case 'buckwheat':
+      return 'そば'
+    default:
+      return null
+  }
+}
+
+/**
+ * `ATMOSPHERE_WORDS` in mock.ts. The wording is `ATMOSPHERE_JA`'s verbatim, so a tag reads the
+ * same in a requirement (「雰囲気：静か」) and in a card's explanation (「静かな雰囲気」).
+ */
+export function atmosphereLabel(value: string): string | null {
+  switch (value) {
+    case 'quiet':
+      return '静か'
+    case 'lively':
+      return '賑やか'
+    case 'casual':
+      return 'カジュアル'
+    case 'traditional_japanese':
+      return '和風'
+    case 'stylish':
+      return 'おしゃれ'
+    default:
+      return null
+  }
+}
+
+/** `CUISINE_WORDS` in mock.ts — the words the parser matched, given back in Japanese. */
+export function cuisineLabel(value: string): string | null {
+  switch (value) {
+    case 'yakitori':
+      return '焼き鳥'
+    case 'izakaya':
+      return '居酒屋'
+    case 'japanese':
+      return '和食'
+    case 'sushi':
+      return '寿司'
+    case 'yakiniku':
+      return '焼肉'
+    case 'ramen':
+      return 'ラーメン'
+    case 'italian':
+      return 'イタリアン'
+    case 'chinese':
+      return '中華'
+    case 'korean':
+      return '韓国料理'
+    case 'curry':
+      return 'カレー'
+    case 'soba':
+      return 'そば'
+    default:
+      return null
+  }
+}
+
 /**
  * Mirrors AppCopy.errorMessage(for:) — maps the RPC exception text raised by the
  * security definer functions onto a calm, non-technical Japanese message.
@@ -650,7 +771,8 @@ export function scoreDataGapNote(breakdown: ScoreBreakdown): string | null {
  * actually sourced there.
  *
  * Google's Maps/Places terms carry their own, different attribution requirements for
- * Places content; those are NOT discharged here. See web/README.md.
+ * Places content, which the Hot Pepper credit does not discharge. The `google*` entries below
+ * are that separate credit; see web/README.md for what is and is not covered.
  *
  * Mirrors `AttributionCopy` in AIKanji/AIKanji/DesignSystem/AppCopy.swift.
  */
@@ -660,4 +782,23 @@ export const AttributionCopy = {
   /** Recruit's mandated credit wording. Do not translate, abbreviate or hide it. */
   credit: 'Powered by ホットペッパーグルメ Webサービス',
   href: 'https://www.hotpepper.jp/',
+
+  /**
+   * Google's Places policy requires Google Maps attribution wherever Places content is shown
+   * *without* a Google map — exactly this screen: a list of venues, no map. `scope` above
+   * already says which two fields are Hot Pepper's, so this names the other side rather than
+   * leaving 「別の提供元」 anonymous: `restaurant-search` finds the candidates through Places
+   * and stores the Places `displayName`, location and `rating`/`userRatingCount`.
+   */
+  googleScope:
+    'お店探しと、店名・場所・口コミ評価（評価の件数を含む）などのお店の情報は、Google Maps から取得しています。',
+  /**
+   * The sanctioned text form of the attribution, which the policy allows in place of the logo
+   * where space is limited. Deliberately NOT a bundled logo image: Google's brand rules govern
+   * the asset, its clear space and its colour variants, and none of that can be verified from
+   * here — shipping a wrong or stale logo would be a worse violation than the text form they
+   * sanction. Latin script, unmodified: it is Google's mark, not a phrase to translate,
+   * abbreviate or fold into the sentence above.
+   */
+  googleCredit: 'Google Maps',
 } as const

@@ -91,9 +91,29 @@ Recruit's, quoted verbatim. Keep the `scope` sentence above it, because Hot Pepp
 only 個室 and the yen band and the bare credit would claim the Places-sourced name, location
 and rating as theirs too.
 
-**Not covered:** Google's Maps Platform terms carry their own, separate attribution
-requirements for Places content, which the Hot Pepper credit does not satisfy. See the punch
-list below and `web/README.md`.
+### Google Maps attribution (partially covered — B5)
+
+Google's Maps Platform terms carry their own, separate requirements for Places content, which
+the Hot Pepper credit does not satisfy. Places content displayed **without a Google map** — this
+app draws no map at all — must carry Google Maps attribution: the Google logo, or the text
+"Google Maps" where space is limited, unmodified and legible.
+
+That much is now rendered on the shortlist, in the same `ProviderAttribution` block, directly
+below the Hot Pepper credit:
+
+- Wording in `AttributionCopy.googleScope` / `AttributionCopy.googleCredit`
+  (`AIKanji/DesignSystem/AppCopy.swift`), mirrored 1:1 in `web/src/design/copy.ts`. The scope
+  sentence names what Places supplies — the discovery itself plus the `displayName`, location
+  and `rating`/`userRatingCount` — so neither credit claims the other's fields.
+- The **text** form, not a logo asset in the catalog: Google's brand rules govern the image and
+  cannot be verified from this repo, and a wrong or stale logo is a worse violation than the
+  text form they sanction. Latin script, unmodified, `AppColors.ink` at full opacity (not the
+  0.72 our own footnotes use), and not a `Link`.
+- `accessibilityIdentifier`s `google-attribution` and `google-attribution-credit` mirror the web
+  `data-testid`s.
+
+What is still outstanding is listed under B5 below. `web/README.md` has the same table plus the
+per-screen detail.
 
 ## Automated backend tests
 
@@ -134,13 +154,27 @@ Requires Docker; no Xcode or macOS needed.
   global `restaurant_features` pool.
 - **B4:** add a needs-confirmation evidence tier for live provider data whose dietary/allergy
   attributes are not verified.
-- **B5 — Google Maps/Places attribution.** The Hot Pepper credit above is done; Google's is
-  not. Maps Platform terms impose their own requirements on Places content (broadly: show
-  "Powered by Google" / the Google logo wherever Places data or Maps imagery is displayed, and
-  surface the per-place `attributions` and third-party notices the API returns). Neither
-  `X-Goog-FieldMask` in `restaurant-search` nor `place-search` asks for `attributions` today,
-  so we do not even hold the data — and adding a field to a mask can move the call to a
-  pricier SKU, per the billing note at the top of both functions. Placement, logo assets and
-  that billing consequence have to be read off the current policy rather than guessed at, so
-  this is deliberately unimplemented, not overlooked.
+- **B5 — Google Maps/Places attribution.** Partially done, deliberately not claimed as
+  finished. **Done:** the Google Maps attribution required when Places content is shown without
+  a Google map is now displayed at the foot of the recommendation shortlist on both clients, in
+  the sanctioned text form, with a scope sentence saying what Places supplies (see the section
+  above). **Outstanding:**
+  - the logo asset — we use the text form on purpose, because the brand rules governing the
+    image cannot be verified from here; whether the logo is required on this surface needs
+    reading off the current guidance;
+  - the per-place `attributions` are stored but **not** displayed: `restaurant-search` now asks
+    for `places.attributions` and records it verbatim in
+    `restaurant_features.provider_attributions` (jsonb, migration 0023), but no client type
+    carries it — `RestaurantFeature` in `AIKanji/Models/Recommendation.swift` has no such field
+    and the service does not select it. `ProviderAttribution` on both clients accepts an optional
+    `placeAttributions: [String]` and renders it verbatim as text when non-empty, so what is left
+    is adding the field where the type lives and deciding how an element that arrives as an
+    object (a provider name plus a provider URI) becomes one line; neither the field name nor
+    that mapping is invented client-side, because an edited credit is a misattribution.
+    `place-search` still does not request `attributions` at all;
+  - the travel-reference place picker (`place-search`'s `displayName`/`formattedAddress`, shown
+    on the create/join and requirement screens) carries no attribution yet — same obligation,
+    different screens;
+  - the EEA terms differ from the general ones, and neither those nor the caching/photo/review
+    rules have been reviewed here.
 - Add read-through caching based on `last_fetched_at` before making provider calls.

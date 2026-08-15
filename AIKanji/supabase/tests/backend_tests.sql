@@ -1029,8 +1029,434 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
+-- 0023 (A): Hot Pepper's 禁煙席 text finally reaches smoking_policy — and only when it is
+-- unambiguous about the WHOLE venue.
+--
+-- 0021 added the column, made a smoking MUST fail closed on NULL and added the accept_unknown
+-- step so that would not be a dead end — but nothing ever wrote the column, so every 禁煙 MUST
+-- had to spend a negotiation round before one venue could qualify. Hot Pepper answers the
+-- question in a response restaurant-search already receives (no `lite` parameter, so the full
+-- shop object comes back); the field was simply never declared.
+--
+-- The value is free text with no published list, and smoking_policy has exactly two legal
+-- values, so fn_hotpepper_smoking_policy recognises whole-venue phrasings and answers NULL for
+-- everything else — including everything it has never seen. Every scratch venue below carries a
+-- unique dietary tag its event requires, so these venues can never be feasible for the demo
+-- event and vice versa; the 0-then-3 invariant is re-asserted at the end regardless.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00230000-0000-0000-0000-00000000a000';
+  v_pid uuid := '00230000-0000-0000-0000-00000000a001';
+  v_uid uuid := '99999999-9999-9999-9999-999999999999';
+  v_smoke_id uuid;
+  v_written int;
+  v_result jsonb;
+  v_places text[];
+  v_raised boolean;
+begin
+  perform t_as_admin();
+
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA hot pepper smoking', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_pid, v_event, v_uid, 'Non-smoker', 'organizer', 'office');
+  update events set organizer_participant_id = v_pid where id = v_event;
+
+  -- The mapping table, value by value. Only a value that describes the whole venue may be
+  -- recorded, because the column cannot express anything in between.
+  perform t_check('an unambiguous 全席禁煙-style value records non_smoking',
+                  fn_hotpepper_smoking_policy('全席禁煙') = 'non_smoking'
+                  and fn_hotpepper_smoking_policy('全面禁煙') = 'non_smoking'
+                  and fn_hotpepper_smoking_policy('店内全席禁煙') = 'non_smoking'
+                  and fn_hotpepper_smoking_policy('店内全面禁煙') = 'non_smoking'
+                  and fn_hotpepper_smoking_policy('完全禁煙') = 'non_smoking',
+                  fn_hotpepper_smoking_policy('全席禁煙'));
+  perform t_check('and an unambiguous whole-venue 喫煙可 value records smoking_ok',
+                  fn_hotpepper_smoking_policy('全席喫煙可') = 'smoking_ok'
+                  and fn_hotpepper_smoking_policy('全席喫煙可能') = 'smoking_ok'
+                  and fn_hotpepper_smoking_policy('全面喫煙可') = 'smoking_ok'
+                  and fn_hotpepper_smoking_policy('店内全席喫煙可') = 'smoking_ok'
+                  and fn_hotpepper_smoking_policy('店内全面喫煙可') = 'smoking_ok',
+                  fn_hotpepper_smoking_policy('全席喫煙可'));
+  -- THE judgement call: a partition somewhere in the room says nothing about which side a group
+  -- of five is seated on, and there is no third value to record it as.
+  perform t_check('一部禁煙 and 分煙 record NULL — unconfirmed, never a guess',
+                  fn_hotpepper_smoking_policy('一部禁煙') is null
+                  and fn_hotpepper_smoking_policy('分煙') is null
+                  and fn_hotpepper_smoking_policy('完全分煙') is null
+                  and fn_hotpepper_smoking_policy('禁煙席あり') is null
+                  and fn_hotpepper_smoking_policy('テラス席のみ喫煙可') is null);
+  -- Substring matching is the trap: every value here contains 禁煙 while describing a room
+  -- somebody is smoking in, or asserts the absence of a seat rather than what is permitted.
+  perform t_check('a partial value that merely CONTAINS 禁煙 is not read as non_smoking',
+                  fn_hotpepper_smoking_policy('全席禁煙（喫煙ブースあり）') is null
+                  and fn_hotpepper_smoking_policy('店内禁煙（屋外喫煙所あり）') is null
+                  and fn_hotpepper_smoking_policy('禁煙席なし') is null
+                  and fn_hotpepper_smoking_policy('禁煙') is null);
+  perform t_check('every unrecognised, absent or empty value records NULL',
+                  fn_hotpepper_smoking_policy('未確認') is null
+                  and fn_hotpepper_smoking_policy('あり') is null
+                  and fn_hotpepper_smoking_policy('なし') is null
+                  and fn_hotpepper_smoking_policy('喫煙可') is null
+                  and fn_hotpepper_smoking_policy('座敷のみ喫煙可') is null
+                  and fn_hotpepper_smoking_policy('') is null
+                  and fn_hotpepper_smoking_policy('   ') is null
+                  and fn_hotpepper_smoking_policy(null) is null);
+  -- Formatting must not hide a value we do recognise: NFKC folds full-width forms and every
+  -- space, including the ideographic U+3000, is removed before matching.
+  perform t_check('padding and full-width whitespace do not hide a recognised value',
+                  fn_hotpepper_smoking_policy('　全席 禁煙 ') = 'non_smoking'
+                  and fn_hotpepper_smoking_policy(' 全席喫煙可　') = 'smoking_ok');
+  -- Whatever the text, the output is inside 0021's CHECK by construction, so a provider anomaly
+  -- can never fail the whole search with a constraint violation.
+  perform t_check('the mapping can only ever emit a value 0021''s CHECK accepts',
+                  not exists (
+                    select 1 from (values ('全席禁煙'),('一部禁煙'),('分煙'),('全席喫煙可'),
+                                          ('未確認'),('あり'),('なし'),(''),('禁煙'),('謎の値'))
+                      as v(txt)
+                    where fn_hotpepper_smoking_policy(v.txt) is not null
+                      and fn_hotpepper_smoking_policy(v.txt)
+                            not in ('non_smoking','smoking_ok')));
+
+  insert into restaurants (place_id) values
+    ('qa0023_smoke_all_non'), ('qa0023_smoke_partial'), ('qa0023_smoke_places_only');
+  insert into restaurant_features (place_id, price_yen_estimate, room_type, dietary_tags)
+  values ('qa0023_smoke_all_non', 3000, 'open', array['qa0023_smoke']),
+         ('qa0023_smoke_partial', 3000, 'open', array['qa0023_smoke']),
+         -- Discovered through Places and never matched in Hot Pepper: nobody can speak to its
+         -- smoking policy at all, which is what most of Tokyo looks like.
+         ('qa0023_smoke_places_only', 3000, 'open', array['qa0023_smoke']);
+  perform t_check('every venue starts unconfirmed, exactly as 0021 left it',
+                  (select count(*) from restaurant_features
+                    where place_id like 'qa0023_smoke_%' and smoking_policy is null) = 3);
+
+  -- One enriched discovery pass: two candidates matched in Hot Pepper carry the provider's text
+  -- verbatim, the Places-only candidate carries no key at all.
+  select fn_record_provider_smoking_policy(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0023_smoke_all_non',
+                       'hotpepper_non_smoking', '全席禁煙'),
+    jsonb_build_object('place_id', 'qa0023_smoke_partial',
+                       'hotpepper_non_smoking', '一部禁煙'),
+    jsonb_build_object('place_id', 'qa0023_smoke_places_only'))) into v_written;
+  perform t_check('the writer touches only the candidates Hot Pepper answered for',
+                  v_written = 2, v_written::text);
+  perform t_check('a whole-venue 禁煙 answer is recorded as non_smoking',
+                  (select smoking_policy from restaurant_features
+                    where place_id = 'qa0023_smoke_all_non') = 'non_smoking',
+                  (select smoking_policy from restaurant_features
+                    where place_id = 'qa0023_smoke_all_non'));
+  perform t_check('a 一部禁煙 answer is recorded as NULL, not as non_smoking',
+                  (select smoking_policy from restaurant_features
+                    where place_id = 'qa0023_smoke_partial') is null);
+  perform t_check('and a candidate Hot Pepper never matched is left untouched',
+                  (select smoking_policy from restaurant_features
+                    where place_id = 'qa0023_smoke_places_only') is null);
+
+  -- AUTHORITATIVE where there IS an answer. Only Hot Pepper speaks to smoking, so there is no
+  -- other provider's enrichment to protect, and 全席禁煙 is a state a venue can leave: keeping
+  -- the old policy because the newest answer is 分煙 would certify smoke-free seating on
+  -- evidence we no longer have.
+  perform fn_record_provider_smoking_policy(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0023_smoke_all_non',
+                       'hotpepper_non_smoking', '分煙')));
+  perform t_check('a later partial answer retracts the policy instead of keeping a stale one',
+                  (select smoking_policy from restaurant_features
+                    where place_id = 'qa0023_smoke_all_non') is null);
+  perform fn_record_provider_smoking_policy(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0023_smoke_all_non',
+                       'hotpepper_non_smoking', '全席禁煙')));
+
+  -- ADDITIVE where there is NO answer, which is the common case: a Places-only refetch, a run
+  -- where Hot Pepper was down (its failure records a provider_incidents row and returns no
+  -- shops), a shop whose 禁煙席 field is blank or not even a string. None of them may erase what
+  -- a matched run recorded.
+  select fn_record_provider_smoking_policy(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0023_smoke_all_non'),
+    jsonb_build_object('place_id', 'qa0023_smoke_all_non', 'hotpepper_non_smoking', null),
+    jsonb_build_object('place_id', 'qa0023_smoke_all_non', 'hotpepper_non_smoking', 42),
+    jsonb_build_object('place_id', 'qa0023_smoke_all_non', 'hotpepper_non_smoking', '   '),
+    -- Whitespace only, including the ideographic space btrim() would leave behind.
+    jsonb_build_object('place_id', 'qa0023_smoke_all_non', 'hotpepper_non_smoking', '　'),
+    jsonb_build_object('hotpepper_non_smoking', '全席喫煙可'),
+    jsonb_build_object('place_id', 'qa0023_no_such_place',
+                       'hotpepper_non_smoking', '全席禁煙'))) into v_written;
+  perform t_check('an absent, null, non-string or blank field writes nothing at all',
+                  v_written = 0, v_written::text);
+  perform t_check('so a run with nothing to say cannot erase a recorded policy',
+                  (select smoking_policy from restaurant_features
+                    where place_id = 'qa0023_smoke_all_non') = 'non_smoking');
+  perform t_check('and a malformed candidate list is ignored rather than raising',
+                  fn_record_provider_smoking_policy(v_event, null) = 0
+                  and fn_record_provider_smoking_policy(v_event, '{}'::jsonb) = 0
+                  and fn_record_provider_smoking_policy(v_event, '[]'::jsonb) = 0);
+
+  -- The point of the whole exercise: a 禁煙 MUST can now be met by provider data, with no
+  -- negotiation round at all.
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'QA pool gate',
+          'dietary', '{"tags":["qa0023_smoke"]}', 'ANONYMOUS');
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', '禁煙の店がいい',
+          'smoking', '{"preference":"non_smoking"}', 'PUBLIC')
+  returning id into v_smoke_id;
+
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('a 禁煙 MUST is satisfiable without a negotiation round at all',
+                  (v_result->>'feasible_count')::int = 1, v_result::text);
+  select array_agg(r.place_id order by r.place_id) into v_places
+    from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event, r.place_id);
+  perform t_check('and the one feasible venue is the one Hot Pepper confirmed',
+                  v_places = array['qa0023_smoke_all_non'], v_places::text);
+  perform t_check('the partial and the unmatched venue are blocked on smoking, not satisfied',
+                  fn_candidate_blocking_types(v_event, 'qa0023_smoke_partial')
+                    = array['smoking']
+                  and fn_candidate_blocking_types(v_event, 'qa0023_smoke_places_only')
+                    = array['smoking']);
+  -- 0021's escape hatch is untouched for the venues that are genuinely unconfirmed.
+  perform t_check('0021''s accept_unknown step still unlocks exactly the unconfirmed two',
+                  fn_count_unlocked_if_relaxed(v_event, v_smoke_id) = 2,
+                  fn_count_unlocked_if_relaxed(v_event, v_smoke_id)::text);
+
+  -- The write path is the provider pipeline's, not an API caller's: certifying a smoking policy
+  -- is not something a participant may do to somebody else's health decision.
+  perform t_as_user(v_uid);
+  v_raised := false;
+  begin
+    perform fn_record_provider_smoking_policy(v_event, '[]'::jsonb);
+  exception when insufficient_privilege then
+    v_raised := true;
+  end;
+  perform t_check('an API caller cannot record a smoking policy', v_raised);
+  perform t_as_admin();
+
+  -- The seed has no Hot Pepper ids and no smoking constraints, so nothing above may have
+  -- touched it. Verified, not assumed.
+  perform t_check('the demo fixture is still entirely unconfirmed about smoking',
+                  (select count(*) from restaurant_features
+                    where place_id like 'demo_place_%' and smoking_policy is null) = 4);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0023 (B): Hot Pepper's barrier_free is NOT mapped onto accessibility_tags, on purpose.
+--
+-- The same Gourmet Search response carries `barrier_free` (バリアフリー), free text whose
+-- documented example is 「なし」. 0022's vocabulary is a closed set of four members, each named
+-- after one Google Places accessibilityOptions boolean so the mapping needs no inference.
+-- 「なし」 means there are no barrier-free facilities — no tag, which correctly fails the MUST
+-- closed — and 「あり」 does not say it is the ENTRANCE that is step-free, or that the restroom
+-- is usable, or that a wheelchair user can be seated. Accessibility is never relaxable, so a
+-- wrong tag cannot be walked back by a question; it puts someone in front of a step they were
+-- told was not there.
+--
+-- These checks assert the decision holds even against a future deployment that tried to forward
+-- the text anyway: canonicalisation drops it, and 0022's venue-side CHECK refuses it outright.
+-- Nothing here weakens either.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00230000-0000-0000-0000-00000000b000';
+  v_pid uuid := '00230000-0000-0000-0000-00000000b001';
+  v_written int;
+  v_result jsonb;
+  v_raised boolean;
+begin
+  perform t_as_admin();
+
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA barrier free', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_pid, v_event, gen_random_uuid(), 'Wheelchair user', 'organizer', 'station');
+  update events set organizer_participant_id = v_pid where id = v_event;
+
+  insert into restaurants (place_id) values ('qa0023_bf_ari');
+  -- A venue Hot Pepper describes as barrier_free = 「あり」 and Places says nothing about.
+  insert into restaurant_features
+    (place_id, price_yen_estimate, room_type, dietary_tags, accessibility_tags)
+  values ('qa0023_bf_ari', 3000, 'open', array['qa0023_bf'], '{}');
+
+  perform t_check('0023 leaves the accessibility vocabulary at the four Places booleans',
+                  fn_accessibility_vocabulary() = array[
+                    'wheelchair_accessible_entrance','wheelchair_accessible_parking',
+                    'wheelchair_accessible_restroom','wheelchair_accessible_seating'],
+                  fn_accessibility_vocabulary()::text);
+  perform t_check('no barrier_free wording can ever become a vocabulary member',
+                  fn_accessibility_canonical_tags(
+                    array['あり','なし','未確認','バリアフリー','barrier_free','一部'])
+                    = '{}'::text[],
+                  fn_accessibility_canonical_tags(array['あり','barrier_free'])::text);
+  -- Even if something did forward it, 0022's writer canonicalises it away rather than recording
+  -- a tag nobody can stand behind.
+  select fn_record_provider_accessibility(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0023_bf_ari',
+      'accessibility_tags', jsonb_build_array('あり', 'barrier_free')))) into v_written;
+  perform t_check('so the 0022 write path records no tag for a barrier_free positive',
+                  (select accessibility_tags from restaurant_features
+                    where place_id = 'qa0023_bf_ari') = '{}'::text[],
+                  (select accessibility_tags::text from restaurant_features
+                    where place_id = 'qa0023_bf_ari'));
+  v_raised := false;
+  begin
+    update restaurant_features set accessibility_tags = array['barrier_free']
+     where place_id = 'qa0023_bf_ari';
+  exception when check_violation then
+    v_raised := true;
+  end;
+  perform t_check('and 0022''s venue-side CHECK still refuses it outright', v_raised);
+
+  -- The consequence, stated plainly: 「あり」 buys the venue nothing, which is the honest
+  -- outcome. It fails closed AND it is counted as unverified, so the 幹事 can phone the venue
+  -- (verification_requirement = 'required', 0018) instead of being shown a silent 0件.
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'QA pool gate',
+          'dietary', '{"tags":["qa0023_bf"]}', 'ANONYMOUS'),
+         (v_event, v_pid, 'MUST', '車椅子で入れる店',
+          'accessibility', '{"needs":["wheelchair_accessible_entrance"]}', 'ANONYMOUS');
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('a venue whose only evidence is 「あり」 still fails the MUST closed',
+                  (v_result->>'feasible_count')::int = 0
+                  and (v_result->>'accessibility_unverified_count')::int = 1,
+                  v_result::text);
+  perform t_check('and it is still never proposed for relaxation',
+                  fn_propose_relaxation(v_event) is null);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0023 (C): Google's per-place attributions are stored where the client that must display them
+-- can read them.
+--
+-- Showing Places content without a Google map requires Google Maps attribution AND requires
+-- that the per-place third-party attributions the API returns are retrieved and displayed.
+-- Neither field mask asked for them, so we did not hold the data at all.
+--
+-- They live on restaurant_features, not in restaurant_source_records: the raw payload table is
+-- service-role only (no client read policy, table privileges revoked from anon and
+-- authenticated), and data a client is REQUIRED to display cannot live where the client cannot
+-- read it. Both facts are asserted below. The column is jsonb because an attribution's exact
+-- wording and markup belong to its provider — string or object, stored as given, never rewritten.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00230000-0000-0000-0000-00000000c000';
+  v_pid uuid := '00230000-0000-0000-0000-00000000c001';
+  v_uid uuid := '10101010-1010-1010-1010-101010101010';
+  v_html text := 'Listings by <a href="https://example.co.jp/">まとめグルメ</a>';
+  v_object jsonb := jsonb_build_object(
+    'provider', 'Example Provider', 'providerUri', 'https://example.com/');
+  v_attributions jsonb;
+  v_written int;
+  v_raised boolean;
+begin
+  perform t_as_admin();
+
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA attributions', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_pid, v_event, v_uid, 'Reader', 'organizer', 'office');
+  update events set organizer_participant_id = v_pid where id = v_event;
+
+  insert into restaurants (place_id) values ('qa0023_attr_credited'), ('qa0023_attr_stale');
+  insert into restaurant_features (place_id, price_yen_estimate, room_type, dietary_tags)
+  values ('qa0023_attr_credited', 3000, 'open', array['qa0023_attr']),
+         ('qa0023_attr_stale', 3000, 'open', array['qa0023_attr']);
+  -- "Nobody has recorded any" is an empty array, not a null the client has to special-case —
+  -- including for every seeded demo venue.
+  perform t_check('a venue with no recorded credits holds an empty array, never null',
+                  (select count(*) from restaurant_features
+                    where provider_attributions = '[]'::jsonb
+                      and (place_id like 'qa0023_attr_%' or place_id like 'demo_place_%')) = 6,
+                  (select count(*)::text from restaurant_features
+                    where provider_attributions = '[]'::jsonb
+                      and (place_id like 'qa0023_attr_%' or place_id like 'demo_place_%')));
+
+  select fn_record_provider_attributions(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0023_attr_credited', 'attributions',
+      -- The two shapes an attribution can arrive in, plus four elements that cannot be a credit
+      -- in any shape.
+      jsonb_build_array(v_html, v_object, 42, true, null, jsonb_build_array('nested'))),
+    jsonb_build_object('place_id', 'qa0023_attr_stale', 'attributions',
+      jsonb_build_array(v_html)))) into v_written;
+  perform t_check('the writer records the credits for every place Places answered for',
+                  v_written = 2, v_written::text);
+  select provider_attributions into v_attributions
+    from restaurant_features where place_id = 'qa0023_attr_credited';
+  perform t_check('an HTML-ish credit is stored exactly as given, not escaped or rewritten',
+                  v_attributions->>0 = v_html, v_attributions::text);
+  perform t_check('an object-shaped credit keeps every field it arrived with',
+                  v_attributions->1 = v_object, v_attributions::text);
+  perform t_check('elements that cannot be a credit are dropped, never rendered as junk',
+                  jsonb_array_length(v_attributions) = 2, v_attributions::text);
+
+  -- Absent key: this run learned nothing about that place (a cached candidate, a skipped
+  -- discovery), so the credits the display is already rendering must survive.
+  perform fn_record_provider_attributions(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0023_attr_stale'),
+    jsonb_build_object('place_id', 'qa0023_attr_stale', 'attributions', '"not an array"'::jsonb)));
+  perform t_check('an absent or unreadable attributions key changes nothing',
+                  (select provider_attributions from restaurant_features
+                    where place_id = 'qa0023_attr_stale') = jsonb_build_array(v_html));
+  -- Present but empty: Places' current answer. Continuing to display a credit the provider no
+  -- longer returns is a claim about where today's data came from, not caution.
+  perform fn_record_provider_attributions(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0023_attr_stale', 'attributions', '[]'::jsonb)));
+  perform t_check('a present-but-empty answer clears a credit that no longer applies',
+                  (select provider_attributions from restaurant_features
+                    where place_id = 'qa0023_attr_stale') = '[]'::jsonb);
+
+  -- The column keeps the shape the client iterates: always an array, never null.
+  v_raised := false;
+  begin
+    update restaurant_features set provider_attributions = '"oops"'::jsonb
+     where place_id = 'qa0023_attr_stale';
+  exception when check_violation then
+    v_raised := true;
+  end;
+  perform t_check('a non-array attributions value is refused', v_raised);
+  v_raised := false;
+  begin
+    update restaurant_features set provider_attributions = null
+     where place_id = 'qa0023_attr_stale';
+  exception when not_null_violation then
+    v_raised := true;
+  end;
+  perform t_check('and so is a null one', v_raised);
+
+  -- THE READER. A participant's client is what has to render the credit, so it must be able to
+  -- read it — and it still must not be able to read the raw provider payload the credit came in.
+  perform t_as_user(v_uid);
+  perform t_check('the client that must display the credit can read it',
+                  (select provider_attributions from restaurant_features
+                    where place_id = 'qa0023_attr_credited') = jsonb_build_array(v_html, v_object),
+                  (select provider_attributions::text from restaurant_features
+                    where place_id = 'qa0023_attr_credited'));
+  v_raised := false;
+  begin
+    perform (select count(*) from restaurant_source_records);
+  exception when insufficient_privilege then
+    v_raised := true;
+  end;
+  perform t_check('while the raw payload table stays unreadable, which is why the column exists',
+                  v_raised);
+  -- And publishing an attribution is the pipeline's job, not a caller's.
+  v_raised := false;
+  begin
+    perform fn_record_provider_attributions(v_event, '[]'::jsonb);
+  exception when insufficient_privilege then
+    v_raised := true;
+  end;
+  perform t_check('an API caller cannot record provider attributions', v_raised);
+  perform t_as_admin();
+end $$;
+
+-- ---------------------------------------------------------------------------
 -- 0021: the demo invite code is reachable, and the demo invariant is untouched by
--- everything above (three extra events and nine extra venues now share the global pool).
+-- everything above (every QA block adds its own events and venues to the same global pool —
+-- ten events and twenty-three venues by this point).
 -- ---------------------------------------------------------------------------
 do $$
 declare

@@ -9,6 +9,7 @@ import { useId, useState } from 'react'
 import {
   AppCopy,
   ScoreCopy,
+  cuisineLabel,
   emphasizedScoreDimensions,
   isScoreDimensionUnknown,
   recommendationBadge,
@@ -287,7 +288,11 @@ export function RecommendationCard({
     if (feature.price_yen_estimate !== null) details.push(`${feature.price_yen_estimate}円前後`)
     const room = roomDescription(feature.room_type)
     if (room) details.push(room)
-    details.push(...feature.cuisine_tags.slice(0, 2))
+    // Provider/taxonomy tags are stored as English identifiers, so they must go through
+    // the lookup before reaching a Japanese-only screen — otherwise the card reads
+    // 「3800円前後・半個室・yakitori」. An unrecognised tag still prints verbatim rather
+    // than vanishing, which is the same rule constraintSummary follows.
+    details.push(...feature.cuisine_tags.slice(0, 2).map((tag) => cuisineLabel(tag) ?? tag))
   }
 
   const breakdown = score.score_breakdown

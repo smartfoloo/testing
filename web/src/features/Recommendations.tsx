@@ -52,22 +52,76 @@ function ObjectiveLegend({ breakdown }: { breakdown: ScoreBreakdown }) {
  *
  * Not rendered when the list is empty: with no venue attributes on screen there is nothing
  * sourced to credit.
+ *
+ * Two credits, because two providers impose obligations and neither discharges the other's.
+ * Each keeps its own scope sentence so neither over-claims: Hot Pepper supplies 個室 and the
+ * yen band, Places supplies the discovery itself plus the name, location and rating/review
+ * count. Google's Places policy requires Google Maps attribution wherever Places content is
+ * displayed without a Google map, which is exactly this screen.
  */
-function ProviderAttribution() {
+function ProviderAttribution({
+  /**
+   * The per-place third-party attributions Places returns, already reduced to display-ready
+   * lines by whatever owns the type. The policy says they must be displayed with the content
+   * they belong to, so they render inside the same block as the credit.
+   *
+   * TODO(B5): nothing can pass these yet, so they are never shown. The storage half exists —
+   * `restaurant_features.provider_attributions` (jsonb, migration 0023), written by
+   * `fn_record_provider_attributions` from the `places.attributions` the search now requests —
+   * but no client type carries it: `RestaurantFeature` in src/models/types.ts has no such
+   * field, and `backend.features()` does not select it. Wiring it up means (a) adding the field
+   * where the type lives, and (b) deciding how an element that arrives as an object (Places
+   * (New) documents a provider name plus a provider URI) becomes one line, since elements are
+   * stored verbatim as either a string or an object and rewriting a credit is a misattribution.
+   * No field name or element shape is invented here.
+   */
+  placeAttributions = [],
+}: {
+  placeAttributions?: string[]
+}) {
   return (
-    <div data-testid="provider-attribution" className="flex flex-col gap-xxs">
-      <p className="text-small text-ink/72">{AttributionCopy.scope}</p>
-      <p>
-        <a
-          href={AttributionCopy.href}
-          target="_blank"
-          rel="noopener noreferrer"
-          data-testid="provider-attribution-link"
-          className="inline-flex min-h-[44px] items-center text-caption text-ink/72 underline underline-offset-2"
-        >
-          {AttributionCopy.credit}
-        </a>
-      </p>
+    <div data-testid="provider-attribution" className="flex flex-col gap-sm">
+      <div className="flex flex-col gap-xxs">
+        <p className="text-small text-ink/72">{AttributionCopy.scope}</p>
+        <p>
+          <a
+            href={AttributionCopy.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-testid="provider-attribution-link"
+            className="inline-flex min-h-[44px] items-center text-caption text-ink/72 underline underline-offset-2"
+          >
+            {AttributionCopy.credit}
+          </a>
+        </p>
+      </div>
+
+      <div data-testid="google-attribution" className="flex flex-col gap-xxs">
+        <p className="text-small text-ink/72">{AttributionCopy.googleScope}</p>
+        {/*
+          The text form of the attribution, not a hosted logo asset: Google's brand rules
+          govern the image, and a wrong or stale logo would be a worse violation than the text
+          form their policy sanctions where space is limited. Unmodified and at full ink
+          contrast rather than the /72 used for our own footnotes, because the policy requires
+          it to stay legible — and not a link, since the policy asks for the attribution
+          itself, and inventing a destination for Google's mark would imply more than it says.
+        */}
+        <p data-testid="google-attribution-credit" className="text-caption text-ink">
+          {AttributionCopy.googleCredit}
+        </p>
+        {placeAttributions.length > 0 && (
+          <ul data-testid="place-attributions" className="flex flex-col gap-xxs">
+            {placeAttributions.map((attribution) => (
+              // Rendered as text, verbatim. These strings are HTML-ish, and
+              // `dangerouslySetInnerHTML` on third-party content is not an option here, so
+              // the characters are preserved exactly as given rather than interpreted.
+              <li key={attribution} className="text-small text-ink/72">
+                {attribution}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   )
 }
