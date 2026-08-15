@@ -17,6 +17,12 @@
 //     to 0 with no error;
 //   * discovery re-runs only when the cache is stale or the meeting zones moved,
 //     and Routes is asked only for the legs we are actually missing;
+//   * a resolved origin is required only by the work that needs one — the
+//     meeting zones discovery searches around, and the legs Routes has to fetch.
+//     A fully cached event therefore succeeds with zero resolved origins, and a
+//     partially resolved one searches around the origins it has instead of
+//     failing; only a run that must call the providers with nowhere to search is
+//     an error (422, naming the participants it could not place);
 //   * raw provider payloads land in restaurant_source_records and provider
 //     failures land in provider_incidents instead of vanishing into a `return
 //     []`.
@@ -574,10 +580,15 @@ function meetingAreas(points: LatLng[]): LatLng[] {
 // to be close to a zone we already searched; a brand new zone (someone joined,
 // someone changed their travel reference) means the cached candidate set was
 // drawn around the wrong place.
+// No zone to search at all (nobody's travel reference resolved to a place) is
+// not a shift: there is no new search space to compare against, so claiming one
+// moved would be an invention — and it would force a rediscovery that has
+// nowhere to search.
 function zonesShifted(
   areas: LatLng[],
   stored: { lat: number; lng: number }[],
 ): boolean {
+  if (areas.length === 0) return false;
   if (stored.length === 0) return true;
   return areas.some((a) =>
     !stored.some((s) =>
@@ -744,18 +755,17 @@ Deno.serve(async (req: Request) => {
     }
     origins.push({ participantId: p.id, location: loc });
   }
-  if (origins.length === 0) {
-    // Unchanged contract: 422 only when NO origin at all can be resolved.
-    await persistIncidents();
-    return json({
-      error: "could not resolve any travel reference",
-      unresolved_participants: unresolved,
-      travel_unconstrained_participants: unconstrained,
-      provider_incidents: incidentSummary(incidents),
-    }, 422);
-  }
+  // Deliberately NO blanket origin precondition here. An origin buys exactly two
+  // things — the meeting areas provider discovery searches around, and the travel
+  // legs Routes has not already cached — so demanding one up front failed
+  // searches that never needed it: budget, dietary, allergy, room and smoking
+  // MUSTs are decided server-side from data we already hold, and a fully cached
+  // event needs no provider call whatsoever. The requirement is asserted in
+  // step 4, once the cache has told us whether discovery has to run at all.
 
-  // 2. Candidate meeting areas, and the zones we searched last time.
+  // 2. Candidate meeting areas, and the zones we searched last time. With no
+  // resolved origin there is no new search space at all, which zonesShifted()
+  // reads as "not shifted" rather than as a move.
   const areas = meetingAreas(origins.map((o) => o.location));
   const { data: storedZones } = await supabase
     .from("meeting_zones")
@@ -771,16 +781,51 @@ Deno.serve(async (req: Request) => {
     .select("place_id, discovered_at")
     .eq("event_id", eventId);
   if (ccErr) return json({ error: ccErr.message }, 500);
-  const cachedPlaceIds = (cachedCandidateRows ?? [])
+  const allCandidateIds = (cachedCandidateRows ?? []).map((row) =>
+    row.place_id as string
+  );
+  const freshPlaceIds = (cachedCandidateRows ?? [])
     .filter((row) => freshAt(row.discovered_at, discoveryCutoffMs))
     .map((row) => row.place_id as string);
 
-  const discoveryNeeded = cachedPlaceIds.length === 0 || searchSpaceShifted;
+  // Discovery searches *around* the meeting zones, and the zones are built from
+  // origins, so with no resolved origin the providers cannot be called at all.
+  // Refusing the run because the cache went stale would then punish the caller for
+  // something they cannot fix from here, so serve the candidates we already have and
+  // say they are stale. Freshness only decides anything when a refresh is possible.
+  const canDiscover = origins.length > 0;
+  const staleServed = !canDiscover && freshPlaceIds.length === 0 &&
+    allCandidateIds.length > 0;
+  const cachedPlaceIds = staleServed ? allCandidateIds : freshPlaceIds;
+
+  const discoveryNeeded = canDiscover &&
+    (freshPlaceIds.length === 0 || searchSpaceShifted);
   const discoverySkipReason = discoveryNeeded
     ? null
+    : staleServed
+    ? "stale_candidates_no_resolvable_origin"
     : "fresh_candidates_for_unchanged_meeting_zones";
 
-  // 4+5. Places + Hot Pepper per area, dedupe by place_id — only when the cache
+  // 4. The only genuinely hopeless case: nobody's location is known, so the
+  // providers cannot be called, and there is not a single cached candidate to fall
+  // back on. That stays a 422, and it names the participants we could not place so
+  // the caller can say why (a missing travel_reference_place_id is a fixable UI
+  // state, not a server error).
+  // Everything else proceeds: a cache hit needs no origin, stale candidates beat no
+  // answer when no refresh is possible, and a partially resolved event searches
+  // around the origins it has and leaves the unresolved participants out of the
+  // travel matrix.
+  if (!canDiscover && cachedPlaceIds.length === 0) {
+    await persistIncidents();
+    return json({
+      error: "could not resolve any travel reference",
+      unresolved_participants: unresolved,
+      travel_unconstrained_participants: unconstrained,
+      provider_incidents: incidentSummary(incidents),
+    }, 422);
+  }
+
+  // 5+6. Places + Hot Pepper per area, dedupe by place_id — only when the cache
   // cannot answer.
   const byPlaceId = new Map<string, Candidate>();
   const sourceRecords: SourceRecord[] = [];
@@ -842,7 +887,7 @@ Deno.serve(async (req: Request) => {
 
   const fetchedCandidates = [...byPlaceId.values()];
 
-  // 6. Normalized upsert. Additive by construction (see 0017): an empty
+  // 7. Normalized upsert. Additive by construction (see 0017): an empty
   // dietary/allergy/room/cuisine value never overwrites a populated one, and the
   // legacy travel JSONB is merged rather than replaced.
   if (fetchedCandidates.length > 0) {
@@ -910,7 +955,7 @@ Deno.serve(async (req: Request) => {
     }));
   }
 
-  // 7. Destination coordinates. New candidates carry theirs; cached ones are
+  // 8. Destination coordinates. New candidates carry theirs; cached ones are
   // recovered from the stored raw Places payload so a cache hit stays free of
   // provider calls. Place coordinates are Places content, so this only ever
   // reads a payload that is still inside the discovery TTL.
@@ -939,7 +984,13 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // 8. Travel matrix: only the (event, participant, place) legs we are missing.
+  // 9. Travel matrix: only the (event, participant, place) legs we are missing.
+  // A leg exists per ORIGIN, so an unresolved participant contributes no missing
+  // leg and no Routes call: with nothing resolved there is nothing to route, and
+  // the event still scores against whatever legs the cache already holds (the
+  // scoring engine reads travel_matrix_cache through fn_travel_minutes, not this
+  // set). `travel_legs_from_cache` therefore counts the legs THIS RUN would
+  // otherwise have paid Routes for — not every leg the event has.
   const activeSet = new Set(activePlaceIds);
   const originIds = new Set(origins.map((o) => o.participantId));
   const { data: cachedLegs } = await supabase
@@ -1012,7 +1063,7 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // 9. Persist travel times: authoritative per-event rows plus the legacy JSONB
+  // 10. Persist travel times: authoritative per-event rows plus the legacy JSONB
   // that fn_travel_minutes falls back to.
   if (legs.length > 0) {
     const { error: legErr } = await supabase.rpc("fn_record_travel_minutes", {
@@ -1022,7 +1073,7 @@ Deno.serve(async (req: Request) => {
     if (legErr) return json({ error: legErr.message }, 500);
   }
 
-  // 10. Raw payloads, kept separate from the normalized records. Routes matrices
+  // 11. Raw payloads, kept separate from the normalized records. Routes matrices
   // are event-scoped (their origins are this event's participants), so the event
   // id is the source id.
   for (const [placeId, rows] of routeRaw) {

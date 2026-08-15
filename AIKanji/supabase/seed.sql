@@ -41,3 +41,49 @@ insert into restaurant_features
 ('demo_place_004', 3900, 'semi_private', array['vegetarian'], array['shellfish_free'],
    array['quiet'],
    jsonb_build_object('00000000-0000-0000-0000-0000000000d1', 25));
+
+-- --- Provider cache for the demo event (0017) --------------------------------
+--
+-- `demo_place_001..004` are synthetic: no Google Places text search or Hot Pepper
+-- query can ever return them, so live discovery for this event would replace a
+-- deterministic fixture with whatever Tokyo happens to hold today. Seeding the
+-- event-scoped provider cache makes 「条件に合うお店を探す」 a guaranteed cache hit
+-- on a hosted project: restaurant-search finds fresh candidates for unshifted
+-- meeting zones, calls no provider, and therefore needs no travel origin at all
+-- (an origin is only required when discovery actually has to run).
+--
+-- `participants.travel_reference_place_id` is deliberately left NULL for all five
+-- personas. A made-up id (the web mock's `mock_place_*`) would send a real Places
+-- `places.get` per persona, fail, log fake provider incidents and still resolve
+-- zero origins; a real Tokyo place id would resolve origins, produce meeting zones
+-- that match no zone this event ever searched, and force exactly the live
+-- discovery this fixture must not do — pulling real venues into the pool the
+-- feasibility engine iterates and destroying the 0-then-3 invariant. The five
+-- personas are reported honestly in the function's `unresolved_participants`
+-- instead: the fixture has no geocoded reference points, and says so.
+--
+-- Both timestamps are stamped now() so the rows are fresh against the function's
+-- 6h discovery TTL and 24h travel TTL. Both statements are idempotent upserts, so
+-- re-applying this file before a demo simply re-stamps them.
+
+insert into event_restaurant_candidates (event_id, place_id, discovered_at)
+select '00000000-0000-0000-0000-000000000001', place_id, now()
+from (values ('demo_place_001'), ('demo_place_002'), ('demo_place_003'),
+             ('demo_place_004')) as v(place_id)
+on conflict (event_id, place_id) do update set discovered_at = now();
+
+-- The only commutes this fixture claims to know are David's, and they are exactly
+-- the four values `restaurant_features.travel_minutes_by_participant` already
+-- encodes (20/30/15/25, all inside his 35-minute MUST). travel_matrix_cache is the
+-- authoritative per-event copy of those same legs, so fn_travel_minutes now reads
+-- them from the cache instead of the legacy JSONB fallback and gets the same
+-- numbers. Nobody else gets a leg: an invented commute would fake travel fairness
+-- for four participants who never told us where they are.
+insert into travel_matrix_cache
+  (event_id, participant_id, place_id, minutes, fetched_at) values
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','demo_place_001',20,now()),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','demo_place_002',30,now()),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','demo_place_003',15,now()),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','demo_place_004',25,now())
+on conflict (event_id, participant_id, place_id) do update
+  set minutes = excluded.minutes, fetched_at = now();

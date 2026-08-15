@@ -23,6 +23,7 @@ import type {
   NormalizedValue,
   ParseResult,
   ParticipantRole,
+  ParticipantTravel,
   PendingNegotiation,
   PlaceSuggestion,
   RecommendationRun,
@@ -34,6 +35,66 @@ import type {
 } from '../models/types'
 
 export type Unsubscribe = () => void
+
+/* -------------------------------------------------------------------------- */
+/* Travel-origin coverage of a search                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * How much of the group a search could actually measure travel for.
+ *
+ * Deliberately **counts, not identities**. `restaurant-search` answers with
+ * `unresolved_participants: [{participant_id, reason}]`, but the only screen that reads
+ * this is the organizer dashboard, which shows aggregates only — so the participant ids
+ * are collapsed here, in the backend layer, and never reach the UI. A privacy boundary
+ * that lives in a type cannot be forgotten by a later caller.
+ */
+export interface TravelOriginCoverage {
+  /**
+   * Participants whose travel reference names a location (会社/自宅/駅) but who have no
+   * place id, so the backend has no origin for them and travel fairness cannot include
+   * them. This is the actionable number.
+   */
+  unresolvedCount: number
+  /**
+   * Participants who chose どこでも. They impose no travel constraint by design, are
+   * excluded from the origins set on purpose, and must never be reported as a problem.
+   */
+  unconstrainedCount: number
+}
+
+/** What one press of 「条件に合うお店を探す」 achieved. */
+export interface RestaurantSearchResult {
+  /**
+   * `candidate_count` from the Edge Function, with its meaning unchanged: how many
+   * candidates THIS call obtained from the providers. Zero means the shortlist on
+   * screen comes from previously fetched candidates (a cache hit), which is what the
+   * organizer dashboard reports as 「以前に取得した候補を表示しています。」
+   */
+  candidateCount: number
+  travel: TravelOriginCoverage
+  /** Provider failures logged during the search: never fatal (A10), never invisible. */
+  providerIncidentCount: number
+}
+
+/**
+ * Thrown when `restaurant-search` answers 422: it had to call the providers, not one
+ * participant has a usable travel origin to search around, and there is no cached
+ * candidate to fall back on. This is a missing-location problem, not a network problem —
+ * surfacing it as 「通信できませんでした」 told the organizer nothing they could act on.
+ *
+ * Carries the same counts-only coverage as the success path, so the message can say how
+ * many people still need a location without naming any of them.
+ */
+export class NoTravelOriginError extends Error {
+  readonly travel: TravelOriginCoverage
+
+  constructor(travel: TravelOriginCoverage) {
+    super('could not resolve any travel reference')
+    this.name = 'NoTravelOriginError'
+    this.travel = travel
+  }
+}
 
 export interface Backend {
   readonly mode: 'supabase' | 'mock'
@@ -72,6 +133,28 @@ export interface Backend {
   restaurantName(placeId: string): Promise<string | null>
   role(participantId: string): Promise<ParticipantRole>
 
+  /**
+   * The caller's own travel reference, so the picker can open on what is actually
+   * stored instead of defaulting to 会社 and overwriting a real answer.
+   */
+  participantTravel(participantId: string): Promise<ParticipantTravel>
+
+  /**
+   * PRD §4: the travel reference is context, "changeable later". Sets the caller's OWN
+   * category and place at any point after joining — the escape hatch for anyone who
+   * skipped the picker on the create/join screen and therefore contributes no origin.
+   *
+   * `fn_set_travel_reference` (0020) writes those two columns and nothing else, refuses
+   * another participant's row (the organizer included), forces the place id to null for
+   * どこでも, and drops that participant's cached travel legs when the origin moves.
+   */
+  updateTravelReference(input: {
+    participantId: string
+    travelReference: TravelReference
+    /** Ignored for どこでも, which means "no travel constraint" and so carries no place. */
+    travelReferencePlaceId?: string | null
+  }): Promise<ParticipantTravel>
+
   // MARK: - ConstraintService
   parse(input: { rawText: string; kind: ConstraintKind; language: 'ja' | 'en' }): Promise<ParseResult>
   insertConstraint(input: {
@@ -108,7 +191,15 @@ export interface Backend {
    */
   closePreferences(eventId: string): Promise<CollectionReadiness>
   latestRun(eventId: string): Promise<RecommendationRun | null>
-  findRestaurants(eventId: string): Promise<number>
+
+  /**
+   * Runs `restaurant-search`. Returns the candidate count it always returned, plus how
+   * much of the group it could resolve a travel origin for, so a search that quietly
+   * measured travel for only half the group can say so.
+   *
+   * Throws `NoTravelOriginError` when the function answers 422 (nobody has an origin).
+   */
+  findRestaurants(eventId: string): Promise<RestaurantSearchResult>
   recomputeFeasibility(eventId: string): Promise<FeasibilityResult>
   proposeRelaxation(eventId: string): Promise<string | null>
   subscribeRuns(eventId: string, onUpdate: (update: RunUpdate) => void): Promise<Unsubscribe>

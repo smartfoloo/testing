@@ -25,7 +25,13 @@ import {
   type Db,
   type FeatureRow,
 } from './engine'
-import type { Backend, Unsubscribe } from './types'
+import { NoTravelOriginError } from './types'
+import type {
+  Backend,
+  RestaurantSearchResult,
+  TravelOriginCoverage,
+  Unsubscribe,
+} from './types'
 import { roomDescription } from '../models/format'
 import type {
   CollectionReadiness,
@@ -39,6 +45,7 @@ import type {
   NormalizedValue,
   ParseResult,
   ParticipantRole,
+  ParticipantTravel,
   PendingNegotiation,
   PlaceSuggestion,
   RecommendationRun,
@@ -46,6 +53,7 @@ import type {
   RestaurantFeature,
   RunUpdate,
   SavedConstraint,
+  TravelReference,
   VerificationRequirement,
 } from '../models/types'
 
@@ -644,6 +652,64 @@ export class MockBackend implements Backend {
     return participant.role
   }
 
+  async participantTravel(participantId: string): Promise<ParticipantTravel> {
+    await this.latency(60)
+    const participant = this.db.participants.find((row) => row.id === participantId)
+    if (!participant) throw new Error('participant not found')
+    return {
+      travel_reference: participant.travel_reference,
+      travel_reference_place_id: participant.travel_reference_place_id,
+    }
+  }
+
+  /**
+   * Mirrors fn_set_travel_reference (0020) exactly, including the refusal: only the
+   * caller's own row, only these two columns, どこでも clears the place, and the cached
+   * travel legs measured from the old origin are dropped so a stale leg cannot keep
+   * scoring the participant from a place they no longer start at.
+   */
+  async updateTravelReference(input: {
+    participantId: string
+    travelReference: TravelReference
+    travelReferencePlaceId?: string | null
+  }): Promise<ParticipantTravel> {
+    await this.latency()
+    const participant = this.db.participants.find((row) => row.id === input.participantId)
+    if (!participant) throw new Error('participant not found')
+    if (participant.auth_user_id !== this.authUserId) {
+      // Same wording as the RPC, so AppCopy.errorMessage maps it to 権限がありません.
+      throw new Error("not permitted to change another participant's travel reference")
+    }
+
+    const previousPlaceId = participant.travel_reference_place_id
+    const nextPlaceId =
+      input.travelReference === 'doesnt_matter'
+        ? null
+        : (input.travelReferencePlaceId?.trim() ?? null) || null
+
+    participant.travel_reference = input.travelReference
+    participant.travel_reference_place_id = nextPlaceId
+
+    if (nextPlaceId !== previousPlaceId) {
+      const travelMatrix = (this.db.travelMatrix ??= [])
+      this.db.travelMatrix = travelMatrix.filter(
+        (leg) =>
+          !(leg.event_id === participant.event_id && leg.participant_id === input.participantId),
+      )
+      // fn_travel_minutes falls back to the legacy per-place JSONB, so the key has to go
+      // there too — it is keyed by participant id, so no other participant is affected.
+      for (const feature of this.db.features) {
+        delete feature.travel_minutes_by_participant[input.participantId]
+      }
+    }
+
+    this.persist()
+    return {
+      travel_reference: participant.travel_reference,
+      travel_reference_place_id: participant.travel_reference_place_id,
+    }
+  }
+
   /* ---------------------------------------------------- ConstraintService */
 
   async parse(input: { rawText: string; kind: ConstraintKind; language: 'ja' | 'en' }) {
@@ -824,20 +890,50 @@ export class MockBackend implements Backend {
     }
   }
 
+  /** A leg this event already knows, from the per-event cache or the legacy JSONB. */
+  private hasKnownLeg(eventId: string, participantId: string): boolean {
+    const cached = (this.db.travelMatrix ?? []).some(
+      (leg) => leg.event_id === eventId && leg.participant_id === participantId,
+    )
+    if (cached) return true
+    return this.db.features.some(
+      (feature) => feature.travel_minutes_by_participant[participantId] !== undefined,
+    )
+  }
+
   /**
    * Stands in for the restaurant-search Edge Function. It does not call any provider;
    * it fills in the travel matrix the real function would have computed for participants
    * that have no cached entry yet, then reports the candidate count.
+   *
+   * It also reports the same travel-origin coverage the real function does, computed from
+   * the same rows: `travel_reference` is a CATEGORY, so a participant with no
+   * `travel_reference_place_id` has no origin and is `unresolved`, and どこでも is
+   * `unconstrained` — a deliberate answer, never a gap.
+   *
+   * The refusal is mirrored too. The real function 422s only when it must call the
+   * providers, has no origin to search around, and has nothing cached to serve instead.
+   * The mock has no discovery step, so its analogue of "nothing to work with" is: nobody
+   * has a place id AND this event knows no travel leg for anyone. That is how the demo
+   * fixture keeps working — place ids are deliberately null there, but David's legs are
+   * seeded (see seed.sql), which is exactly the cached case the real function serves.
+   * The fabricated minutes below still cover every participant, because they stand in for
+   * a provider the mock does not have, not for a missing origin.
    */
-  async findRestaurants(eventId: string): Promise<number> {
+  async findRestaurants(eventId: string): Promise<RestaurantSearchResult> {
     await this.latency(700)
     this.requireParticipant(eventId)
-    // A participant with no travel reference place, or with 'doesnt_matter', contributes
-    // no origin — exactly how restaurant-search now behaves since it stopped geocoding
-    // the literal word "office".
-    const participants = this.db.participants.filter(
-      (row) => row.event_id === eventId && row.travel_reference !== 'doesnt_matter',
+    const roster = this.db.participants.filter((row) => row.event_id === eventId)
+    const participants = roster.filter((row) => row.travel_reference !== 'doesnt_matter')
+    const coverage: TravelOriginCoverage = {
+      unresolvedCount: participants.filter((row) => !row.travel_reference_place_id).length,
+      unconstrainedCount: roster.filter((row) => row.travel_reference === 'doesnt_matter').length,
+    }
+    const resolvable = participants.filter(
+      (row) => row.travel_reference_place_id !== null || this.hasKnownLeg(eventId, row.id),
     )
+    if (resolvable.length === 0) throw new NoTravelOriginError(coverage)
+
     const travelMatrix = (this.db.travelMatrix ??= [])
 
     for (const feature of this.db.features) {
@@ -875,7 +971,12 @@ export class MockBackend implements Backend {
       feature.fetched_at = this.now()
     }
     this.persist()
-    return this.db.restaurants.length
+    return {
+      candidateCount: this.db.restaurants.length,
+      travel: coverage,
+      // No provider to fail: the mock has none, so it never invents an incident.
+      providerIncidentCount: 0,
+    }
   }
 
   /* ----------------------------------------------------- lifecycle / readiness */

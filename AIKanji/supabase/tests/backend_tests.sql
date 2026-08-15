@@ -240,6 +240,107 @@ begin
                      and event = 'run_updated') >= 1);
 end $$;
 
+-- ---------------------------------------------------------------------------
+-- Seeded provider cache (0017): the demo event is a guaranteed cache hit, so
+-- 「条件に合うお店を探す」 needs no provider call and therefore no travel origin.
+-- restaurant-search only requires an origin when discovery has to run, so these
+-- rows are what makes the five-persona demo work on a hosted project.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event_id uuid := '00000000-0000-0000-0000-000000000001';
+  v_bob_pid uuid := '00000000-0000-0000-0000-0000000000b1';
+  v_david_pid uuid := '00000000-0000-0000-0000-0000000000d1';
+  v_bob_room_id uuid;
+  v_result jsonb;
+  v_places text[];
+  v_baseline int;
+begin
+  perform t_as_admin();
+
+  perform t_check('demo event has a cached candidate row per seeded venue',
+                  (select array_agg(place_id order by place_id)
+                   from event_restaurant_candidates where event_id = v_event_id)
+                  = array['demo_place_001','demo_place_002','demo_place_003',
+                          'demo_place_004'],
+                  (select string_agg(place_id, ',' order by place_id)
+                   from event_restaurant_candidates where event_id = v_event_id));
+
+  -- Freshness is the whole point: the Edge Function skips Places and Hot Pepper
+  -- only for candidates inside its DISCOVERY_TTL_MINUTES (6h) window.
+  perform t_check('seeded candidates are fresh inside the 6h discovery TTL',
+                  (select min(discovered_at) > now() - interval '6 hours'
+                   from event_restaurant_candidates where event_id = v_event_id));
+
+  -- Only David has a measured commute in the fixture; a leg for anybody else
+  -- would be an invented travel time.
+  perform t_check('demo travel cache holds exactly David''s four legs',
+                  (select count(*) = 4
+                          and count(*) filter (where participant_id = v_david_pid) = 4
+                   from travel_matrix_cache where event_id = v_event_id),
+                  (select count(*)::text from travel_matrix_cache
+                   where event_id = v_event_id));
+
+  -- Inside TRAVEL_TTL_MINUTES (24h), so every leg the function could want is
+  -- already there and Routes is never called.
+  perform t_check('seeded travel legs are fresh inside the 24h travel TTL',
+                  (select min(fetched_at) > now() - interval '24 hours'
+                   from travel_matrix_cache where event_id = v_event_id));
+
+  -- 0017 keeps `restaurant_features.travel_minutes_by_participant` as
+  -- fn_travel_minutes' fallback, so the two paths must agree: a mismatch would
+  -- mean the fixture changed meaning depending on which one was read.
+  perform t_check('cached legs agree with the legacy JSONB for David',
+                  not exists (
+                    select 1 from travel_matrix_cache c
+                    join restaurant_features rf on rf.place_id = c.place_id
+                    where c.event_id = v_event_id
+                      and c.participant_id = v_david_pid
+                      and (rf.travel_minutes_by_participant
+                             ->> c.participant_id::text)::int
+                          is distinct from c.minutes));
+  perform t_check('fn_travel_minutes serves David from the event-scoped cache',
+                  fn_travel_minutes(v_event_id, 'demo_place_001', v_david_pid) = 20,
+                  fn_travel_minutes(v_event_id, 'demo_place_001', v_david_pid)::text);
+
+  -- The state the reordered function has to tolerate: this fixture resolves ZERO
+  -- travel origins (no persona has a travel_reference_place_id, and a fake one
+  -- would only buy a failing Places lookup), and the search must still succeed
+  -- from cache instead of returning 422.
+  perform t_check('no demo persona has a travel reference place id',
+                  (select count(*) from participants
+                   where event_id = v_event_id
+                     and travel_reference_place_id is not null) = 0);
+
+  select id into v_bob_room_id from participant_constraints
+   where event_id = v_event_id and participant_id = v_bob_pid
+     and normalized_type = 'room';
+
+  -- The 0-then-3 invariant, re-asserted with the cache in place. Baseline uses
+  -- the same override path fn_propose_relaxation uses, so Bob's MUST is read back
+  -- as 'private' without mutating the row the block above already relaxed.
+  select count(*) into v_baseline
+    from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event_id, r.place_id, v_bob_room_id,
+                                  '{"room":"private"}'::jsonb);
+  perform t_check('seeded cache keeps zero feasible venues at baseline',
+                  v_baseline = 0, v_baseline::text);
+
+  v_result := fn_recompute_feasibility(v_event_id);
+  perform t_check('seeded cache keeps exactly three feasible venues after the relaxation',
+                  (v_result->>'feasible_count')::int = 3, v_result::text);
+
+  select array_agg(r.place_id order by r.place_id) into v_places
+    from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event_id, r.place_id);
+  perform t_check('the feasible three are 001, 002 and 004 — never 003',
+                  v_places = array['demo_place_001','demo_place_002',
+                                   'demo_place_004'],
+                  v_places::text);
+end $$;
+
 \set QUIET off
 \pset border 2
 select seq, case when passed then 'PASS' else 'FAIL' end as result, name, detail

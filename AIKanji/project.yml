@@ -23,6 +23,8 @@ targets:
         NSCameraUsageDescription: Scanning an event QR code needs the camera.
         SUPABASE_URL: $(SUPABASE_URL)
         SUPABASE_ANON_KEY: $(SUPABASE_ANON_KEY)
+        # Host invite links are built against (PRD §3). Empty by default; see Config.xcconfig.
+        INVITE_LINK_BASE_URL: $(INVITE_LINK_BASE_URL)
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: true
         UILaunchScreen: {}

@@ -63,6 +63,20 @@ export interface PlaceSuggestion {
   address: string | null
 }
 
+/**
+ * A participant's own travel reference: the UI category and the place it stands for.
+ * PRD §4 calls this context — "not itself a constraint; changeable later" — so it is
+ * readable and writable after joining, through `fn_set_travel_reference` (0020).
+ *
+ * `travel_reference_place_id` is what actually gives the participant a travel origin.
+ * Null means the backend has no origin for them and reports them as unresolved rather
+ * than geocoding the word 「会社」.
+ */
+export interface ParticipantTravel {
+  travel_reference: TravelReference | null
+  travel_reference_place_id: string | null
+}
+
 /** How sensitive a requirement is. Advisory metadata; the participant still owns visibility. */
 export type ConstraintSensitivity = 'normal' | 'sensitive' | 'highly_sensitive'
 

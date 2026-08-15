@@ -9,7 +9,13 @@
  */
 
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js'
-import type { Backend, Unsubscribe } from './types'
+import { NoTravelOriginError } from './types'
+import type {
+  Backend,
+  RestaurantSearchResult,
+  TravelOriginCoverage,
+  Unsubscribe,
+} from './types'
 import type {
   CollectionReadiness,
   ConstraintKind,
@@ -24,6 +30,7 @@ import type {
   NormalizedValue,
   ParseResult,
   ParticipantRole,
+  ParticipantTravel,
   PendingNegotiation,
   PlaceSuggestion,
   RecommendationRun,
@@ -38,6 +45,51 @@ function unwrap<T>({ data, error }: { data: T | null; error: { message: string }
   if (error) throw new Error(error.message)
   if (data === null) throw new Error('empty response')
   return data
+}
+
+/**
+ * The parts of the `restaurant-search` answer this client reads. The function returns a
+ * great deal more (meeting zones, cache provenance, unroutable place ids); those are
+ * server-side diagnostics with no screen behind them.
+ */
+interface RestaurantSearchResponse {
+  candidate_count?: number
+  /** `[{participant_id, reason}]` — read for its LENGTH only, see travelCoverage. */
+  unresolved_participants?: Array<{ participant_id?: string; reason?: string }>
+  travel_unconstrained_participants?: string[]
+  provider_incident_count?: number
+}
+
+/**
+ * Collapses the per-participant lists into counts. Identities stop here, at the backend
+ * boundary: the only consumer is the organizer dashboard, which shows aggregates only.
+ */
+function travelCoverage(body: RestaurantSearchResponse | null): TravelOriginCoverage {
+  return {
+    unresolvedCount: body?.unresolved_participants?.length ?? 0,
+    // どこでも: a valid answer, deliberately excluded from the origins set. Counted so
+    // the UI can say it is fine, never so it can be reported as a gap.
+    unconstrainedCount: body?.travel_unconstrained_participants?.length ?? 0,
+  }
+}
+
+/**
+ * A non-2xx Edge Function answer arrives as a `FunctionsHttpError` whose `context` is the
+ * raw `Response`, so the 422 body — the only place that says WHY the search could not run
+ * — is reachable only by reading it. Duck-typed rather than `instanceof`-ed, so a relay or
+ * fetch failure (no Response at all) simply yields null instead of throwing here.
+ */
+async function httpFailure(
+  error: unknown,
+): Promise<{ status: number; body: RestaurantSearchResponse | null } | null> {
+  const context = (error as { context?: unknown } | null)?.context
+  if (!(context instanceof Response)) return null
+  try {
+    return { status: context.status, body: (await context.json()) as RestaurantSearchResponse }
+  } catch {
+    // A non-JSON error body still tells us the status, which is what we branch on.
+    return { status: context.status, body: null }
+  }
 }
 
 export class SupabaseBackend implements Backend {
@@ -147,6 +199,44 @@ export class SupabaseBackend implements Backend {
       await this.client.from('participants').select('role').eq('id', participantId).single(),
     )
     return row.role
+  }
+
+  /** Own row read: the 0007 membership policy already scopes `participants` selects. */
+  async participantTravel(participantId: string): Promise<ParticipantTravel> {
+    return unwrap<ParticipantTravel>(
+      await this.client
+        .from('participants')
+        .select('travel_reference, travel_reference_place_id')
+        .eq('id', participantId)
+        .single(),
+    )
+  }
+
+  /**
+   * `participants` has no client write policy and (since 0020) no client write privilege
+   * either, so this is an RPC rather than an update: a direct table write would silently
+   * match zero rows. The definer function writes exactly these two columns for exactly
+   * the caller's own row.
+   */
+  async updateTravelReference(input: {
+    participantId: string
+    travelReference: TravelReference
+    travelReferencePlaceId?: string | null
+  }): Promise<ParticipantTravel> {
+    const rows = unwrap<ParticipantTravel[]>(
+      await this.client.rpc('fn_set_travel_reference', {
+        p_participant_id: input.participantId,
+        p_travel_reference: input.travelReference,
+        // どこでも carries no place. Sent as null as well as forced null server-side.
+        p_travel_reference_place_id:
+          input.travelReference === 'doesnt_matter'
+            ? null
+            : (input.travelReferencePlaceId ?? null),
+      }),
+    )
+    const [travel] = rows
+    if (!travel) throw new Error('empty travel reference response')
+    return travel
   }
 
   /* ---------------------------------------------------- ConstraintService */
@@ -314,13 +404,29 @@ export class SupabaseBackend implements Backend {
     return rows[0] ?? null
   }
 
-  async findRestaurants(eventId: string): Promise<number> {
-    const { data, error } = await this.client.functions.invoke<{ candidate_count: number }>(
+  /**
+   * A search can succeed while some participants have no resolvable origin, so the
+   * travel coverage travels back with the candidate count instead of being discarded —
+   * otherwise "travel fairness" is quietly computed over half the group.
+   */
+  async findRestaurants(eventId: string): Promise<RestaurantSearchResult> {
+    const { data, error } = await this.client.functions.invoke<RestaurantSearchResponse>(
       'restaurant-search',
       { body: { event_id: eventId } },
     )
-    if (error) throw new Error(error.message)
-    return data?.candidate_count ?? 0
+    if (error) {
+      const failure = await httpFailure(error)
+      // 422: not one participant has a usable origin, so there was nothing to search
+      // around. That is a missing-location problem with an obvious remedy, and the
+      // organizer has to be told which one it is.
+      if (failure?.status === 422) throw new NoTravelOriginError(travelCoverage(failure.body))
+      throw new Error(error.message)
+    }
+    return {
+      candidateCount: data?.candidate_count ?? 0,
+      travel: travelCoverage(data ?? null),
+      providerIncidentCount: data?.provider_incident_count ?? 0,
+    }
   }
 
   async recomputeFeasibility(eventId: string): Promise<FeasibilityResult> {

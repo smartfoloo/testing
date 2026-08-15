@@ -307,6 +307,106 @@ export const TravelCopy = {
   unconstrained: '移動の条件は出しません。ほかの人が集まりやすい場所に合わせます。',
 } as const
 
+/* -------------------------------------------------------------------------- */
+/* Changing a travel reference after joining (ConstraintEntry)                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * PRD §4 lists the travel reference under "Context — not itself a constraint;
+ * changeable later", so it lives on 「あなたの希望」 next to the requirements rather than
+ * being frozen at join time. These strings say what setting a place BUYS the
+ * participant, because the cost of skipping it is invisible: their travel burden simply
+ * never enters the fairness calculation.
+ */
+export const TravelEditCopy = {
+  /** Opens the editor; the wording changes because setting and changing feel different. */
+  set: '移動の基準を設定する',
+  change: '移動の基準を変える',
+  sheetTitle: '移動の基準',
+  /** The benefit, stated plainly. */
+  benefit: '場所を設定すると、あなたの移動の負担も「移動の公平さ」の計算に入ります。',
+  save: 'この内容で保存する',
+  saved: '移動の基準を保存しました。',
+  /**
+   * Only the place id is stored, so a place set earlier (or on the join screen) has no
+   * name to show. Said plainly instead of showing an opaque provider id.
+   */
+  storedPlace: '設定済みの場所を使います',
+  /** どこでも, chosen deliberately: the place is cleared, and that is not a loss. */
+  clearsPlace: '「どこでも」を選ぶと、設定した場所は消えます。移動の条件は出さない扱いになります。',
+} as const
+
+/** 「いまの設定：駅（場所あり）」 — what is actually stored, before anything is changed. */
+export function travelCurrentText(
+  reference: TravelReference | null,
+  placeId: string | null,
+): string {
+  if (reference === null) {
+    return 'いまの設定：まだありません。'
+  }
+  if (reference === 'doesnt_matter') {
+    return `いまの設定：${travelLabel(reference)}（移動の条件は出していません）`
+  }
+  return placeId === null
+    ? `いまの設定：${travelLabel(reference)}（場所は未設定）`
+    : `いまの設定：${travelLabel(reference)}（場所は設定済み）`
+}
+
+/** What the current setting means for this one person, on their own screen. */
+export function travelCurrentHint(
+  reference: TravelReference | null,
+  placeId: string | null,
+): string {
+  if (reference === 'doesnt_matter') {
+    return '移動の条件は出していないので、場所は必要ありません。'
+  }
+  return placeId === null
+    ? '場所が未設定のため、あなたの移動の負担は計算に入っていません。'
+    : 'あなたの移動の負担も計算に入っています。'
+}
+
+/* -------------------------------------------------------------------------- */
+/* Travel-origin coverage of a search (OrganizerDashboard)                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a search could and could not measure, for the 幹事.
+ *
+ * Aggregates only, by design and by type: `TravelOriginCoverage` carries counts, never
+ * participant ids, so this screen cannot name the person who skipped the place picker —
+ * the same rule as 「誰がどの条件を出したかは表示せず、集計結果だけを共有します。」
+ */
+export const TravelGapCopy = {
+  /** Heading when the search could not run at all (restaurant-search answered 422). */
+  blockedTitle: '出発地が分からないため、お店を探せませんでした',
+  /** Heading when the search ran, but not everyone's travel could be measured. */
+  partialTitle: '移動の計算に入っていない人がいます',
+  /** How the 幹事 unblocks it, without singling anybody out. */
+  ask: '参加者に「あなたの希望」の画面から移動の基準を設定してもらうと、計算できるようになります。',
+  /** Said out loud, because an aggregate that looks evasive gets worked around. */
+  privacy: 'だれが未設定かは表示しません。人数だけをお知らせします。',
+} as const
+
+/** 「4人が場所を…」 — the count, the consequence, and nothing that identifies anyone. */
+export function travelUnresolvedText(count: number): string {
+  return `${count}人が移動の基準の場所を設定していません。その人の移動の負担は分からないため、移動に関する数字は全員分ではありません。`
+}
+
+/** The blocked case: not one participant has a usable origin, so nothing was searched. */
+export function travelBlockedText(count: number): string {
+  return count > 0
+    ? `${count}人ぶんの出発地が分かりません。だれか1人でも場所を設定すると、お店を探せるようになります。`
+    : '出発地が分かる人がいません。だれか1人でも場所を設定すると、お店を探せるようになります。'
+}
+
+/**
+ * どこでも is a valid answer, not a gap: stated separately and neutrally so a
+ * participant who opted out of travel constraints is never counted as a problem.
+ */
+export function travelUnconstrainedText(count: number): string {
+  return `「どこでも」と答えた人が${count}人います。移動の条件を出していないので、これは問題ではありません。`
+}
+
 /** Label for the place field, phrased for the reference the participant chose. */
 export function travelPlaceLabel(reference: TravelReference): string {
   switch (reference) {

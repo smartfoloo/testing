@@ -38,9 +38,16 @@ struct ConstraintService {
         let normalized_type: String
         let normalized_value: [String: JSONValue]
         let visibility: String
+        /// What the taxonomy could not express, kept for P1 semantic matching. `sensitivity`
+        /// and `verification_requirement` are deliberately absent: 0018's BEFORE-INSERT
+        /// trigger decides both server-side, and sensitivity must never touch `visibility`,
+        /// which stays the participant's own choice.
+        let semantic_remainder: String?
     }
 
-    /// Direct table insert — RLS allows a participant to write only their own rows.
+    /// Direct table insert — RLS allows a participant to write only their own rows, and
+    /// after `fn_close_preferences` the `with check` clause rejects the write outright, so a
+    /// post-close save fails loudly instead of silently updating nothing.
     func insertConstraint(
         eventId: UUID,
         participantId: UUID,
@@ -48,7 +55,8 @@ struct ConstraintService {
         rawText: String,
         normalizedType: NormalizedType,
         normalizedValue: [String: JSONValue],
-        visibility: ConstraintVisibility
+        visibility: ConstraintVisibility,
+        semanticRemainder: String? = nil
     ) async throws {
         try await client
             .from("participant_constraints")
@@ -59,7 +67,8 @@ struct ConstraintService {
                 raw_text: rawText,
                 normalized_type: normalizedType.rawValue,
                 normalized_value: normalizedValue,
-                visibility: visibility.rawValue
+                visibility: visibility.rawValue,
+                semantic_remainder: semanticRemainder
             ))
             .execute()
     }

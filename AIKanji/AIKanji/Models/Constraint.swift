@@ -40,6 +40,24 @@ enum ConstraintVisibility: String, Codable, CaseIterable, Identifiable {
     var label: String { AppCopy.visibility(self) }
 }
 
+/// How sensitive a requirement is. Advisory metadata assigned server-side from
+/// `normalized_type` (0018's trigger): it drives presentation and logging care, and it must
+/// never override `visibility`, which stays the participant's own decision (PRD §5).
+enum ConstraintSensitivity: String, Codable {
+    case normal
+    case sensitive
+    case highlySensitive = "highly_sensitive"
+}
+
+/// Whether a MUST needs external confirmation before it can be trusted (PRD §11:
+/// "Unknown ≠ supported"). P0 records the requirement only — `required` is the hook the P1
+/// "needs confirmation" badge will use; nothing renders it yet.
+enum VerificationRequirement: String, Codable {
+    case none
+    case recommended
+    case required
+}
+
 /// Response of the `llm-assist` Edge Function in `parse` mode.
 struct ParseResult: Codable, Hashable {
     var normalizedType: NormalizedType
@@ -47,6 +65,23 @@ struct ParseResult: Codable, Hashable {
     var suggestedVisibility: ConstraintVisibility
     var confidence: Double
     var needsClarification: Bool
+    /// The participant's own wording the structured taxonomy did not capture. Kept so P1
+    /// semantic matching has something to embed; it is verbatim human text, so it never
+    /// reaches the sanitized feed.
+    var semanticRemainder: String?
+    /// Both of these are decided server-side and forced by a BEFORE-INSERT trigger, so the
+    /// client only reads them — and reads them as raw strings, so a value added to the
+    /// taxonomy later cannot fail the decode of an otherwise usable parse.
+    var sensitivityRaw: String?
+    var verificationRequirementRaw: String?
+
+    var sensitivity: ConstraintSensitivity? {
+        sensitivityRaw.flatMap(ConstraintSensitivity.init(rawValue:))
+    }
+
+    var verificationRequirement: VerificationRequirement? {
+        verificationRequirementRaw.flatMap(VerificationRequirement.init(rawValue:))
+    }
 
     enum CodingKeys: String, CodingKey {
         case normalizedType = "normalized_type"
@@ -54,6 +89,9 @@ struct ParseResult: Codable, Hashable {
         case suggestedVisibility = "suggested_visibility"
         case confidence
         case needsClarification = "needs_clarification"
+        case semanticRemainder = "semantic_remainder"
+        case sensitivityRaw = "sensitivity"
+        case verificationRequirementRaw = "verification_requirement"
     }
 }
 

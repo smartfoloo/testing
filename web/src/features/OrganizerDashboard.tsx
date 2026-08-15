@@ -1,18 +1,25 @@
 /**
  * Ported from Features/Organizer/OrganizerDashboardView.swift (view + view model).
  *
- * Beyond the Swift original this screen carries the two PRD §12 organizer affordances:
+ * Beyond the Swift original this screen carries the organizer affordances the PRD asks
+ * for but the iOS view never had:
  *  - progressive search: how far collection has come, and whether a search right now is
  *    provisional (`fn_get_collection_readiness`);
  *  - closing preference collection (`fn_close_preferences`), which deliberately does not
- *    recompute — post-close recalculation is an explicit act by the 幹事.
+ *    recompute — post-close recalculation is an explicit act by the 幹事;
+ *  - the travel-origin coverage of the last search: `restaurant-search` needs a place id
+ *    per participant, so it can refuse outright (HTTP 422) or succeed while measuring
+ *    travel for only part of the group. Both used to be invisible, the first one behind
+ *    「通信できませんでした」. Reported here in people, never in names.
  * Keep OrganizerDashboardView.swift in step when this changes.
  */
 
 import { useCallback, useEffect, useState } from 'react'
 import { useBackend } from '../backend'
+import { NoTravelOriginError, type TravelOriginCoverage } from '../backend/types'
 import {
   AppCopy,
+  TravelGapCopy,
   closedAtText,
   closeSnapshotText,
   errorMessage as errorMessageFor,
@@ -20,6 +27,9 @@ import {
   readinessHint,
   readinessSummary,
   resultBasisText,
+  travelBlockedText,
+  travelUnconstrainedText,
+  travelUnresolvedText,
 } from '../design/copy'
 import {
   AppCard,
@@ -30,6 +40,7 @@ import {
   StatTile,
 } from '../design/components'
 import { CheckSealIcon } from '../design/icons'
+import { cn } from '../design/cn'
 import type { CollectionReadiness, EventDecision } from '../models/types'
 
 interface OrganizerDashboardProps {
@@ -73,6 +84,62 @@ function ReadinessBar({ readiness }: { readiness: CollectionReadiness }) {
   )
 }
 
+/**
+ * Why a search could not run, or what it could not measure — counted in people, never
+ * named.
+ *
+ * `restaurant-search` reports missing travel origins per participant, but this screen
+ * shares aggregates only (see the footnote below), so the backend hands it
+ * `TravelOriginCoverage`: counts, no ids. 「1人」 is therefore the most specific this can
+ * ever get, even for a group of two.
+ *
+ * `unconstrainedCount` is people who chose どこでも. That is a deliberate answer with no
+ * travel constraint attached, so it is stated neutrally and never as a gap.
+ */
+function TravelCoverageNote({
+  coverage,
+  blocked,
+}: {
+  coverage: TravelOriginCoverage
+  blocked: boolean
+}) {
+  const { unresolvedCount, unconstrainedCount } = coverage
+  // Nothing to say: everybody either has an origin or opted out on purpose.
+  if (!blocked && unresolvedCount === 0) return null
+
+  return (
+    <div
+      data-testid="travel-coverage-note"
+      data-state={blocked ? 'blocked' : 'partial'}
+      data-unresolved={unresolvedCount}
+      data-unconstrained={unconstrainedCount}
+      role={blocked ? 'alert' : 'status'}
+      className={cn(
+        'flex flex-col gap-xs rounded-card p-md',
+        blocked ? 'bg-accent-soft' : 'bg-green-soft',
+      )}
+    >
+      <p className="text-section">
+        {blocked ? TravelGapCopy.blockedTitle : TravelGapCopy.partialTitle}
+      </p>
+      <p className="text-body" data-testid="travel-coverage-detail">
+        {blocked ? travelBlockedText(unresolvedCount) : travelUnresolvedText(unresolvedCount)}
+      </p>
+      <p className="text-caption text-ink/72">{TravelGapCopy.ask}</p>
+      {/* Only on the partial path: when nothing could be searched at all, "this is not a
+          problem" would read as a contradiction of the sentence above it. */}
+      {!blocked && unconstrainedCount > 0 && (
+        <p className="text-caption text-ink/72" data-testid="travel-unconstrained-note">
+          {travelUnconstrainedText(unconstrainedCount)}
+        </p>
+      )}
+      <p className="text-caption text-ink/72" data-testid="travel-coverage-privacy">
+        {TravelGapCopy.privacy}
+      </p>
+    </div>
+  )
+}
+
 /** A calm status pill, matching the 調整中… treatment but without the warning yellow. */
 function StatePill({ title, testId }: { title: string; testId: string }) {
   return (
@@ -100,6 +167,13 @@ export function OrganizerDashboard({
   const [readiness, setReadiness] = useState<CollectionReadiness | null>(null)
   /** Readiness as it stood when the run currently on screen landed. */
   const [runBasis, setRunBasis] = useState<CollectionReadiness | null>(null)
+  /**
+   * How much of the group the last search could resolve a travel origin for. Counts only
+   * — the backend never hands this screen the participants themselves.
+   */
+  const [travelCoverage, setTravelCoverage] = useState<TravelOriginCoverage | null>(null)
+  /** True when the search itself was refused for want of any origin at all (HTTP 422). */
+  const [travelSearchBlocked, setTravelSearchBlocked] = useState(false)
   const [isWorking, setIsWorking] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
   const [isConfirmingClose, setIsConfirmingClose] = useState(false)
@@ -198,7 +272,12 @@ export function OrganizerDashboard({
     setErrorMessage(null)
     setStatusMessage(null)
     try {
-      const candidates = await backend.findRestaurants(eventId)
+      // A search can succeed while some participants still have no resolvable origin, so
+      // the travel coverage is read on the success path too: the shortlist is real, but
+      // its travel numbers cover only part of the group and that has to be said.
+      const search = await backend.findRestaurants(eventId)
+      setTravelCoverage(search.travel)
+      setTravelSearchBlocked(false)
       const result = await backend.recomputeFeasibility(eventId)
       setFeasibleCount(result.feasible_count)
       setLatestRunId(result.run_id)
@@ -216,11 +295,21 @@ export function OrganizerDashboard({
         } catch {
           setErrorMessage(AppCopy.networkError)
         }
-      } else if (candidates === 0) {
+      } else if (search.candidateCount === 0) {
+        // Unchanged meaning: no candidate came back from the provider this time, so what
+        // is on screen was fetched earlier.
         setStatusMessage('以前に取得した候補を表示しています。')
       }
-    } catch {
-      setErrorMessage(AppCopy.networkError)
+    } catch (error) {
+      // A 422 is a missing-location problem, not a network problem. Reporting it as
+      // 「通信できませんでした」 was both wrong and unactionable, so the count of people
+      // without a location is surfaced instead — as a count, never as a name.
+      if (error instanceof NoTravelOriginError) {
+        setTravelCoverage(error.travel)
+        setTravelSearchBlocked(true)
+      } else {
+        setErrorMessage(errorMessageFor(error))
+      }
     }
     // The search is what makes the numbers move, so re-read them instead of going stale.
     const next = await refreshReadiness()
@@ -333,6 +422,12 @@ export function OrganizerDashboard({
           onClick={() => void findRestaurants()}
           testId="find-restaurants"
         />
+
+        {/* Why the search failed, or what it could not measure. Sits under the button
+            that produced it, so cause and effect are adjacent. */}
+        {travelCoverage && (
+          <TravelCoverageNote coverage={travelCoverage} blocked={travelSearchBlocked} />
+        )}
       </div>
 
       {latestRunId && (feasibleCount ?? 0) > 0 && (

@@ -40,6 +40,30 @@ final class RecommendationListViewModel: ObservableObject {
     }
 }
 
+/// PRD §9: the 幹事's objective changes the emphasis, not the feasibility. Saying that once
+/// above the list keeps every card free to spend its space on its own numbers, and gives the
+/// per-card 「重視」 dots and 「未確認」 marks a single place to be explained.
+private struct ObjectiveLegend: View {
+    let breakdown: ScoreBreakdown
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+            Text(AppCopy.objectiveEmphasis(breakdown))
+                .font(AppTypography.caption.weight(.semibold))
+                .accessibilityIdentifier("score-emphasis")
+            Text(ScoreCopy.legendNote)
+                .font(AppTypography.small)
+                .foregroundStyle(AppColors.ink.opacity(0.72))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.sm)
+        .background(AppColors.greenSoft)
+        .clipShape(RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous))
+        .accessibilityIdentifier("score-legend")
+    }
+}
+
 struct RecommendationListView: View {
     let runId: UUID
     let eventId: UUID
@@ -58,6 +82,11 @@ struct RecommendationListView: View {
                     LoadingStateView(title: "おすすめのお店を読み込んでいます")
                 } else if !viewModel.isLoading && viewModel.scores.isEmpty {
                     EmptyStateView(title: AppCopy.noResults, message: "条件を少し見直すと、候補が増えるかもしれません。")
+                }
+                // Every row of a run shares the objective, so the first stored breakdown
+                // speaks for the whole list.
+                if let legendBreakdown = viewModel.scores.compactMap(\.scoreBreakdown).first {
+                    ObjectiveLegend(breakdown: legendBreakdown)
                 }
                 ForEach(viewModel.scores) { score in
                     RecommendationCardView(

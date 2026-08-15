@@ -1,6 +1,10 @@
 import SwiftUI
 
 struct WelcomeView: View {
+    /// Set when the app was opened by an invite link, which pushes the join screen with the
+    /// code prefilled (PRD §3).
+    @State private var linkedInviteCode: String?
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -48,6 +52,17 @@ struct WelcomeView: View {
                 .padding(.vertical, AppSpacing.lg)
             }
             .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(item: $linkedInviteCode) { code in
+                JoinEventView(initialCode: code)
+            }
+            // An invite link carries the code as `?code=`; the same parser also accepts a bare
+            // code or a trailing path component, so a scanned QR and a tapped link agree.
+            // Note: for an https link to reach this handler the invite domain still needs the
+            // Associated Domains entitlement and an apple-app-site-association file.
+            .onOpenURL { url in
+                let code = JoinEventView.extractInviteCode(from: url.absoluteString)
+                if code.count == 6 { linkedInviteCode = code }
+            }
         }
     }
 }
