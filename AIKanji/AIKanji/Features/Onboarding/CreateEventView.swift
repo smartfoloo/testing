@@ -1,3 +1,4 @@
+import Combine
 import CoreImage.CIFilterBuiltins
 import SwiftUI
 
@@ -13,7 +14,27 @@ struct CreateEventView: View {
     @State private var isSubmitting = false
     @State private var errorMessage: String?
     @State private var didCopy = false
+    @State private var isKeyboardVisible = false
 
+    private var isFormVisible: Bool { inviteCode == nil || created == nil }
+
+    private var canSubmit: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    // 集まりを作成 cannot simply be the last row of the form. This form is taller than a short
+    // phone: on a 402x874 screen the button sat at y=862.7 with a height of 62, so its centre
+    // was below the bottom of the screen, and the software keyboard covered everything past
+    // y=539 as well.
+    //
+    // Pinning it in a bottom bar is not enough either. With the keyboard up there are only
+    // 75.7 points between the 「あなたの名前」 field's centre (y=463.3) and the top of the
+    // keyboard, and the button alone is 62 — a pinned bar lands on that field and swallows the
+    // taps meant for it. So while a keyboard is on screen the action moves into the keyboard's
+    // own accessory band, which costs the form no height at all, and it returns to a pinned bar
+    // only once there is no keyboard to sit above. With a hardware keyboard the accessory band
+    // is still what iOS draws, so the action stays reachable there too.
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: AppSpacing.xl) {
@@ -30,8 +51,46 @@ struct CreateEventView: View {
             .padding(.bottom, AppSpacing.xxl)
         }
         .background(AppColors.background)
+        .safeAreaInset(edge: .bottom) {
+            if isFormVisible && !isKeyboardVisible {
+                submitControl
+                    // Neither a safe-area inset nor a toolbar item proposes a width, so the
+                    // button would otherwise shrink to its title and float as a small pill.
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.top, AppSpacing.sm)
+                    .padding(.bottom, AppSpacing.xs)
+                    .background { AppColors.background.ignoresSafeArea(edges: .bottom) }
+                    .overlay(alignment: .top) { Divider().overlay(AppColors.border) }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .keyboard) {
+                if isFormVisible {
+                    submitControl
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, AppSpacing.lg)
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            isKeyboardVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            isKeyboardVisible = false
+        }
         .navigationTitle("集まりを作る")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// One definition, rendered in exactly one place at a time — the keyboard accessory or the
+    /// pinned bar, never both, so `create-submit` is never ambiguous.
+    private var submitControl: some View {
+        PrimaryButton(title: "集まりを作成", isLoading: isSubmitting) {
+            Task { await create() }
+        }
+        .accessibilityIdentifier("create-submit")
+        .disabled(!canSubmit)
     }
 
     private var formView: some View {
@@ -62,11 +121,6 @@ struct CreateEventView: View {
                 place: $travelPlace,
                 identifierPrefix: "travel"
             )
-            PrimaryButton(title: "集まりを作成", isLoading: isSubmitting) {
-                Task { await create() }
-            }
-            .accessibilityIdentifier("create-submit")
-            .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
 
