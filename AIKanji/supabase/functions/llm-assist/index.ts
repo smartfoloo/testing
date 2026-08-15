@@ -130,6 +130,57 @@ const ALLERGENS = [
 /// allergen.
 const DIETARY_TAGS = ["gluten_free", "halal", "vegan", "vegetarian"] as const;
 
+/// The CLOSED atmosphere vocabulary — five members, read off ATMOSPHERE_WORDS/ATMOSPHERE_JA in
+/// mock.ts and `AppCopy.atmosphere`, matched against restaurant_features.atmosphere_tags by the
+/// same `&&` overlap the cuisine tags use. Like cuisine and unlike the safety lists it is not a
+/// blocking type, so an unmapped value costs ranking accuracy and never empties a shortlist.
+///
+/// It is here rather than in _shared/cuisine.ts because no provider writes atmosphere: Places has
+/// no such field and restaurant-search stores `atmosphere_tags: []`, so the only writer is this
+/// function and the only reader is the scorer.
+const ATMOSPHERE_TAGS = [
+  "casual",
+  "lively",
+  "quiet",
+  "stylish",
+  "traditional_japanese",
+] as const;
+
+/// Every spelling we translate, and the member it means. Mirrors ATMOSPHERE_WORDS in mock.ts,
+/// including its two non-obvious equivalences: モダン is `stylish` (there is no separate modern
+/// tag) and `calm` is `quiet`. A Map, for the same Object.prototype reason as the other tables.
+///
+/// The English entries are the load-bearing ones — the model answers in English identifiers, and
+/// 「モダンな感じがいい」 came back as `modern` and 'somewhere cozy' as `cozy`, neither of which
+/// any venue can carry. `cozy` stays deliberately unmapped: nothing in the vocabulary means it,
+/// and quiet is a different claim.
+const ATMOSPHERE_ALIASES = new Map<string, string>([
+  ["quiet", "quiet"],
+  ["calm", "quiet"],
+  ["静か", "quiet"],
+  ["しずか", "quiet"],
+  ["落ち着いた", "quiet"],
+  ["落ち着き", "quiet"],
+  ["lively", "lively"],
+  ["賑やか", "lively"],
+  ["にぎやか", "lively"],
+  ["活気", "lively"],
+  ["casual", "casual"],
+  ["カジュアル", "casual"],
+  ["気軽", "casual"],
+  ["traditional_japanese", "traditional_japanese"],
+  ["traditional", "traditional_japanese"],
+  ["和風", "traditional_japanese"],
+  ["伝統", "traditional_japanese"],
+  ["伝統的", "traditional_japanese"],
+  ["stylish", "stylish"],
+  ["modern", "stylish"],
+  ["モダン", "stylish"],
+  ["おしゃれ", "stylish"],
+  ["オシャレ", "stylish"],
+  ["お洒落", "stylish"],
+]);
+
 /// Every spelling of an allergen we are willing to translate, and the member it means. Maps
 /// rather than object literals so a value called "constructor" or "__proto__" resolves to
 /// nothing instead of to something inherited from Object.prototype.
@@ -345,7 +396,7 @@ normalized_value shape by type:
   room         {"room": "private"|"semi_private"|"open"}
   travel_time  {"max_minutes": number}
   accessibility{"needs": string[]}         CLOSED LIST, see below
-  atmosphere   {"tags": string[]}          e.g. ["quiet","lively"]
+  atmosphere   {"tags": string[]}          CLOSED LIST, see below
   other        {}
 
 Every value in a closed list below is written in English EVEN WHEN THE TEXT IS JAPANESE. These
@@ -372,6 +423,12 @@ ${CUISINE_TAGS.join(" ")}
 A cuisine outside the list (タパス, ビストロ, ベトナム料理) goes in semantic_remainder in the
 writer's own words. Unlike the lists below this does NOT need clarification on its own: cuisine
 only nudges the ranking, it never excludes a venue.
+
+atmosphere "tags" is a CLOSED list of exactly these five values, English for the same reason:
+${ATMOSPHERE_TAGS.join(" ")}
+There is no separate "modern" tag — モダン/modern IS stylish — and 落ち着いた/calm IS quiet.
+A mood none of the five expresses (cozy, romantic, 賑わいすぎない) goes in semantic_remainder in
+the writer's own words, and like cuisine it does not need clarification on its own.
 
 dietary "tags" is a CLOSED list of exactly these four values:
 ${promptVocabulary(DIETARY_TAGS, DIETARY_COVERAGE)}
@@ -589,6 +646,12 @@ function canonicalDietaryTag(raw: unknown): string | null {
   return DIETARY_ALIASES.get(taxonomyToken(raw)) ?? null;
 }
 
+/// One atmosphere word -> one ATMOSPHERE_TAGS member, or null.
+function canonicalAtmosphereTag(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  return ATMOSPHERE_ALIASES.get(taxonomyToken(raw)) ?? null;
+}
+
 /// The closed vocabulary of ONE safety category, enforced on the model's answer rather than
 /// trusted — the same treatment applyAccessibilityVocabulary gives `needs`, and the same three
 /// outcomes, with ONE DELIBERATE DIFFERENCE spelled out below.
@@ -718,26 +781,65 @@ function applyCuisineVocabulary(
   };
 }
 
-/// The four closed vocabularies, applied in one place. Accessibility runs FIRST because it is
+/// Atmosphere, on exactly the same terms as cuisine: enforced rather than trusted because the
+/// value is compared with `&&`, and NOT treated as a safety category because it does not gate
+/// anything. Verified drift before this existed: 「モダンな感じがいい」 -> `modern` and
+/// 'somewhere cozy' -> `cozy`, two tags no venue can carry, stored and silently matching nothing.
+/// `modern` now maps to `stylish` (mock.ts has always said they are the same tag); `cozy` maps to
+/// nothing and survives as the writer's own words instead.
+function applyAtmosphereVocabulary(
+  result: ModelParse,
+  rawText: string,
+): ModelParse {
+  if (result.normalized_type !== "atmosphere") return result;
+
+  const stated = Array.isArray(result.normalized_value.tags)
+    ? result.normalized_value.tags as unknown[]
+    : [];
+  const canonical: string[] = [];
+  let dropped = false;
+  for (const value of stated) {
+    const mapped = canonicalAtmosphereTag(value);
+    if (mapped === null) {
+      dropped = true;
+      continue;
+    }
+    if (!canonical.includes(mapped)) canonical.push(mapped);
+  }
+  canonical.sort();
+
+  return {
+    ...result,
+    normalized_value: { ...result.normalized_value, tags: canonical },
+    semantic_remainder: dropped
+      ? result.semantic_remainder ?? (rawText.trim() || null)
+      : result.semantic_remainder,
+  };
+}
+
+/// The five closed vocabularies, applied in one place. Accessibility runs FIRST because it is
 /// the only one that can re-type a row (to `other`); the others then see a type that is no
 /// longer theirs and no-op, so the order cannot produce a half-converted row.
 function applyClosedVocabularies(
   result: ModelParse,
   rawText: string,
 ): ModelParse {
-  return applyCuisineVocabulary(
-    applyClosedTagVocabulary(
+  return applyAtmosphereVocabulary(
+    applyCuisineVocabulary(
       applyClosedTagVocabulary(
-        applyAccessibilityVocabulary(result, rawText),
+        applyClosedTagVocabulary(
+          applyAccessibilityVocabulary(result, rawText),
+          rawText,
+          "dietary",
+          "tags",
+          canonicalDietaryTag,
+        ),
         rawText,
-        "dietary",
-        "tags",
-        canonicalDietaryTag,
+        "allergy",
+        "allergens",
+        canonicalAllergen,
       ),
       rawText,
-      "allergy",
-      "allergens",
-      canonicalAllergen,
     ),
     rawText,
   );
