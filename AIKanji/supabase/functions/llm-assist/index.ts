@@ -39,20 +39,73 @@ const SENSITIVE_TYPES = ["allergy", "dietary", "accessibility"] as const;
 
 type NormalizedType = (typeof NORMALIZED_TYPES)[number];
 type Visibility = "PUBLIC" | "ANONYMOUS";
+type Kind = "MUST" | "WANT";
+type Sensitivity = "normal" | "sensitive" | "highly_sensitive";
+type VerificationRequirement = "none" | "recommended" | "required";
+
+/// How personal the requirement is. Advisory metadata only: it never touches
+/// suggested_visibility, because the participant owns that decision (PRD §5).
+/// Mirrors fn_constraint_sensitivity in migration 0018 — keep the two in step.
+const SENSITIVITY_BY_TYPE: Record<NormalizedType, Sensitivity> = {
+  allergy: "highly_sensitive",
+  dietary: "highly_sensitive",
+  accessibility: "highly_sensitive",
+  budget: "sensitive", // money talk between coworkers is awkward, but it is not health data
+  cuisine: "normal",
+  smoking: "normal",
+  room: "normal",
+  travel_time: "normal",
+  atmosphere: "normal",
+  other: "normal",
+};
+
+/// Amenities we only know from provider data, which goes stale: worth a phone call, but a
+/// wrong answer disappoints rather than harms.
+const VERIFY_RECOMMENDED_TYPES = ["room", "smoking"] as const;
 
 interface ParseResult {
   normalized_type: NormalizedType;
   normalized_value: Record<string, unknown>;
   suggested_visibility: Visibility;
+  semantic_remainder: string | null;
+  sensitivity: Sensitivity;
+  verification_requirement: VerificationRequirement;
   confidence: number;
   needs_clarification: boolean;
 }
 
+/// What the model is allowed to decide. The two server-owned fields are excluded by
+/// construction, so nothing can slip a model-authored sensitivity into the response.
+type ModelParse = Omit<ParseResult, "sensitivity" | "verification_requirement">;
+
+/// Mirrors fn_constraint_verification_requirement in migration 0018. Only a MUST gates a
+/// venue, so only a MUST can demand confirmation; safety categories always do (PRD §11:
+/// "Unknown ≠ supported"). Derived here, never read from the model.
+function verificationFor(
+  normalizedType: NormalizedType,
+  kind: Kind,
+): VerificationRequirement {
+  if (kind !== "MUST") return "none";
+  if ((SENSITIVE_TYPES as readonly string[]).includes(normalizedType)) {
+    return "required";
+  }
+  if (
+    (VERIFY_RECOMMENDED_TYPES as readonly string[]).includes(normalizedType)
+  ) {
+    return "recommended";
+  }
+  return "none";
+}
+
 /// Returned whenever the model output cannot be trusted; the human corrects it in the UI.
+/// 'other' is neither sensitive nor gating for either kind, so the metadata is constant here.
 const FALLBACK: ParseResult = {
   normalized_type: "other",
   normalized_value: {},
   suggested_visibility: "PUBLIC",
+  semantic_remainder: null,
+  sensitivity: SENSITIVITY_BY_TYPE.other,
+  verification_requirement: "none",
   confidence: 0,
   needs_clarification: true,
 };
@@ -60,10 +113,11 @@ const FALLBACK: ParseResult = {
 const SYSTEM_PROMPT =
   `You normalize a single restaurant-outing requirement written by a member of a Tokyo coworker group.
 
-Reply with JSON only, exactly these five keys and nothing else:
+Reply with JSON only, exactly these six keys and nothing else:
 {"normalized_type": one of ${NORMALIZED_TYPES.join("|")},
  "normalized_value": object,
  "suggested_visibility": "PUBLIC" or "ANONYMOUS",
+ "semantic_remainder": string or null,
  "confidence": number between 0 and 1,
  "needs_clarification": boolean}
 
@@ -79,8 +133,16 @@ normalized_value shape by type:
   atmosphere   {"tags": string[]}          e.g. ["quiet","lively"]
   other        {}
 
+semantic_remainder: the part of the writer's own wording that normalized_value does not
+express — copy their words, in their language, and nothing else. Use null when the shape
+already covers the whole text. Never invent words that are not in the text, never paraphrase,
+and never put the whole text there just because you are unsure.
+  "個室で、日本酒が充実してるところ" as room -> "日本酒が充実してる"
+  "budget under 4000 yen" as budget -> null
+
 Set needs_clarification true when the text is empty, ambiguous, or you cannot fill the shape.
 Suggest ANONYMOUS for allergy, dietary and accessibility; PUBLIC otherwise.
+Do not output sensitivity or verification fields; the server derives those itself.
 The text may be Japanese or English.`;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -88,13 +150,17 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /// Fail-closed validator: wrong types, missing keys or hallucinated extra keys all reject.
-function validate(candidate: unknown): ParseResult | null {
+/// sensitivity and verification_requirement are deliberately absent from the contract — the
+/// server derives them, so a model that volunteers them is answering the wrong question and
+/// gets rejected like any other extra key.
+function validate(candidate: unknown, rawText: string): ModelParse | null {
   if (!isPlainObject(candidate)) return null;
 
   const expected = [
     "normalized_type",
     "normalized_value",
     "suggested_visibility",
+    "semantic_remainder",
     "confidence",
     "needs_clarification",
   ];
@@ -106,6 +172,7 @@ function validate(candidate: unknown): ParseResult | null {
     normalized_type,
     normalized_value,
     suggested_visibility,
+    semantic_remainder,
     confidence,
     needs_clarification,
   } = candidate;
@@ -118,27 +185,52 @@ function validate(candidate: unknown): ParseResult | null {
   if (
     suggested_visibility !== "PUBLIC" && suggested_visibility !== "ANONYMOUS"
   ) return null;
+  if (semantic_remainder !== null && typeof semantic_remainder !== "string") {
+    return null;
+  }
   if (typeof confidence !== "number" || !Number.isFinite(confidence)) {
     return null;
   }
   if (confidence < 0 || confidence > 1) return null;
   if (typeof needs_clarification !== "boolean") return null;
 
+  // The remainder is a slice of what the participant wrote, so it cannot be longer than the
+  // text itself; anything longer is the model composing prose and is not trustworthy.
+  const remainder = semantic_remainder === null
+    ? ""
+    : semantic_remainder.trim();
+  if (remainder.length > rawText.trim().length) return null;
+
   return {
     normalized_type: normalized_type as NormalizedType,
     normalized_value,
     suggested_visibility,
+    // Empty means "the taxonomy captured everything"; store NULL rather than an empty string
+    // so P1's semantic matching has nothing to embed for these rows.
+    semantic_remainder: remainder === "" ? null : remainder,
     confidence,
     needs_clarification,
   };
 }
 
 /// Sensitive categories default to ANONYMOUS; the client can still override before saving.
-function applyDefaultVisibility(result: ParseResult): ParseResult {
+function applyDefaultVisibility(result: ModelParse): ModelParse {
   if ((SENSITIVE_TYPES as readonly string[]).includes(result.normalized_type)) {
     return { ...result, suggested_visibility: "ANONYMOUS" };
   }
   return result;
+}
+
+/// The two server-owned fields, assigned from normalized_type (and kind) rather than from the
+/// model: a hallucinated "not sensitive" allergy or "no confirmation needed" MUST would be a
+/// safety bug, and both fields are pure functions of the taxonomy anyway. Sensitivity stays out
+/// of the visibility decision on purpose — that one belongs to the participant.
+function applyServerMetadata(result: ModelParse, kind: Kind): ParseResult {
+  return {
+    ...result,
+    sensitivity: SENSITIVITY_BY_TYPE[result.normalized_type],
+    verification_requirement: verificationFor(result.normalized_type, kind),
+  };
 }
 
 function json(body: unknown, status = 200): Response {
@@ -426,8 +518,15 @@ Deno.serve(async (req) => {
   // A malformed model response is a parsing outcome, not a server error: always answer 200
   // with the fallback so the client can ask the human instead of crashing or retrying blindly.
   try {
-    const validated = validate(await callModel(raw_text, kind, language));
-    return json(validated ? applyDefaultVisibility(validated) : FALLBACK);
+    const validated = validate(
+      await callModel(raw_text, kind, language),
+      raw_text,
+    );
+    return json(
+      validated
+        ? applyServerMetadata(applyDefaultVisibility(validated), kind)
+        : FALLBACK,
+    );
   } catch (error) {
     console.error("llm-assist parse failed", error);
     return json(FALLBACK);

@@ -11,6 +11,7 @@
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js'
 import type { Backend, Unsubscribe } from './types'
 import type {
+  CollectionReadiness,
   ConstraintKind,
   ConstraintVisibility,
   CreatedEvent,
@@ -24,6 +25,7 @@ import type {
   ParseResult,
   ParticipantRole,
   PendingNegotiation,
+  PlaceSuggestion,
   RecommendationRun,
   RecommendationScore,
   RestaurantFeature,
@@ -60,6 +62,7 @@ export class SupabaseBackend implements Backend {
     name: string
     displayName: string
     travelReference: TravelReference
+    travelReferencePlaceId?: string | null
     objective: EventObjective
   }): Promise<CreatedEvent> {
     return unwrap(
@@ -68,7 +71,7 @@ export class SupabaseBackend implements Backend {
         p_objective: input.objective,
         p_display_name: input.displayName,
         p_travel_reference: input.travelReference,
-        p_travel_reference_place_id: null,
+        p_travel_reference_place_id: input.travelReferencePlaceId ?? null,
       }),
     )
   }
@@ -77,15 +80,30 @@ export class SupabaseBackend implements Backend {
     inviteCode: string
     displayName: string
     travelReference: TravelReference
+    travelReferencePlaceId?: string | null
   }): Promise<string> {
     return unwrap(
       await this.client.rpc('fn_join_event', {
         p_invite_code: input.inviteCode,
         p_display_name: input.displayName,
         p_travel_reference: input.travelReference,
-        p_travel_reference_place_id: null,
+        p_travel_reference_place_id: input.travelReferencePlaceId ?? null,
       }),
     )
+  }
+
+  /**
+   * Server-side place lookup, so the Places key stays in Edge Function secrets.
+   */
+  async searchPlaces(query: string): Promise<PlaceSuggestion[]> {
+    const trimmed = query.trim()
+    if (trimmed.length === 0) return []
+    const { data, error } = await this.client.functions.invoke<{ places: PlaceSuggestion[] }>(
+      'place-search',
+      { body: { query: trimmed } },
+    )
+    if (error) throw new Error(error.message)
+    return data?.places ?? []
   }
 
   /** Readable only once the caller is a participant of the event (RLS on `events`). */
@@ -159,7 +177,10 @@ export class SupabaseBackend implements Backend {
     normalizedType: NormalizedType
     normalizedValue: NormalizedValue
     visibility: ConstraintVisibility
+    semanticRemainder?: string | null
   }): Promise<void> {
+    // sensitivity / verification_requirement are forced by 0018's BEFORE-INSERT trigger,
+    // so the client deliberately does not send them.
     const { error } = await this.client.from('participant_constraints').insert({
       event_id: input.eventId,
       participant_id: input.participantId,
@@ -168,6 +189,7 @@ export class SupabaseBackend implements Backend {
       normalized_type: input.normalizedType,
       normalized_value: input.normalizedValue,
       visibility: input.visibility,
+      semantic_remainder: input.semanticRemainder ?? null,
     })
     if (error) throw new Error(error.message)
   }
@@ -261,6 +283,23 @@ export class SupabaseBackend implements Backend {
     return unwrap(
       await this.client.rpc('fn_get_pending_negotiation_count', { p_event_id: eventId }),
     )
+  }
+
+  async collectionReadiness(eventId: string): Promise<CollectionReadiness> {
+    return unwrap(await this.client.rpc('fn_get_collection_readiness', { p_event_id: eventId }))
+  }
+
+  /**
+   * Organizer-only. Deliberately does not recompute — PRD §12 requires post-close
+   * recalculation to be explicit.
+   */
+  async closePreferences(eventId: string): Promise<CollectionReadiness> {
+    const rows = unwrap<Array<{ preferences_closed_at: string | null; status: string }>>(
+      await this.client.rpc('fn_close_preferences', { p_event_id: eventId }),
+    )
+    if (rows.length === 0) throw new Error('empty close-preferences response')
+    // The RPC returns only the lifecycle columns, so re-read the full readiness payload.
+    return this.collectionReadiness(eventId)
   }
 
   async latestRun(eventId: string): Promise<RecommendationRun | null> {

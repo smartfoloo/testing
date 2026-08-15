@@ -217,10 +217,23 @@ begin
   perform t_check('negotiation is marked accepted',
                   (select status from negotiations where id = v_neg_id) = 'ACCEPTED');
   -- Both runs share run_at inside this transaction, so use the id the RPC returned.
-  perform t_check('every feasible candidate is scored and labelled',
+  perform t_check('every feasible candidate is scored',
+                  (select count(*) from recommendation_scores
+                   where run_id = (v_result->>'run_id')::uuid) = 3);
+  -- Labels are earned, not distributed. Only David has seeded travel legs, so every
+  -- venue ties on travel fairness and no venue is demonstrably 'fairest' — that badge
+  -- goes unused rather than being handed to an arbitrary row (which is what the earlier
+  -- greedy assignment did: it once labelled a 75-minute commute 'best_access'). Assert
+  -- the invariant instead of a fixed count, since the count legitimately depends on how
+  -- much provider data has been gathered.
+  perform t_check('no label is applied twice',
+                  (select count(distinct label) = count(label)
+                   from recommendation_scores
+                   where run_id = (v_result->>'run_id')::uuid and label is not null));
+  perform t_check('at least one candidate carries a differentiating label',
                   (select count(*) from recommendation_scores
                    where run_id = (v_result->>'run_id')::uuid
-                     and label is not null) = 3);
+                     and label is not null) >= 1);
   perform t_check('recommendation run is broadcast to the event topic',
                   (select count(*) from realtime.messages
                    where topic = 'event-' || v_event_id::text

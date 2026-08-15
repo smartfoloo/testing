@@ -28,7 +28,9 @@ import {
 import type { Backend, Unsubscribe } from './types'
 import { roomDescription } from '../models/format'
 import type {
+  CollectionReadiness,
   ConstraintKind,
+  ConstraintSensitivity,
   Event as EventModel,
   EventDecision,
   FeasibilityResult,
@@ -38,14 +40,22 @@ import type {
   ParseResult,
   ParticipantRole,
   PendingNegotiation,
+  PlaceSuggestion,
   RecommendationRun,
   RecommendationScore,
   RestaurantFeature,
   RunUpdate,
   SavedConstraint,
+  VerificationRequirement,
 } from '../models/types'
 
-const STORAGE_KEY = 'matomeshi.mock.db.v1'
+/**
+ * Bump the db version whenever the fixture shape changes, so a browser holding an older
+ * snapshot re-seeds instead of running with columns the engine now expects. v2 added
+ * travel_matrix_cache legs, events.preferences_closed_at and the derived constraint
+ * metadata. The user key is separate so the current identity survives a re-seed.
+ */
+const STORAGE_KEY = 'matomeshi.mock.db.v2'
 const USER_KEY = 'matomeshi.mock.user.v1'
 
 /** Invite-code alphabet from fn_generate_invite_code (0007): 31 unambiguous chars. */
@@ -88,6 +98,10 @@ export function createSeedDb(): Db {
     normalized_type: normalizedType,
     normalized_value: normalizedValue,
     visibility,
+    // Derived server-side by 0018's trigger; mirrored here so the mock matches.
+    sensitivity: sensitivityFor(normalizedType),
+    verification_requirement: verificationFor(kind, normalizedType),
+    semantic_remainder: null,
     created_at: at(order++),
     updated_at: at(order),
   })
@@ -129,6 +143,7 @@ export function createSeedDb(): Db {
         created_at: at(0),
         chosen_place_id: null,
         chosen_at: null,
+        preferences_closed_at: null,
       },
     ],
     participants: [
@@ -175,7 +190,29 @@ export function createSeedDb(): Db {
     ],
     runs: [],
     scores: [],
+    travelMatrix: [],
   }
+}
+
+/**
+ * Mirrors fn_constraint_sensitivity / fn_constraint_verification_requirement in
+ * 0018_constraint_model_and_lifecycle.sql. The set that is `highly_sensitive` is exactly
+ * the set that defaults to ANONYMOUS and is never eligible for relaxation — one notion of
+ * health/religion/disability data across all three subsystems.
+ */
+function sensitivityFor(type: NormalizedType): ConstraintSensitivity {
+  if (type === 'allergy' || type === 'dietary' || type === 'accessibility') {
+    return 'highly_sensitive'
+  }
+  return type === 'budget' ? 'sensitive' : 'normal'
+}
+
+function verificationFor(kind: ConstraintKind, type: NormalizedType): VerificationRequirement {
+  // Only a MUST can gate a venue, so WANTs never require confirmation.
+  if (kind !== 'MUST') return 'none'
+  if (type === 'allergy' || type === 'dietary' || type === 'accessibility') return 'required'
+  if (type === 'room' || type === 'smoking') return 'recommended'
+  return 'none'
 }
 
 /* -------------------------------------------------------------------------- */
@@ -338,7 +375,7 @@ const RULES: Rule[] = [
 /** Mirrors applyDefaultVisibility() — sensitive categories default to ANONYMOUS. */
 const SENSITIVE_TYPES: NormalizedType[] = ['allergy', 'dietary', 'accessibility']
 
-export function parseConstraintText(rawText: string): ParseResult {
+export function parseConstraintText(rawText: string, kind: ConstraintKind = 'WANT'): ParseResult {
   const text = rawText.trim()
   const fallback: ParseResult = {
     normalized_type: 'other',
@@ -346,6 +383,9 @@ export function parseConstraintText(rawText: string): ParseResult {
     suggested_visibility: 'PUBLIC',
     confidence: 0,
     needs_clarification: true,
+    semantic_remainder: null,
+    sensitivity: 'normal',
+    verification_requirement: 'none',
   }
   if (text.length === 0) return fallback
 
@@ -360,10 +400,15 @@ export function parseConstraintText(rawText: string): ParseResult {
       suggested_visibility: SENSITIVE_TYPES.includes(rule.type) ? 'ANONYMOUS' : 'PUBLIC',
       confidence: 0.9,
       needs_clarification: false,
+      // The taxonomy captured this one, so there is no leftover meaning to preserve.
+      semantic_remainder: null,
+      sensitivity: sensitivityFor(rule.type),
+      verification_requirement: verificationFor(kind, rule.type),
     }
   }
 
-  return { ...fallback, normalized_value: { note: text } }
+  // Nothing matched: keep the wording so P1 semantic matching has something to embed.
+  return { ...fallback, normalized_value: { note: text }, semantic_remainder: text }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -371,7 +416,7 @@ export function parseConstraintText(rawText: string): ParseResult {
 /* -------------------------------------------------------------------------- */
 
 type Topic = `event-${string}`
-type BroadcastEvent = 'constraint_added' | 'run_updated' | 'event_decided'
+type BroadcastEvent = 'constraint_added' | 'run_updated' | 'event_decided' | 'preferences_closed'
 
 export class MockBackend implements Backend {
   readonly mode = 'mock' as const
@@ -388,6 +433,8 @@ export class MockBackend implements Backend {
 
   private load(): Db {
     try {
+      // Drop snapshots from superseded schema versions rather than leaving them orphaned.
+      localStorage.removeItem('matomeshi.mock.db.v1')
       const raw = localStorage.getItem(STORAGE_KEY)
       if (raw) return JSON.parse(raw) as Db
     } catch {
@@ -484,6 +531,7 @@ export class MockBackend implements Backend {
     name: string
     displayName: string
     travelReference: 'office' | 'home' | 'station' | 'doesnt_matter'
+    travelReferencePlaceId?: string | null
     objective: EventModel['objective']
   }) {
     await this.latency()
@@ -501,6 +549,7 @@ export class MockBackend implements Backend {
       created_at: this.now(),
       chosen_place_id: null,
       chosen_at: null,
+      preferences_closed_at: null,
     })
     this.db.participants.push({
       id: participantId,
@@ -509,7 +558,7 @@ export class MockBackend implements Backend {
       display_name: input.displayName,
       role: 'organizer',
       travel_reference: input.travelReference,
-      travel_reference_place_id: null,
+      travel_reference_place_id: input.travelReferencePlaceId ?? null,
       joined_at: this.now(),
     })
     this.persist()
@@ -520,6 +569,7 @@ export class MockBackend implements Backend {
     inviteCode: string
     displayName: string
     travelReference: 'office' | 'home' | 'station' | 'doesnt_matter'
+    travelReferencePlaceId?: string | null
   }) {
     await this.latency()
     const event = this.db.events.find((row) => row.invite_code === input.inviteCode)
@@ -538,7 +588,7 @@ export class MockBackend implements Backend {
       display_name: input.displayName,
       role: 'participant',
       travel_reference: input.travelReference,
-      travel_reference_place_id: null,
+      travel_reference_place_id: input.travelReferencePlaceId ?? null,
       joined_at: this.now(),
     })
     this.persist()
@@ -598,7 +648,7 @@ export class MockBackend implements Backend {
 
   async parse(input: { rawText: string; kind: ConstraintKind; language: 'ja' | 'en' }) {
     await this.latency(320)
-    return parseConstraintText(input.rawText)
+    return parseConstraintText(input.rawText, input.kind)
   }
 
   async insertConstraint(input: {
@@ -609,11 +659,19 @@ export class MockBackend implements Backend {
     normalizedType: NormalizedType
     normalizedValue: NormalizedValue
     visibility: 'PUBLIC' | 'ANONYMOUS' | 'PRIVATE'
+    semanticRemainder?: string | null
   }): Promise<void> {
     await this.latency()
     const me = this.me(input.eventId)
     if (!me || me.id !== input.participantId) {
       throw new Error('new row violates row-level security policy')
+    }
+    // 0018 puts this in the RLS `with check`, so the write fails loudly rather than
+    // silently updating zero rows. Mirror that: closing collection must be enforced,
+    // not merely hidden in the UI.
+    const event = this.db.events.find((row) => row.id === input.eventId)
+    if (event?.preferences_closed_at) {
+      throw new Error('new row violates row-level security policy for table "participant_constraints"')
     }
 
     const row: ConstraintRow = {
@@ -625,6 +683,9 @@ export class MockBackend implements Backend {
       normalized_type: input.normalizedType,
       normalized_value: input.normalizedValue,
       visibility: input.visibility,
+      sensitivity: sensitivityFor(input.normalizedType),
+      verification_requirement: verificationFor(input.kind, input.normalizedType),
+      semantic_remainder: input.semanticRemainder ?? null,
       created_at: this.now(),
       updated_at: this.now(),
     }
@@ -771,22 +832,121 @@ export class MockBackend implements Backend {
   async findRestaurants(eventId: string): Promise<number> {
     await this.latency(700)
     this.requireParticipant(eventId)
-    const participants = this.db.participants.filter((row) => row.event_id === eventId)
+    // A participant with no travel reference place, or with 'doesnt_matter', contributes
+    // no origin — exactly how restaurant-search now behaves since it stopped geocoding
+    // the literal word "office".
+    const participants = this.db.participants.filter(
+      (row) => row.event_id === eventId && row.travel_reference !== 'doesnt_matter',
+    )
+    const travelMatrix = (this.db.travelMatrix ??= [])
 
     for (const feature of this.db.features) {
       for (const participant of participants) {
-        if (feature.travel_minutes_by_participant[participant.id] === undefined) {
-          // Deterministic pseudo-travel time in 12–42 minutes, stable per (participant, place).
+        const cached = travelMatrix.find(
+          (leg) =>
+            leg.event_id === eventId &&
+            leg.participant_id === participant.id &&
+            leg.place_id === feature.place_id,
+        )
+        // Read-through: a leg already cached for this event is not re-fetched.
+        if (cached) continue
+
+        const seeded = feature.travel_minutes_by_participant[participant.id]
+        // Deterministic pseudo-travel time in 12-42 minutes, stable per (participant, place),
+        // standing in for the Routes matrix the real function would compute.
+        let minutes = seeded
+        if (minutes === undefined) {
           let hash = 0
           const key = `${participant.id}:${feature.place_id}`
           for (let i = 0; i < key.length; i += 1) hash = (hash * 31 + key.charCodeAt(i)) >>> 0
-          feature.travel_minutes_by_participant[participant.id] = 12 + (hash % 31)
+          minutes = 12 + (hash % 31)
         }
+
+        // travel_matrix_cache is authoritative and event-scoped (0017); the legacy JSONB
+        // is merged, never replaced, so another event's legs survive.
+        travelMatrix.push({
+          event_id: eventId,
+          participant_id: participant.id,
+          place_id: feature.place_id,
+          minutes,
+        })
+        feature.travel_minutes_by_participant[participant.id] = minutes
       }
       feature.fetched_at = this.now()
     }
     this.persist()
     return this.db.restaurants.length
+  }
+
+  /* ----------------------------------------------------- lifecycle / readiness */
+
+  private readinessFor(eventId: string): CollectionReadiness {
+    const event = this.db.events.find((row) => row.id === eventId)
+    const participants = this.db.participants.filter((row) => row.event_id === eventId)
+    const responded = new Set(
+      this.db.constraints
+        .filter((row) => row.event_id === eventId)
+        .map((row) => row.participant_id),
+    ).size
+    // fn_get_collection_readiness (0018): least(n, greatest(3, ceil(0.6n))).
+    const n = participants.length
+    const threshold = Math.min(n, Math.max(3, Math.ceil(0.6 * n)))
+    const closed = Boolean(event?.preferences_closed_at)
+    const met = n > 0 && responded >= threshold
+    return {
+      participant_count: n,
+      responded_count: responded,
+      threshold_count: threshold,
+      threshold_met: met,
+      provisional_ready: met || closed,
+      preferences_closed: closed,
+      preferences_closed_at: event?.preferences_closed_at ?? null,
+    }
+  }
+
+  async collectionReadiness(eventId: string): Promise<CollectionReadiness> {
+    await this.latency(60)
+    this.requireParticipant(eventId)
+    return this.readinessFor(eventId)
+  }
+
+  async closePreferences(eventId: string): Promise<CollectionReadiness> {
+    await this.latency()
+    const event = this.db.events.find((row) => row.id === eventId)
+    if (!event) throw new Error('event not found')
+    const me = this.me(eventId)
+    if (!me || event.organizer_participant_id !== me.id) {
+      throw new Error('only the organizer can close preference collection')
+    }
+    // Idempotent, and deliberately does NOT recompute: PRD 12 requires post-close
+    // recalculation to be explicit.
+    if (!event.preferences_closed_at) {
+      event.preferences_closed_at = this.now()
+      if (event.status === 'collecting') event.status = 'negotiating'
+      this.persist()
+      this.emit(`event-${eventId}`, 'preferences_closed', {
+        preferences_closed_at: event.preferences_closed_at,
+      })
+    }
+    return this.readinessFor(eventId)
+  }
+
+  /**
+   * Stands in for the place-search Edge Function. A curated set of Tokyo stations, so the
+   * travel-reference picker is exercisable with no provider key.
+   */
+  async searchPlaces(query: string): Promise<PlaceSuggestion[]> {
+    await this.latency(280)
+    const q = query.trim().toLowerCase()
+    if (q.length === 0) return []
+    return TOKYO_PLACES.filter(
+      (place) =>
+        place.name.toLowerCase().includes(q) ||
+        place.romaji.includes(q) ||
+        (place.address ?? '').toLowerCase().includes(q),
+    )
+      .slice(0, 6)
+      .map(({ place_id, name, address }) => ({ place_id, name, address }))
   }
 
   private runRecompute(eventId: string): FeasibilityResult {
@@ -891,6 +1051,25 @@ export class MockBackend implements Backend {
     return `${lead}${parts.join('、')}${parts.length > 0 ? 'です。' : ''}${travel}`.trim()
   }
 }
+
+/**
+ * Stand-in for Google Places results. Real place ids are opaque provider strings; these
+ * are clearly marked as mock so they can never be mistaken for provider data.
+ */
+const TOKYO_PLACES: Array<PlaceSuggestion & { romaji: string }> = [
+  { place_id: 'mock_place_shinjuku', name: '新宿駅', address: '東京都新宿区', romaji: 'shinjuku' },
+  { place_id: 'mock_place_shibuya', name: '渋谷駅', address: '東京都渋谷区', romaji: 'shibuya' },
+  { place_id: 'mock_place_tokyo', name: '東京駅', address: '東京都千代田区', romaji: 'tokyo' },
+  { place_id: 'mock_place_shinagawa', name: '品川駅', address: '東京都港区', romaji: 'shinagawa' },
+  { place_id: 'mock_place_ikebukuro', name: '池袋駅', address: '東京都豊島区', romaji: 'ikebukuro' },
+  { place_id: 'mock_place_ueno', name: '上野駅', address: '東京都台東区', romaji: 'ueno' },
+  { place_id: 'mock_place_akihabara', name: '秋葉原駅', address: '東京都千代田区', romaji: 'akihabara' },
+  { place_id: 'mock_place_shimbashi', name: '新橋駅', address: '東京都港区', romaji: 'shimbashi' },
+  { place_id: 'mock_place_nakameguro', name: '中目黒駅', address: '東京都目黒区', romaji: 'nakameguro' },
+  { place_id: 'mock_place_kanda', name: '神田駅', address: '東京都千代田区', romaji: 'kanda' },
+  { place_id: 'mock_place_roppongi', name: '六本木駅', address: '東京都港区', romaji: 'roppongi' },
+  { place_id: 'mock_place_otemachi', name: '大手町駅', address: '東京都千代田区', romaji: 'otemachi' },
+]
 
 const ATMOSPHERE_JA: Record<string, string> = {
   quiet: '静か',

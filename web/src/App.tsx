@@ -14,14 +14,24 @@ import { EventHome } from './features/EventHome'
 import { JoinEvent } from './features/JoinEvent'
 import { Recommendations } from './features/Recommendations'
 import { Welcome } from './features/Welcome'
+import { inviteCodeFromLocation } from './models/invite'
 import type { EventDecision, ParticipantRole } from './models/types'
 
 type Route =
   | { name: 'welcome' }
   | { name: 'create' }
-  | { name: 'join' }
+  | { name: 'join'; initialCode?: string }
   | { name: 'home'; eventId: string; participantId: string; inviteCode: string }
   | { name: 'recommendations'; runId: string }
+
+/**
+ * An invite link (`?code=xxxxxx`) opens straight into the join screen with the code
+ * filled in, so the QR and the shared link behave the same way.
+ */
+function initialStack(): Route[] {
+  const code = inviteCodeFromLocation()
+  return code ? [{ name: 'welcome' }, { name: 'join', initialCode: code }] : [{ name: 'welcome' }]
+}
 
 function useSystemTheme(): void {
   useEffect(() => {
@@ -35,7 +45,7 @@ function useSystemTheme(): void {
 
 function Shell() {
   const backend = useBackend()
-  const [stack, setStack] = useState<Route[]>([{ name: 'welcome' }])
+  const [stack, setStack] = useState<Route[]>(initialStack)
   const [authError, setAuthError] = useState<string | null>(null)
   const [role, setRole] = useState<ParticipantRole | null>(null)
   const [decision, setDecision] = useState<EventDecision | null>(null)
@@ -110,6 +120,7 @@ function Shell() {
       case 'join':
         return (
           <JoinEvent
+            initialCode={route.initialCode}
             onContinue={({ eventId, participantId, inviteCode }) =>
               push({ name: 'home', eventId, participantId, inviteCode })
             }

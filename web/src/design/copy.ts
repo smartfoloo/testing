@@ -3,12 +3,17 @@
  * The app is Japanese-only, so these strings are the product surface — keep them verbatim.
  */
 
+import { SCORE_DIMENSIONS } from '../models/types'
 import type {
+  CollectionReadiness,
   ConstraintKind,
   ConstraintVisibility,
   EventObjective,
   NormalizedType,
+  ObjectiveWeights,
   RecommendationLabel,
+  ScoreBreakdown,
+  ScoreDimension,
   TravelReference,
 } from '../models/types'
 
@@ -41,6 +46,21 @@ export const AppCopy = {
   permissionError: 'この操作を行う権限がありません。',
   invalidRequestError:
     'この操作は完了できませんでした。内容を確認して、もう一度お試しください。',
+
+  /* PRD §12 — progressive search and closing preference collection (organizer only). */
+  collectionProgress: '回答の集まり具合',
+  provisionalBadge: '暫定',
+  preferencesClosedBadge: '締め切り済み',
+  closePreferences: '希望の受付を締め切る',
+  closePreferencesQuestion: '希望の受付を締め切りますか？',
+  closePreferencesConfirm: '締め切る',
+  /** The three consequences the 幹事 is agreeing to, spelled out before the tap. */
+  closePreferencesEffect: '締め切ると、参加者は条件を追加・変更できなくなります。',
+  closePreferencesNoRecompute:
+    '締め切っても、おすすめは計算し直しません。締め切ったあとに「条件に合うお店を探す」を押すと、そのときの条件で計算します。',
+  closePreferencesIrreversible: '締め切りは取り消せません。',
+  recomputeRequired:
+    '締め切ったあとの計算はまだです。「条件に合うお店を探す」を押すと、いまの条件で計算し直します。',
 } as const
 
 export function objectiveLabel(objective: EventObjective): string {
@@ -179,4 +199,312 @@ export function errorMessage(error: unknown): string {
     return AppCopy.invalidRequestError
   }
   return AppCopy.networkError
+}
+
+/* -------------------------------------------------------------------------- */
+/* PRD §12 — progressive search readiness                                      */
+/* -------------------------------------------------------------------------- */
+
+/** Everyone who could answer has answered — no further input is expected. */
+function isComplete(readiness: CollectionReadiness): boolean {
+  return readiness.participant_count > 0 && readiness.responded_count >= readiness.participant_count
+}
+
+/** The raw shape of the progress: people, not constraint rows, plus the threshold. */
+export function readinessCounts(readiness: CollectionReadiness): string {
+  return `${readiness.participant_count}人中${readiness.responded_count}人が回答（目安は${readiness.threshold_count}人）`
+}
+
+/** What the current state means, in one sentence. */
+export function readinessSummary(readiness: CollectionReadiness): string {
+  if (readiness.preferences_closed) {
+    return '希望の受付は締め切り済みです。これ以上、条件は増えません。'
+  }
+  if (isComplete(readiness)) {
+    return '全員の回答がそろいました。'
+  }
+  if (readiness.threshold_met) {
+    return 'おすすめを出せる人数に届きました。まだ回答していない人がいるので、結果は暫定です。'
+  }
+  const remaining = Math.max(readiness.threshold_count - readiness.responded_count, 0)
+  return `あと${remaining}人の回答で、おすすめを出せる目安に届きます。`
+}
+
+/**
+ * What the 幹事 can do about it. PRD §12 explicitly does not want the group held up by a
+ * silent colleague, so searching early is offered — labelled as provisional, not blocked.
+ */
+export function readinessHint(readiness: CollectionReadiness): string {
+  if (readiness.preferences_closed) {
+    return '参加者は条件を追加・変更できません。'
+  }
+  if (isComplete(readiness)) {
+    return '全員分の条件をもとに計算します。'
+  }
+  if (readiness.threshold_met) {
+    return '回答が増えたら、もう一度探すと結果が変わることがあります。'
+  }
+  return '今すぐ探すこともできます。その場合は、いまの回答だけをもとにした暫定のおすすめになります。'
+}
+
+/** Exactly what the 幹事 is locking in, stated before they confirm the close. */
+export function closeSnapshotText(readiness: CollectionReadiness): string {
+  return `いま締め切ると、${readiness.participant_count}人中${readiness.responded_count}人の回答で確定します。`
+}
+
+/** 「2月3日 14:30 に締め切りました。」 — when, so "closed" is a fact and not a mood. */
+export function closedAtText(closedAt: string | null): string | null {
+  if (!closedAt) return null
+  const at = new Date(closedAt)
+  if (Number.isNaN(at.getTime())) return null
+  const stamp = new Intl.DateTimeFormat('ja-JP', {
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(at)
+  return `${stamp} に締め切りました。`
+}
+
+/**
+ * What a shortlist is actually based on. `basis` is the readiness captured when the run
+ * landed, so the label describes that run rather than whatever has changed since.
+ */
+export function resultBasisText(basis: CollectionReadiness | null): string {
+  if (!basis) {
+    return '前回の計算結果を表示しています。いまの条件で確認するには、もう一度探してください。'
+  }
+  if (basis.preferences_closed) {
+    return `締め切り後の条件（${basis.participant_count}人中${basis.responded_count}人の回答）で計算した結果です。`
+  }
+  if (isComplete(basis)) {
+    return `全員（${basis.participant_count}人）の条件で計算した結果です。`
+  }
+  return `暫定：${basis.participant_count}人中${basis.responded_count}人の回答で計算した結果です。`
+}
+
+/* -------------------------------------------------------------------------- */
+/* Travel-reference place picker (CreateEvent / JoinEvent)                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * `travel_reference` is a category, not a place, so the participant also picks a
+ * real place for it. These strings explain that without jargon, and — because the
+ * place is optional — name the consequence of skipping it, since travel fairness
+ * degrades silently otherwise.
+ */
+export const TravelCopy = {
+  sectionTitle: '移動の基準',
+  sectionHelp: 'よく使う場所を選ぶと、みんなの移動の負担を公平に計算できます。',
+  searchPlaceholder: '例：渋谷駅',
+  searching: '探しています…',
+  noResults: '見つかりませんでした。駅名や地名で試してください。',
+  searchFailed: '場所を検索できませんでした。',
+  change: '変更する',
+  /** Shown while a location-bearing reference has no place yet. */
+  missingPlace: '場所は未設定です。このまま進めますが、移動のしやすさの計算には入りません。',
+  /** Shown for どこでも, which is a valid answer and needs no place. */
+  unconstrained: '移動の条件は出しません。ほかの人が集まりやすい場所に合わせます。',
+} as const
+
+/** Label for the place field, phrased for the reference the participant chose. */
+export function travelPlaceLabel(reference: TravelReference): string {
+  switch (reference) {
+    case 'office':
+      return '会社の場所'
+    case 'home':
+      return '自宅の最寄り駅'
+    case 'station':
+      return '出発する駅'
+    case 'doesnt_matter':
+      return '場所'
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Recommendation score breakdown (PRD §9)                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Web-only additions: the iOS card only carries a badge, but PRD §9 forbids presenting
+ * one opaque universal score, so the web card names every dimension, the emphasis the
+ * 幹事's objective put on it, and — separately — whether the underlying data exists.
+ */
+export const ScoreCopy = {
+  showDetail: '内訳を見る',
+  hideDetail: '内訳を閉じる',
+  /** Shown instead of a percentage when the stored number is a missing-data placeholder. */
+  unknown: '未確認',
+  /**
+   * The two polarities on one screen: components are higher-better, burdens are
+   * higher-worse. Said plainly so a bar is never misread.
+   */
+  scaleNote:
+    'バーは、長いほど良い項目です。予算と設備は「負担」も書いていますが、負担は数字が大きいほど、だれかの負担が重いという意味です。',
+  legendNote:
+    '● はこの会で重視した項目です。データがそろっていない項目は「未確認」と出します。評価が低いという意味ではありません。',
+  weightedTotal: '重み付け合計',
+  weightedTotalNote: 'この6項目に、この会の重みをかけて足した値です（0〜1）。',
+  detailAriaLabel: 'スコアの内訳',
+} as const
+
+export function scoreDimensionLabel(dimension: ScoreDimension): string {
+  switch (dimension) {
+    case 'travel_fairness':
+      return '移動の公平さ'
+    case 'travel_access':
+      return '移動の近さ'
+    case 'satisfaction':
+      return 'みんなの希望'
+    case 'quality':
+      return 'お店の評価'
+    case 'cost_fit':
+      // Deliberately not 「安さ」: the component is 1 - price/tightest budget, i.e. how much
+      // headroom is left against the tightest budget in the group, so ゆとり and the 負担
+      // spelled out in the detail add up to 100% and the polarity reads for itself.
+      return '予算のゆとり'
+    case 'accessibility_fit':
+      return '設備への配慮'
+  }
+}
+
+/** 0..1 → 「82%」. Clamped, because a stored value is trusted but never assumed in range. */
+export function scorePercent(value: number): string {
+  return `${Math.round(Math.min(1, Math.max(0, value)) * 100)}%`
+}
+
+/**
+ * Which dimensions this event's objective actually leans on: the ones weighted above an
+ * even split. `fn_objective_weights` always has a peak, so this never comes back empty.
+ */
+export function emphasizedScoreDimensions(weights: ObjectiveWeights): ScoreDimension[] {
+  const evenShare = 1 / SCORE_DIMENSIONS.length
+  const above = SCORE_DIMENSIONS.filter((dimension) => weights[dimension] > evenShare)
+  const chosen =
+    above.length > 0
+      ? above
+      : SCORE_DIMENSIONS.filter(
+          (dimension) =>
+            weights[dimension] === Math.max(...SCORE_DIMENSIONS.map((key) => weights[key])),
+        )
+  return [...chosen].sort((a, b) => weights[b] - weights[a])
+}
+
+export function objectiveEmphasisText(breakdown: ScoreBreakdown): string {
+  const emphasized = emphasizedScoreDimensions(breakdown.weights)
+    .map(scoreDimensionLabel)
+    .join('・')
+  return `この会の目的は「${objectiveLabel(breakdown.objective)}」。${emphasized}を重めに見て並べています。`
+}
+
+/**
+ * True when the stored number is a placeholder for data we never got, not a measurement.
+ * `fn_banded_score` keeps those below 0.2 so they cannot outrank measured data, which
+ * means showing them as a plain low percentage would read as "this venue is bad".
+ */
+export function isScoreDimensionUnknown(
+  breakdown: ScoreBreakdown,
+  dimension: ScoreDimension,
+): boolean {
+  switch (dimension) {
+    case 'travel_fairness':
+    case 'travel_access':
+      return !breakdown.travel.complete || breakdown.travel.known === 0
+    case 'quality':
+      return breakdown.quality.method === 'atmosphere_tag_proxy'
+    case 'cost_fit':
+      // An unknown price is scored as the worst case, so it is a gap, not a measurement.
+      return breakdown.cost.price_yen === null
+    case 'accessibility_fit':
+      // With no request there is nothing to verify; the gap only matters if someone asked.
+      return !breakdown.accessibility.data_present && breakdown.accessibility.requests > 0
+    case 'satisfaction':
+      return false
+  }
+}
+
+function accessibilityNeedLabel(need: string): string {
+  switch (need) {
+    case 'wheelchair':
+      return '車椅子対応'
+    case 'step_free':
+      return '段差なし'
+    case 'elevator':
+      return 'エレベーター'
+    default:
+      return need
+  }
+}
+
+function needList(needs: string[]): string {
+  return needs.map(accessibilityNeedLabel).join('・')
+}
+
+/** One sentence per dimension, grounded in the stored breakdown (acceptance test A7). */
+export function scoreDimensionEvidence(
+  breakdown: ScoreBreakdown,
+  dimension: ScoreDimension,
+): string {
+  const { travel, quality, cost, accessibility } = breakdown
+  const average = travel.average_minutes === null ? null : Math.round(travel.average_minutes)
+
+  switch (dimension) {
+    case 'travel_fairness':
+      if (isScoreDimensionUnknown(breakdown, dimension)) {
+        return `移動時間が分かっているのは${travel.participants}人中${travel.known}人です。負担の差はまだ比べられません。`
+      }
+      if (travel.known < 2) {
+        return `移動時間が分かっているのは${travel.known}人分なので、差は生じていません。`
+      }
+      return `いちばん近い人といちばん遠い人の差は${Math.round(travel.spread_minutes)}分です。`
+    case 'travel_access':
+      if (isScoreDimensionUnknown(breakdown, dimension) || average === null) {
+        return `平均の移動時間は、${travel.participants}人中${travel.known}人分しか分かっていません。`
+      }
+      return `${travel.participants}人の平均の移動時間は約${average}分です。`
+    case 'satisfaction':
+      return `みんなの「できれば欲しい」に、${scorePercent(breakdown.components.satisfaction)}ほど合っています。`
+    case 'quality':
+      if (quality.method === 'atmosphere_tag_proxy') {
+        return `口コミ評価が取れていないため、雰囲気タグ${quality.atmosphere_tags}件からの暫定値です。低い評価という意味ではありません。`
+      }
+      return `口コミ${quality.rating}（${quality.user_rating_count}件）をもとに、件数の少なさを補正して見ています。`
+    case 'cost_fit':
+      if (cost.price_yen === null) {
+        return `価格が取れていないため、負担${scorePercent(cost.burden)}のいちばん厳しい見立てにしています。`
+      }
+      if (cost.tightest_budget_yen !== null) {
+        return `1人${cost.price_yen}円。いちばん厳しい予算${cost.tightest_budget_yen}円に対して、負担は${scorePercent(cost.burden)}です。`
+      }
+      return `1人${cost.price_yen}円。予算の希望がないため、目安の${cost.reference_yen}円に対して負担は${scorePercent(cost.burden)}です。`
+    case 'accessibility_fit':
+      if (accessibility.requests === 0) {
+        return '設備についての希望は出ていません。'
+      }
+      if (!accessibility.data_present) {
+        return `お店の設備情報が取れていないため、希望${accessibility.needs.length}件（${needList(accessibility.needs)}）を確認できていません。`
+      }
+      if (accessibility.unmet_needs.length > 0) {
+        return `希望${accessibility.needs.length}件のうち${accessibility.unmet_needs.length}件（${needList(accessibility.unmet_needs)}）が未対応で、負担は${scorePercent(accessibility.burden)}です。`
+      }
+      return `希望された設備（${needList(accessibility.needs)}）に対応しています。`
+  }
+}
+
+/**
+ * The one-line "what we could not check" summary. Named by source rather than by
+ * dimension, because one missing travel matrix darkens two dimensions at once.
+ */
+export function scoreDataGapNote(breakdown: ScoreBreakdown): string | null {
+  const missing: string[] = []
+  if (!breakdown.travel.complete || breakdown.travel.known === 0) {
+    missing.push(`移動時間（${breakdown.travel.participants}人中${breakdown.travel.known}人分）`)
+  }
+  if (breakdown.quality.method === 'atmosphere_tag_proxy') missing.push('口コミ評価')
+  if (breakdown.cost.price_yen === null) missing.push('価格')
+  if (!breakdown.accessibility.data_present && breakdown.accessibility.requests > 0) {
+    missing.push('設備情報')
+  }
+  if (missing.length === 0) return null
+  return `未取得：${missing.join('・')}。データがないだけで、低い評価という意味ではありません。`
 }
