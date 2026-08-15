@@ -52,6 +52,7 @@ struct ConstraintEntryView: View {
                     Button(isParsing ? "Parsing…" : "Next") {
                         Task { await parse(kind: kind) }
                     }
+                    .accessibilityIdentifier("next-\(kind.rawValue)")
                     .disabled(isParsing || (drafts[kind] ?? "").trimmed.isEmpty)
                 }
             }
@@ -64,11 +65,14 @@ struct ConstraintEntryView: View {
             }
         }
         .navigationTitle("Your requirements")
-        .sheet(item: $pending) { _ in
-            if let binding = Binding($pending) {
-                ConstraintConfirmSheet(pending: binding) { confirmed in
-                    Task { await save(confirmed) }
-                }
+        .sheet(item: $pending) { item in
+            ConstraintConfirmSheet(
+                pending: Binding(
+                    get: { pending ?? item },
+                    set: { pending = $0 }
+                )
+            ) { confirmed in
+                Task { await save(confirmed) }
             }
         }
     }

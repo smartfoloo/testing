@@ -5,3 +5,8 @@ DerivedData/
 xcuserdata/
 AIKanji/Secrets.xcconfig
 AIKanji/AIKanji.xcodeproj/project.xcworkspace/
+
+# Local build/test artifacts
+.build/
+.verify/
+AIKanji/supabase/.temp/
