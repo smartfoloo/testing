@@ -879,9 +879,10 @@ Deno.serve(async (req: Request) => {
     return json({ error: "not a participant of this event" }, 403);
   }
 
-  if (!GOOGLE_PLACES_API_KEY) {
-    return json({ error: "GOOGLE_PLACES_API_KEY not configured" }, 500);
-  }
+  // The Places key is NOT checked here. It used to be, and that made a fully cached
+  // event fail for want of something it never uses: the read-through cache below can
+  // answer with no provider call at all, which is exactly what the seeded demo relies
+  // on. The check moved down to the one branch that actually calls Places.
 
   const { data: wants, error: wErr } = await supabase
     .from("participant_constraints")
@@ -1038,6 +1039,15 @@ Deno.serve(async (req: Request) => {
   // answer when no refresh is possible, and a partially resolved event searches
   // around the origins it has and leaves the unresolved participants out of the
   // travel matrix.
+  // Discovery is the only thing that talks to Places, so this is where a missing key is
+  // genuinely fatal — and reported as a misconfiguration rather than as a search result,
+  // because degrading silently would hand back an empty shortlist that looks like "no
+  // restaurant fits" when the truth is that nobody called a provider.
+  if (discoveryNeeded && !GOOGLE_PLACES_API_KEY) {
+    await persistIncidents();
+    return json({ error: "GOOGLE_PLACES_API_KEY not configured" }, 500);
+  }
+
   if (!canDiscover && cachedPlaceIds.length === 0) {
     await persistIncidents();
     return json({

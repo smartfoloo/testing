@@ -31,6 +31,14 @@ export const PERSONAS = ['alice', 'bob', 'charlie', 'david', 'emma'].map((name) 
   name,
   mockUserId: `demo-user-${name}`,
   email: `${name}@aikanji.demo`,
+  /**
+   * The name seed.sql gives this participant. It has to be sent back on re-entry:
+   * fn_join_event upserts `on conflict (event_id, auth_user_id) do update set
+   * display_name = excluded.display_name` (0007), so joining as 'demo' RENAMES the seeded
+   * participant — and then A1/A2's 「PUBLIC requirements show a name」 counts four named
+   * rows instead of six, because the scenario destroyed the very names it asserts on.
+   */
+  displayName: `${name[0].toUpperCase()}${name.slice(1)}`,
 }))
 
 export function personaByName(name) {
@@ -103,13 +111,14 @@ export async function becomePersona(api, persona, base) {
 
 /**
  * Enters the demo event as whoever is signed in. `fn_join_event` is idempotent, so a seeded
- * participant gets their existing row (and role) back rather than a second one — which is
- * why the display name here is irrelevant and deliberately not asserted on.
+ * participant gets their existing row (and role) back rather than a second one — but it does
+ * overwrite `display_name`, so callers pass the persona's seeded name to leave the fixture as
+ * it found it.
  */
-export async function enterDemoEvent(api) {
+export async function enterDemoEvent(api, displayName = 'demo') {
   await api.click('join-event')
   await api.fill('invite-code', DEMO_CODE)
-  await api.fill('join-display-name', 'demo')
+  await api.fill('join-display-name', displayName)
   await api.click('join-submit')
   await api.waitFor('continue-event')
   await api.click('continue-event')
@@ -118,6 +127,7 @@ export async function enterDemoEvent(api) {
 
 /** Become a persona and end up inside the event, which is what every scenario wants. */
 export async function actAsPersona(api, name, base) {
-  await becomePersona(api, personaByName(name), base)
-  await enterDemoEvent(api)
+  const persona = personaByName(name)
+  await becomePersona(api, persona, base)
+  await enterDemoEvent(api, persona.displayName)
 }
