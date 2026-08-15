@@ -31,6 +31,22 @@
 //     MUST — which fails closed on an empty tag list, and is never relaxable —
 //     could not be met by any venue in Tokyo. Only Places' four confirmed
 //     booleans become tags; an absent or null boolean stays UNKNOWN.
+//   * Hot Pepper's `non_smoking` (禁煙席) is recorded as restaurant_features
+//     .smoking_policy (migration 0023). It was already in the response — no `lite`
+//     parameter is sent, so the full shop object comes back — and was discarded
+//     because HotPepperShop never declared it, which left 0021's smoking_policy
+//     with no writer at all and every 禁煙 MUST needing a negotiation round before
+//     any venue could qualify. The provider's text is forwarded VERBATIM and mapped
+//     in SQL by fn_hotpepper_smoking_policy, so 一部禁煙 / 分煙 / anything
+//     unrecognised is recorded as NULL (unconfirmed) rather than guessed.
+//     `barrier_free` is declared beside it and deliberately never mapped: see
+//     hotPepperNonSmokingText and section B of migration 0023.
+//   * `attributions` is requested and recorded as restaurant_features
+//     .provider_attributions (migration 0023). Showing Places content without a
+//     Google map requires Google Maps attribution AND requires that the per-place
+//     third-party attributions the API returns are retrieved and displayed; neither
+//     field mask asked for them, so the data was not held anywhere a client could
+//     read it. Elements are stored exactly as the provider sent them.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
@@ -78,6 +94,15 @@ const ROUTES_MAX_ORIGINS_PER_REQUEST = 50;
 const INCIDENT_MESSAGE_MAX_CHARS = 400;
 const INCIDENT_SUMMARY_MAX = 10;
 
+// Ceiling on the per-place attribution credits recorded for one venue. Places is
+// documented to return a handful, so this is far above any plausible real value and
+// exists only so a pathological payload cannot bloat a row we upsert on every
+// search. Nothing is ever TRUNCATED to fit — an edited credit is a misattribution —
+// so tripping this cap drops whole entries, which would under-credit a provider we
+// are obliged to credit. That is a compliance problem, not a rounding error, so it
+// is recorded as a provider incident rather than handled silently.
+const ATTRIBUTIONS_MAX_PER_PLACE = 25;
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -116,6 +141,23 @@ interface Candidate {
    * fn_record_provider_accessibility in migration 0022.
    */
   accessibility_tags: string[] | null;
+  /**
+   * Hot Pepper's `non_smoking` (禁煙席) text EXACTLY as it arrived, or null when this candidate
+   * was never matched in Hot Pepper (Places has no smoking field at all) or the field was not a
+   * usable string. Nothing is interpreted here: fn_hotpepper_smoking_policy (migration 0023) is
+   * the single place that decides which values may become 'non_smoking' / 'smoking_ok' and which
+   * stay NULL, so the function and the database cannot hold two opinions about 一部禁煙. null
+   * means "we learned nothing this run" and leaves whatever is recorded alone.
+   */
+  hotpepper_non_smoking: string | null;
+  /**
+   * The per-place third-party attributions Places returned, element for element as given, or
+   * null when the response carried no `attributions` array at all. Same load-bearing
+   * distinction as accessibility_tags: null is "nothing learned, change nothing", while an empty
+   * array is Places' current answer ("this place needs no third-party credit") and is allowed to
+   * clear a stale credit. See fn_record_provider_attributions in migration 0023.
+   */
+  attributions: unknown[] | null;
   location: LatLng | null;
 }
 
@@ -250,8 +292,20 @@ async function searchRestaurants(
           // accessibility MUST cannot be met by any venue at all (migration
           // 0022): accessibility_tags had no writer, and an empty tag list
           // fails closed by design.
+          // `places.attributions` is an **Essentials (IDs Only)** field for Text
+          // Search — confirmed against the Place Data Fields table, which lists
+          // it beside `places.id`, i.e. the cheapest tier there is. (Note it is
+          // Pro on Nearby Search; the tier is per endpoint.) So it cannot change
+          // what this call is billed: the request already carries Enterprise
+          // fields (`rating`, `userRatingCount`, `priceLevel`) and Places bills
+          // the whole call at the highest tier requested. It is requested
+          // because policy requires it: Places
+          // content displayed without a Google map needs Google Maps
+          // attribution AND the per-place third-party attributions returned by
+          // the API must be retrieved and displayed, and an unrequested field is
+          // one we cannot display (migration 0023).
           "X-Goog-FieldMask":
-            "places.id,places.displayName,places.priceLevel,places.primaryType,places.location,places.rating,places.userRatingCount,places.accessibilityOptions",
+            "places.id,places.displayName,places.priceLevel,places.primaryType,places.location,places.rating,places.userRatingCount,places.accessibilityOptions,places.attributions",
         },
         body: JSON.stringify({
           textQuery: query,
@@ -307,6 +361,14 @@ async function searchRestaurants(
         rating: placesRating(p.rating),
         user_rating_count: placesRatingCount(p.userRatingCount),
         accessibility_tags: placesAccessibilityTags(p.accessibilityOptions),
+        // Hot Pepper is the only provider with a smoking field; a candidate that
+        // is never matched below keeps null, which records nothing.
+        hotpepper_non_smoking: null,
+        attributions: placesAttributions(
+          p.attributions,
+          p.id as string,
+          incidents,
+        ),
         location: (p.location as { latitude?: number; longitude?: number })
             ?.latitude != null
           ? {
@@ -361,6 +423,53 @@ function placesAccessibilityTags(value: unknown): string[] | null {
     .sort();
 }
 
+// The per-place third-party credits Places says must be displayed alongside this
+// place's content, passed through UNCHANGED. This function deliberately does not
+// parse, escape, reformat or join them: an attribution is a credit line whose exact
+// wording and markup belong to its provider, so rewriting one is a misattribution
+// and the display side is the only place allowed to decide how to render it.
+//
+// ASSUMPTIONS ABOUT THE RESPONSE SHAPE (no key is available here to observe it, so
+// the parsing is deliberately defensive):
+//   * `attributions` is OMITTED ENTIRELY for most places — proto3 JSON omits an
+//     empty repeated field — and may also be omitted if the field mask was rejected.
+//     Absent, or present as anything other than an array, therefore yields null:
+//     "we learned nothing this run", which the write path reads as "change nothing".
+//     An array that IS present, even empty, is Places' current answer and may clear
+//     a credit that no longer applies.
+//   * each element is EITHER an object (Places (New) documents a provider name plus
+//     a provider URI) OR an HTML-ish string (the shape this concept has historically
+//     arrived in). Both are kept verbatim; the storage column is jsonb precisely so
+//     neither has to be flattened into the other.
+//   * a number, a boolean, a JSON null or a nested array cannot be a credit and
+//     would reach the UI as junk, so those elements are dropped. Dropping is never a
+//     guess: nothing is invented in their place.
+// A place id is taken only so the incident below can name the row it is about.
+function placesAttributions(
+  value: unknown,
+  placeId: string,
+  incidents: ProviderIncident[],
+): unknown[] | null {
+  if (!Array.isArray(value)) return null;
+  const usable = value.filter((entry) =>
+    typeof entry === "string" ||
+    (typeof entry === "object" && entry !== null && !Array.isArray(entry))
+  );
+  if (usable.length > ATTRIBUTIONS_MAX_PER_PLACE) {
+    recordIncident(
+      incidents,
+      "google_places",
+      "places.searchText.attributions",
+      null,
+      `${usable.length} attributions for ${placeId} exceeds the ` +
+        `${ATTRIBUTIONS_MAX_PER_PLACE} recorded per place; the rest are not stored ` +
+        `and therefore cannot be displayed`,
+    );
+    return usable.slice(0, ATTRIBUTIONS_MAX_PER_PLACE);
+  }
+  return usable;
+}
+
 // `restaurant_features` constrains rating to 0..5 and the review count to >= 0
 // (0016). A provider anomaly must degrade the quality signal, not blow up the
 // whole search with a constraint violation, so anything off-scale is dropped
@@ -394,12 +503,26 @@ function priceLevelToYen(level: string | undefined): number | null {
 
 // --- Hot Pepper -------------------------------------------------------------
 
+// The subset of Recruit's Gourmet Search `shop` object this function reads. The
+// request sets no `lite` parameter, so the FULL object arrives and every field below
+// was already on the wire — `non_smoking` and `barrier_free` were simply not
+// declared, which is how a column with no writer (0021's smoking_policy) sat next to
+// a provider that answers the question.
+// Every value is free-text Japanese chosen by the shop, not an enum, and is treated
+// as `unknown` at the point of use rather than trusted because it is typed here.
 interface HotPepperShop {
   id: string;
   name: string;
   budget?: { average?: string };
   private_room?: string; // "あり" | "なし"
   genre?: { name?: string };
+  // 禁煙席. Free text: the API reference's own example is 「一部禁煙」. Forwarded
+  // verbatim and mapped in SQL — see hotPepperNonSmokingText below.
+  non_smoking?: string;
+  // バリアフリー. Free text, documented example 「なし」. DECLARED AND NEVER READ, on
+  // purpose: see hotPepperNonSmokingText's second comment block and section B of
+  // migration 0023 for why it cannot honestly justify any accessibility tag.
+  barrier_free?: string;
   lat?: string;
   lng?: string;
 }
@@ -449,6 +572,41 @@ function hotPepperRoomType(shop: HotPepperShop): "semi_private" | null {
     return "semi_private";
   }
   return null;
+}
+
+// Hot Pepper's 禁煙席 text, on its way to the database UNINTERPRETED. This function
+// answers exactly one question — "did the provider give us a value at all?" — and
+// deliberately does not decide what the value means.
+//
+// WHY THE MAPPING IS NOT HERE. smoking_policy has exactly two legal values by design
+// (0021), the provider field is free-text Japanese with no published value list, and
+// the same judgement has to hold in three places: the write path, the feasibility
+// engine and the test suite. fn_hotpepper_smoking_policy (migration 0023) owns it,
+// so there is one implementation, backend_tests.sql can assert it value by value, and
+// a mapping fix is a migration instead of a redeploy. In summary, and asserted there:
+// only an unambiguous whole-venue value (全席禁煙 / 全面禁煙 / 完全禁煙, or the
+// 喫煙可 equivalents) is recorded; 一部禁煙, 分煙, 禁煙席あり, 未確認 and everything
+// unrecognised record NULL = unconfirmed, because provider text cannot tell us which
+// side of a partition a group of five will be seated on.
+//
+// WHY `barrier_free` IS NOT MAPPED ONTO accessibility_tags. 0022's vocabulary is a
+// closed set of four members, each named after one Google Places `accessibilityOptions`
+// boolean so the mapping needs no inference. 「なし」 means there are no barrier-free
+// facilities, whose honest recording is no tag at all (which correctly fails the MUST
+// closed), and a vague 「あり」 does not say that it is the ENTRANCE that is step-free,
+// or that the restroom is usable, or that a wheelchair user can be seated — the only
+// things the vocabulary can express. Accessibility is never relaxable, so a wrong tag
+// cannot be walked back by a question: it puts someone in front of a step they were
+// told was not there. A missing tag is visible instead — it fails closed and is
+// counted in fn_recompute_feasibility's accessibility_unverified_count, so the 幹事
+// can phone the venue. The field stays declared in HotPepperShop so the decision is
+// legible here rather than looking like an oversight.
+function hotPepperNonSmokingText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  // An empty field is absent data, not an answer. Hot Pepper spells "we do not know"
+  // as 未確認, which IS an answer and is mapped (to NULL) rather than skipped.
+  return text.length > 0 ? text : null;
 }
 
 // Budget is a hard MUST gate, so the estimate has to be the UPPER bound:
@@ -933,6 +1091,13 @@ Deno.serve(async (req: Request) => {
           best.room_type = hotPepperRoomType(shop) ?? best.room_type;
           best.price_yen_estimate = hotPepperBudgetYen(shop) ??
             best.price_yen_estimate;
+          // Assigned rather than `??`-merged like the two above: Places contributes
+          // no smoking field whatsoever, so there is no earlier value in this run to
+          // preserve. Staying null when the shop's 禁煙席 field is unusable is what
+          // makes the write path leave a previously recorded policy alone.
+          best.hotpepper_non_smoking = hotPepperNonSmokingText(
+            shop.non_smoking,
+          );
           if (shop.genre?.name) best.cuisine_tags.push(shop.genre.name);
           // dietary/allergy tags: only from verified structured attributes —
           // Hot Pepper's basic response has none, so they stay empty
@@ -963,6 +1128,13 @@ Deno.serve(async (req: Request) => {
   // returned an accessibilityOptions object — an absent key means "nothing
   // learned, change nothing", a present one (even empty) is the current answer and
   // may retract a stale tag. fn_record_provider_candidates ignores the key.
+  //
+  // `hotpepper_non_smoking` and `attributions` (migration 0023) ride along the same
+  // way, for the same reason and with the same present/absent contract, each with
+  // its own writer. Both keys are omitted when the provider said nothing this run:
+  // for smoking that is the common case, because only candidates MATCHED in Hot
+  // Pepper have any answer at all and a Places-only candidate must not erase a
+  // policy an earlier matched run recorded. 0017's writer ignores both keys.
   if (fetchedCandidates.length > 0) {
     const candidatePayload = fetchedCandidates.map((c) => ({
       place_id: c.place_id,
@@ -979,6 +1151,10 @@ Deno.serve(async (req: Request) => {
       ...(c.accessibility_tags === null
         ? {}
         : { accessibility_tags: c.accessibility_tags }),
+      ...(c.hotpepper_non_smoking === null
+        ? {}
+        : { hotpepper_non_smoking: c.hotpepper_non_smoking }),
+      ...(c.attributions === null ? {} : { attributions: c.attributions }),
     }));
     const { error: recordErr } = await supabase.rpc(
       "fn_record_provider_candidates",
@@ -995,6 +1171,27 @@ Deno.serve(async (req: Request) => {
       { p_event_id: eventId, p_candidates: candidatePayload },
     );
     if (accessErr) return json({ error: accessErr.message }, 500);
+
+    // Surfaced for the same reason as accessibility: without this write every venue
+    // stays "unconfirmed", so a 禁煙 MUST excludes all of them until the group has
+    // spent a negotiation round — the dead end migration 0023 exists to remove.
+    // Swallowing the error would leave that looking like the provider's answer.
+    const { error: smokingErr } = await supabase.rpc(
+      "fn_record_provider_smoking_policy",
+      { p_event_id: eventId, p_candidates: candidatePayload },
+    );
+    if (smokingErr) return json({ error: smokingErr.message }, 500);
+
+    // Also surfaced, and here it is a licence question rather than a shortlist one:
+    // if the credits Places requires alongside this content are not stored, a client
+    // renders the content without them. Returning the shortlist anyway would be
+    // choosing that silently, and the candidates are already persisted, so a retry
+    // costs no provider call.
+    const { error: attributionErr } = await supabase.rpc(
+      "fn_record_provider_attributions",
+      { p_event_id: eventId, p_candidates: candidatePayload },
+    );
+    if (attributionErr) return json({ error: attributionErr.message }, 500);
   }
 
   // The zones this run actually searched (PRD §15), and the freshness signal for

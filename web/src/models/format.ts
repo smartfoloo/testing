@@ -4,7 +4,16 @@
  * Models/Negotiation.swift.
  */
 
-import { AppCopy, normalizedTypeLabel, roomLabel, smokingLabel } from '../design/copy'
+import {
+  AppCopy,
+  allergenLabel,
+  atmosphereLabel,
+  cuisineLabel,
+  dietaryLabel,
+  normalizedTypeLabel,
+  roomLabel,
+  smokingLabel,
+} from '../design/copy'
 import type {
   FeedItem,
   JSONValue,
@@ -32,6 +41,31 @@ function text(value: NormalizedValue, key: string): string | undefined {
   return rendered.length > 0 ? rendered : undefined
 }
 
+/**
+ * The members of a tag-style value, kept separate so each can be labelled on its own — the
+ * whole-array `text()` above would hand back one 「quiet, lively」 string. A single stored
+ * string counts as a one-member list; an empty list is undefined, which is what the callers
+ * already treat as "nothing stated".
+ */
+function tagList(value: NormalizedValue, key: string): string[] | undefined {
+  const raw = value[key]
+  if (raw === undefined || raw === null) return undefined
+  const items = (Array.isArray(raw) ? raw : [raw])
+    .map((item) => displayText(item).trim())
+    .filter((item) => item.length > 0)
+  return items.length > 0 ? items : undefined
+}
+
+/**
+ * Japanese labels for a tag list, falling back to the tag exactly as stored when the
+ * vocabulary does not know it. Unknown tags are printed, never dropped and never guessed at:
+ * an allergy or dietary tag that vanished would be a safety problem, and an invented
+ * translation would be worse than the English.
+ */
+function labelTags(tags: string[], label: (tag: string) => string | null): string {
+  return tags.map((tag) => label(tag) ?? tag).join('・')
+}
+
 export function constraintSummary(type: NormalizedType, value: NormalizedValue): string {
   const label = normalizedTypeLabel(type)
   if (Object.keys(value).length === 0) return label
@@ -54,8 +88,8 @@ export function constraintSummary(type: NormalizedType, value: NormalizedValue):
       break
     }
     case 'cuisine': {
-      const include = text(value, 'include')
-      if (include) return `${label}：${include}`
+      const include = tagList(value, 'include')
+      if (include) return `${label}：${labelTags(include, cuisineLabel)}`
       break
     }
     case 'smoking': {
@@ -70,15 +104,21 @@ export function constraintSummary(type: NormalizedType, value: NormalizedValue):
       }
       break
     }
-    case 'dietary':
+    // dietary and atmosphere share the `{"tags": []}` shape but not the vocabulary, so they
+    // no longer share a branch.
+    case 'dietary': {
+      const tags = tagList(value, 'tags')
+      if (tags) return `${label}：${labelTags(tags, dietaryLabel)}`
+      break
+    }
     case 'atmosphere': {
-      const tags = text(value, 'tags')
-      if (tags) return `${label}：${tags}`
+      const tags = tagList(value, 'tags')
+      if (tags) return `${label}：${labelTags(tags, atmosphereLabel)}`
       break
     }
     case 'allergy': {
-      const allergens = text(value, 'allergens')
-      if (allergens) return `${label}：${allergens}`
+      const allergens = tagList(value, 'allergens')
+      if (allergens) return `${label}：${labelTags(allergens, allergenLabel)}`
       break
     }
     default:
