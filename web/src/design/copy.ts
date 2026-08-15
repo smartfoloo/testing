@@ -249,11 +249,12 @@ export function dietaryLabel(value: string): string | null {
  * (消費者庁の特定原材料: 卵・乳・小麦・そば・落花生), so the word on screen is the word on a
  * menu rather than an approximation of one.
  *
- * `shellfish` is the parser's crustacean tag — its own comment reads 「えび/かに are
- * crustaceans, mapped onto the fixture's `shellfish_free` tag」 — so it is 甲殻類 exactly.
- * (That regex also routes 貝 to `shellfish`, which is a parser-side imprecision on the
- * venue-matching side; widening the label to cover molluscs would misstate what the tag means,
- * so it is left alone here.)
+ * `shellfish` is the CRUSTACEAN member of the closed allergen vocabulary (0026) — えび and
+ * かに — so 甲殻類 is exact rather than an approximation. 貝 is deliberately outside it: a
+ * venue that has confirmed itself `shellfish_free` has said nothing about oysters or clams, so
+ * folding molluscs in would record a weaker requirement than the participant stated. Since
+ * 0026, 「貝アレルギー」 keeps the writer's wording in `semantic_remainder` and asks, rather
+ * than being silently mapped here.
  */
 export function allergenLabel(value: string): string | null {
   switch (value) {
@@ -345,7 +346,13 @@ export function errorMessage(error: unknown): string {
   if (
     description.includes('only the organizer') ||
     description.includes('not permitted') ||
-    description.includes('permission')
+    description.includes('permission') ||
+    // What PostgREST answers when RLS refuses the write: `403 new row violates row-level
+    // security policy for table "…"`. Without this probe it fell through to networkError, so
+    // adding a requirement after the organizer closed collection told the participant to
+    // 「時間をおいて、もう一度お試しください」 — advice that can never work, for a refusal that
+    // was deliberate. The message must say it was not allowed, not that the network failed.
+    description.includes('violates row-level security')
   ) {
     return AppCopy.permissionError
   }
@@ -737,6 +744,17 @@ export function scoreDimensionEvidence(
     case 'quality':
       if (quality.method === 'atmosphere_tag_proxy') {
         return `口コミ評価が取れていないため、雰囲気タグ${quality.atmosphere_tags}件からの暫定値です。低い評価という意味ではありません。`
+      }
+      // Each provider is named, because 0028 blends them by percentile rather than averaging
+      // their scores — Google's median over the same venues is 4.40 against Tabelog's 3.22, so
+      // presenting one combined figure would imply a comparison that was never made.
+      if (quality.method === 'google_and_tabelog') {
+        return `Google の口コミ${quality.rating}（${quality.user_rating_count}件）と、食べログ${quality.tabelog_rating}（${quality.tabelog_review_count}件）を、それぞれの評価の付き方の違いをふまえて見ています。`
+      }
+      // Tabelog resolved a venue Google discovered but never rated. Without this branch the
+      // line below would read 「口コミnull（null件）」, since `rating` is Google's alone.
+      if (quality.method === 'tabelog_only') {
+        return `Google の口コミ評価がないため、食べログ${quality.tabelog_rating}（${quality.tabelog_review_count}件）をもとに、件数の少なさを補正して見ています。`
       }
       return `口コミ${quality.rating}（${quality.user_rating_count}件）をもとに、件数の少なさを補正して見ています。`
     case 'cost_fit':

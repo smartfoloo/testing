@@ -184,6 +184,17 @@ export interface FeasibilityResult {
    * recorded before 0022 does not carry it.
    */
   accessibility_unverified_count?: number | null
+  /**
+   * The same idea for allergies (0026), and the case where it matters most: no provider
+   * anywhere supplies restaurant allergen data — Hot Pepper returns 51 fields and none is
+   * allergen-related, Google Places has none — so `allergy_safe_tags` is only ever filled in
+   * by a human. An allergy MUST therefore excludes every live candidate, and it is never
+   * relaxable, because nobody may be asked to consent to an unverified allergen claim the way
+   * 0021 lets a group accept an unconfirmed smoking policy. This count is the whole escape
+   * route: it turns a bare 「0件」 into a number and a phone call. Optional: a run recorded
+   * before 0026 does not carry it.
+   */
+  allergy_unverified_count?: number | null
 }
 
 export type RecommendationLabel =
@@ -230,7 +241,22 @@ export type ObjectiveWeights = Record<ScoreDimension, number>
  * the real signal; `atmosphere_tag_proxy` is the legacy tag-richness stand-in used when
  * the provider gave us no rating, and it is deliberately capped below any real rating.
  */
-export type QualityMethod = 'rating_bayesian_shrunk' | 'atmosphere_tag_proxy'
+/**
+ * How the quality dimension was arrived at (0028 widened this; `rating_bayesian_shrunk` was
+ * 0016's single rated method and is now `google_only`).
+ *
+ * The two rating providers are NOT averaged: Google's median over the same twenty Shinjuku
+ * izakaya is 4.40 against Tabelog's 3.22, so a raw mean would rank venues by whether we
+ * happened to resolve them. Each provider's score becomes a percentile within the feasible
+ * candidates it scored, and the available percentiles are averaged — a median venue on either
+ * provider lands at 0.5. The method says which providers actually contributed, so the card can
+ * explain the number instead of asserting it.
+ */
+export type QualityMethod =
+  | 'google_only'
+  | 'google_and_tabelog'
+  | 'tabelog_only'
+  | 'atmosphere_tag_proxy'
 
 /**
  * `recommendation_scores.score_breakdown`. PRD §9: never present one opaque universal
@@ -260,11 +286,24 @@ export interface ScoreBreakdown {
   quality: {
     score: number
     method: QualityMethod
+    /** Google's raw score and volume. Google's alone — Tabelog's live in their own keys. */
     rating: number | null
     user_rating_count: number | null
     prior_rating: number
     prior_reviews: number
     atmosphere_tags: number
+    /* 0028 provenance: what each provider contributed, so the blend can be shown rather than
+     * asserted. All optional — a run recorded before 0028 carries none of them. */
+    google_shrunk?: number | null
+    google_percentile?: number | null
+    google_ranked_candidates?: number | null
+    tabelog_rating?: number | null
+    tabelog_review_count?: number | null
+    tabelog_prior_rating?: number | null
+    tabelog_shrunk?: number | null
+    tabelog_percentile?: number | null
+    tabelog_ranked_candidates?: number | null
+    blended_percentile?: number | null
   }
   cost: {
     burden: number
@@ -308,12 +347,45 @@ export interface RestaurantFeature {
   room_type: string | null
   cuisine_tags: string[]
   atmosphere_tags: string[]
+  /**
+   * The per-place third-party credits Places returned, exactly as the provider sent them
+   * (migration 0023). Displaying them is a licence obligation, not decoration, which is why
+   * they live on this client-readable table rather than in the service-role-only raw payload.
+   *
+   * `unknown[]` on purpose: an element is EITHER a string (the historical HTML-ish form) or an
+   * object (Places (New) documents a provider name plus a provider URI), and flattening one
+   * into the other in the type would licence code to rewrite a credit. Optional because the
+   * mock backend does not model provider payloads.
+   */
+  provider_attributions?: unknown[] | null
+  /**
+   * `photo.pc.m` from Hot Pepper's Gourmet response — a 168x168 thumbnail on Recruit's own
+   * image host, supplied by the API for display and already covered by the Recruit credit at
+   * the foot of the shortlist. Null for the ~40% of venues no Hot Pepper shop was matched to,
+   * and for every venue when the fixture is the mock, so the card must treat absence as the
+   * normal case rather than an error.
+   *
+   * Deliberately NOT a Google Places photo (a separate paid SKU with its own per-image
+   * attribution) and never a Tabelog image (its photo pages are on the scraper's own
+   * disallow list, and the images are not Tabelog's to license).
+   */
+  photo_url?: string | null
 }
 
 /** `run_updated` broadcast payload from the `trg_broadcast_run` trigger. */
 export interface RunUpdate {
   run_id: string
   feasible_count: number
+  /**
+   * The run's `run_at` (0025). Optional because Realtime replays whatever is already in the
+   * topic, so a payload written before that migration can still arrive.
+   *
+   * It exists because the other two fields cannot be ordered: `run_id` is a random uuid and
+   * `feasible_count` is not monotonic — accepting a relaxation raises it, a new MUST lowers it
+   * — so a client handed an older run had no way to know. Observed for real: a dashboard
+   * rendered a count from a broadcast written 21 seconds before the organizer even subscribed.
+   */
+  run_at?: string | null
 }
 
 export type HomeTab = 'requirements' | 'group' | 'organizer'

@@ -222,13 +222,41 @@ struct RecommendationCardView: View {
     var body: some View {
         AppCard {
             VStack(alignment: .leading, spacing: AppSpacing.md) {
+                // The venue's own photo when Hot Pepper supplied one, and the accent block as
+                // before when it did not. Absence is the NORMAL case — only venues matched to
+                // a Hot Pepper shop by exact phone carry an image — so the fallback is the
+                // original design, and AsyncImage's failure and loading phases resolve to the
+                // same block rather than to a broken frame or a spinner that never ends.
                 ZStack {
                     RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous)
                         .fill(AppColors.accentSoft)
                         .frame(height: 150)
-                    Image(systemName: "fork.knife")
-                        .font(.system(size: 42))
-                        .foregroundStyle(AppColors.accent)
+                    if let photo = feature?.photoUrl, let url = URL(string: photo) {
+                        AsyncImage(url: url) { phase in
+                            if case .success(let image) = phase {
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                            } else {
+                                // .empty while loading and .failure on a dead host both land
+                                // here, which is why the placeholder is the finished design
+                                // rather than a spinner.
+                                Image(systemName: "fork.knife")
+                                    .font(.system(size: 42))
+                                    .foregroundStyle(AppColors.accent)
+                            }
+                        }
+                        .frame(height: 150)
+                        .frame(maxWidth: .infinity)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous)
+                        )
+                        .accessibilityHidden(true)
+                    } else {
+                        Image(systemName: "fork.knife")
+                            .font(.system(size: 42))
+                            .foregroundStyle(AppColors.accent)
+                    }
                 }
                 HStack(alignment: .top) {
                     Text(title).font(AppTypography.title)

@@ -13,7 +13,9 @@
     "preview": "vite preview",
     "verify:golden": "node scripts/cdp.mjs scripts/golden-path.mjs",
     "verify:p0": "node scripts/cdp.mjs scripts/p0-features.mjs",
-    "verify:hosted": "AIKANJI_MODE=hosted node scripts/cdp.mjs scripts/golden-path.mjs"
+    "verify:hosted": "AIKANJI_MODE=hosted node scripts/cdp.mjs scripts/golden-path.mjs",
+    "verify:p0:hosted": "AIKANJI_MODE=hosted node scripts/cdp.mjs scripts/p0-features.mjs",
+    "verify:realtime": "AIKANJI_MODE=hosted node scripts/cdp.mjs scripts/realtime-delivery.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.112.2",

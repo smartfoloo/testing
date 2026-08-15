@@ -389,9 +389,23 @@ deno_version = 2
 # Places key, so a partial set is usable.
 [edge_runtime.secrets]
 LLM_API_KEY = "env(LLM_API_KEY)"
+# The endpoint and model are configuration, not secrets, but they have to travel the same way:
+# the edge runtime only sees what is declared here, so leaving them out silently pinned every
+# call to the api.openai.com default no matter what the environment said.
+LLM_BASE_URL = "env(LLM_BASE_URL)"
+LLM_MODEL = "env(LLM_MODEL)"
 GOOGLE_PLACES_API_KEY = "env(GOOGLE_PLACES_API_KEY)"
 GOOGLE_ROUTES_API_KEY = "env(GOOGLE_ROUTES_API_KEY)"
 HOTPEPPER_API_KEY = "env(HOTPEPPER_API_KEY)"
+# NOT a key: a feature flag, and the only one here. Tabelog (食べログ) has no API, so
+# restaurant-search's Tabelog enrichment is an HTML SCRAPER, and Tabelog's terms of use forbid
+# reproducing its content without prior written consent and bar commercial use — consent we do
+# not have. It is off unless this is exactly the string "true", and it is declared here (rather
+# than defaulted in code) so that enabling it is a config change plus a stack restart made by
+# somebody who has read the header of functions/restaurant-search/index.ts and migration
+# 0027_tabelog_enrichment.sql. Leave it unset in every environment that is not a local
+# non-commercial demo.
+TABELOG_ENRICHMENT_ENABLED = "env(TABELOG_ENRICHMENT_ENABLED)"
 
 [analytics]
 enabled = false

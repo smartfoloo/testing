@@ -59,6 +59,32 @@ function ObjectiveLegend({ breakdown }: { breakdown: ScoreBreakdown }) {
  * count. Google's Places policy requires Google Maps attribution wherever Places content is
  * displayed without a Google map, which is exactly this screen.
  */
+/**
+ * One displayable line per stored credit. Elements arrive verbatim in either of the two shapes
+ * the column accepts, so this selects the text to show and never rewrites it:
+ *
+ *   string  — the historical HTML-ish form, shown as given.
+ *   object  — Places (New) documents a provider name plus a provider URI; the NAME is the
+ *             credit, so a string `provider` is used and nothing is synthesised from the URI.
+ *
+ * Anything else (a number, a nested array, an object with no usable name) is DROPPED rather
+ * than stringified, because `[object Object]` in a licence credit is worse than a missing one
+ * — and dropping is visible in the count, whereas a mangled credit looks deliberate. Duplicates
+ * are collapsed so one provider is credited once per card.
+ */
+function attributionLines(stored: unknown[] | null | undefined): string[] {
+  if (!Array.isArray(stored)) return []
+  const lines = stored.flatMap((entry) => {
+    if (typeof entry === 'string') return entry.trim() ? [entry.trim()] : []
+    if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+      const provider = (entry as { provider?: unknown }).provider
+      if (typeof provider === 'string' && provider.trim()) return [provider.trim()]
+    }
+    return []
+  })
+  return [...new Set(lines)]
+}
+
 function ProviderAttribution({
   /**
    * The per-place third-party attributions Places returns, already reduced to display-ready
@@ -67,13 +93,8 @@ function ProviderAttribution({
    *
    * TODO(B5): nothing can pass these yet, so they are never shown. The storage half exists —
    * `restaurant_features.provider_attributions` (jsonb, migration 0023), written by
-   * `fn_record_provider_attributions` from the `places.attributions` the search now requests —
-   * but no client type carries it: `RestaurantFeature` in src/models/types.ts has no such
-   * field, and `backend.features()` does not select it. Wiring it up means (a) adding the field
-   * where the type lives, and (b) deciding how an element that arrives as an object (Places
-   * (New) documents a provider name plus a provider URI) becomes one line, since elements are
-   * stored verbatim as either a string or an object and rewriting a credit is a misattribution.
-   * No field name or element shape is invented here.
+   * `fn_record_provider_attributions` from the `places.attributions` the search requests, and
+   * `attributionLines()` below turns each stored element into one displayable line.
    */
   placeAttributions = [],
 }: {
@@ -252,7 +273,19 @@ export function Recommendations({
       {choiceError && <InlineErrorView message={choiceError} onRetry={() => setChoiceError(null)} />}
       {errorMessage && <InlineErrorView message={errorMessage} onRetry={() => void load()} />}
 
-      {scores.length > 0 && <ProviderAttribution />}
+      {scores.length > 0 && (
+        <ProviderAttribution
+          // Every credit carried by any venue currently on screen: the obligation attaches to
+          // the content shown, and the shortlist shows all of them together.
+          placeAttributions={[
+            ...new Set(
+              scores.flatMap((score) =>
+                attributionLines(features[score.restaurant_place_id]?.provider_attributions),
+              ),
+            ),
+          ]}
+        />
+      )}
     </div>
   )
 }

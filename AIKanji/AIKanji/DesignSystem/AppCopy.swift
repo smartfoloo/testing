@@ -123,9 +123,14 @@ enum AppCopy {
         {
             return invalidCredentialsError
         }
+        // `violates row-level security` is what PostgREST answers when RLS refuses a write —
+        // e.g. adding a requirement after collection closed. It fell through to the network
+        // message, which told the participant to try again later for a refusal that was
+        // deliberate and permanent. Kept identical to errorMessage() in web/src/design/copy.ts.
         if description.contains("only the organizer")
             || description.contains("not permitted")
             || description.contains("permission")
+            || description.contains("violates row-level security")
         {
             return permissionError
         }
@@ -192,11 +197,12 @@ enum AppCopy {
     /// (消費者庁の特定原材料: 卵・乳・小麦・そば・落花生), so the word on screen is the word on a
     /// menu rather than an approximation of one.
     ///
-    /// `shellfish` is the parser's crustacean tag — its own comment reads 「えび/かに are
-    /// crustaceans, mapped onto the fixture's `shellfish_free` tag」 — so it is 甲殻類 exactly.
-    /// (That regex also routes 貝 to `shellfish`, which is a parser-side imprecision on the
-    /// venue-matching side; widening the label to cover molluscs would misstate what the tag
-    /// means, so it is left alone here.)
+    /// `shellfish` is the CRUSTACEAN member of the closed allergen vocabulary (0026) — えび
+    /// and かに — so 甲殻類 is exact rather than an approximation. 貝 is deliberately outside
+    /// it: a venue that has confirmed itself `shellfish_free` has said nothing about oysters
+    /// or clams, so folding molluscs in would record a weaker requirement than the participant
+    /// stated. Since 0026, 「貝アレルギー」 keeps the writer's wording in `semantic_remainder`
+    /// and asks, rather than being silently mapped here.
     static func allergen(_ value: String) -> String? {
         switch value {
         case "shellfish": return "甲殻類"

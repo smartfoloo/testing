@@ -41,11 +41,13 @@ anonymous sign-ins, disable public Realtime access, and deploy the `llm-assist` 
 | `npm run verify:golden` | The §6 golden path + A1–A7, in a real browser (needs `npm run dev`) |
 | `npm run verify:p0` | The P0 features added around the golden path |
 | `npm run verify:hosted` | The same golden path against a real Supabase project — see below |
+| `npm run verify:p0:hosted` | The same P0 features against a real project — see below |
+| `npm run verify:realtime` | That a broadcast actually **arrives** (hosted only) — see below |
 | `npm run icons` | Regenerates the PWA icon set from the design tokens |
 
 ## Verifying against a real Supabase project
 
-Every suite above except `verify:hosted` runs against the in-browser mock. That is genuinely
+Every suite above except the three hosted ones runs against the in-browser mock. That is genuinely
 useful — the mock is a faithful port of the SQL engine, and `verify:engine` asserts the two
 agree — but it cannot prove the hosted path, and three classes of bug found in this codebase
 were invisible to it: an invite code the join screen could never match, a cast that raised in
@@ -100,6 +102,15 @@ Two things will waste your time if nobody says them:
   `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` — the Supabase CLI looks for
   `/var/run/docker.sock`, which Colima does not create, and fails with a bare
   `failed to inspect container health`.)
+- **A freshly joined client can receive a broadcast that predates its join.** Observed against
+  the local stack: with `recommendation_runs` empty for the demo event, the organizer's
+  「条件を満たすお店」 tile rendered `0` seconds after subscribing, from a `run_updated` whose
+  `realtime.messages` row had been written 21 s earlier by a different suite. Nothing had been
+  re-fetched — the number came off the socket. So an assertion about a count must not assume the
+  tile shows only what happened *after* the subscription: assert a value that could only exist
+  after the action under test (`verify:realtime` does this by taking a deterministic run first),
+  and treat a stale count on `verify:hosted` as a possible cause if 「feasible count is zero」
+  fails while everything around it passes.
 
 The hosted *mechanism* can be rehearsed without a project at all, which is how it was
 developed: the mock's `signIn` accepts the same `<persona>@aikanji.demo` addresses, so
@@ -111,6 +122,56 @@ actually tests. Worth running after any change to `scripts/personas.mjs`.
 
 The service-role key appears in step 4 only. It bypasses RLS, which is the only way to rewire
 another user's rows, so it is a setup tool and must never reach the app or an assertion.
+
+### The other two hosted suites
+
+Both need the same bootstrapped fixture as `verify:hosted`, plus two more values in the
+environment, because they talk to the project from node as well as through the browser:
+
+```
+set -a; . <(cd ../AIKanji && supabase status -o env); set +a     # local stack
+SUPABASE_URL="$API_URL" SUPABASE_ANON_KEY="$ANON_KEY" \
+  SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
+  AIKANJI_TEST_PASSWORD=… npm run verify:realtime
+```
+
+- **`verify:realtime`** (`scripts/realtime-delivery.mjs`) is the only suite that proves a
+  broadcast is **delivered**. Every other suite re-fetches after each action, so Realtime
+  could connect, be authorized, and then drop every message with all 21 + 22 checks still
+  green. It asserts a row is absent, has a real other participant create it (a persona
+  password grant + PostgREST as `authenticated` — no service-role write, so RLS applies as it
+  would on that person's phone), and requires it to appear in the open feed within a bounded
+  wait. `window.fetch` is instrumented and a sentinel is left on `window`, so a pass is
+  rejected if the screen re-read `fn_get_sanitized_feed` / `recommendation_runs` or the
+  document reloaded — the value on screen can only have come off the socket. It also asserts
+  0004's privacy contract: a `PRIVATE` row is never pushed, an `ANONYMOUS` one arrives with a
+  null display name, and no payload carries the author's verbatim `raw_text`.
+
+  Hosted only, on purpose: against the mock the "broadcast" is an in-page emitter and the only
+  possible writer is the page itself, so there would be nothing to fail. Run in mock mode it
+  says so and exits non-zero rather than passing vacuously.
+
+- **`verify:p0:hosted`** runs the same `scripts/p0-features.mjs` as `verify:p0`. Hosted, a
+  fresh identity is a fresh **anonymous** session (that is what the app gives a browser with
+  no session), and `personas.mjs` captures each one so the browser can resume it later —
+  four participants, one Chrome. Assertions that read `matomeshi.mock.db.v2` become PostgREST
+  reads made with **the participant's own token**, never the service role: "my post-close
+  write was refused" is only meaningful when asked as the client.
+
+  Two of its checks cannot run without a real `GOOGLE_PLACES_API_KEY` (`place-search` returns
+  `502 place provider unavailable`), so no place can be picked and no place id can be
+  persisted. They are skipped **loudly** — printed as `SKIP` with the reason, and counted in
+  the summary line — and the picker states that *are* reachable are asserted instead: the four
+  reference chips, the provider-failure branch with its retry (a dead provider must not read
+  as 「見つかりませんでした」), どこでも clearing the place, and the skip notice. Expect
+  `27/27 … (2 skipped: …)`.
+
+`psql` is used for exactly one thing, in `verify:realtime`: deleting the requirement rows it
+created. `0024` grants `DELETE` on `participant_constraints` to no API role (there is no delete
+policy either), and adding one so a test could tidy up would be widening the schema for the
+test's convenience. Set `SUPABASE_DB_URL` if the default local connection string is wrong; with
+no psql reachable the rows are flipped to `PRIVATE` instead, which removes them from every
+sanitized surface, and the run says which it did.
 
 ## Layout
 

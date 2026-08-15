@@ -16,7 +16,8 @@
  * engine reads those keys: budget {max_yen}, cuisine {include,exclude}, dietary {tags},
  * allergy {allergens}, smoking {preference}, room {room}, travel_time {max_minutes},
  * accessibility {needs}, atmosphere {tags}, other {}. Accessibility `needs` are drawn from
- * the closed ACCESSIBILITY_VOCABULARY (0022) here too, and a need the vocabulary cannot
+ * the closed ACCESSIBILITY_VOCABULARY (0022) here too, allergy `allergens` and dietary `tags`
+ * from ALLERGEN_VOCABULARY / DIETARY_VOCABULARY (0026), and a value the vocabulary cannot
  * express is kept as text rather than dropped — exactly what llm-assist does server-side.
  */
 
@@ -77,6 +78,12 @@ import type {
  * `needs` vocabulary, and `canonicalizeAccessibilityNeeds` below migrates exactly those rows on
  * load — mirroring the one-shot backfill in the migration — instead of discarding the event
  * somebody is in the middle of planning.
+ *
+ * 0026 is the same story for allergy and dietary: a snapshot can hold
+ * `{"allergens":["えび","かに"]}` (what the live model returned before 0026 gave allergy an
+ * example) or an invented `{"tags":["egg-free"]}`, neither of which any venue tag can match.
+ * `canonicalizeAllergyAndDietary` migrates exactly those rows on load, so no bump is needed here
+ * either.
  */
 const STORAGE_KEY = 'matomeshi.mock.db.v2'
 const USER_KEY = 'matomeshi.mock.user.v1'
@@ -207,6 +214,19 @@ export function createSeedDb(): Db {
     // is UNKNOWN, and none of these are.
     accessibility_tags: [],
     smoking_policy: null,
+    // photo_url (migration 0028) exists on every mock venue and is null on every one of them,
+    // which is deliberate rather than lazy. It is Hot Pepper's `photo.pc.m` on Recruit's own
+    // image host, written only for candidates a live search MATCHED to a Hot Pepper shop by
+    // exact telephone number — and these four venues are fictional, so no such shop and no such
+    // URL exists for them. Writing a plausible-looking https://imgfp.hotp.jp/... would put a
+    // guaranteed 404 in the demo and would be inventing provider data, which is the one habit
+    // this fixture is careful not to have (it already sets accessibility_tags and
+    // smoking_policy to "no data" for the same reason).
+    //
+    // Null is also the case the card has to get right: about 40% of live venues resolve to no
+    // Hot Pepper shop at all, so absence is the NORMAL state and not an error, and mock mode is
+    // where that path gets exercised on every render.
+    photo_url: null,
   })
 
   return {
@@ -343,6 +363,142 @@ function canonicalizeAccessibilityNeeds(db: Db): void {
   }
 }
 
+/**
+ * Every allergen spelling this mock is willing to translate, and the member it means — the
+ * browser-side mirror of `fn_allergen_canonical` (0026) and of ALLERGEN_ALIASES in
+ * `functions/llm-assist/index.ts`. Each alias names the SAME ingredient as its member, so mapping
+ * it preserves the requirement exactly.
+ *
+ * 貝 / 大豆 / ナッツ / マンゴー and friends are deliberately absent: `shellfish` is the CRUSTACEAN
+ * tag and nothing here may quietly widen or narrow what somebody can eat. See
+ * ALLERGEN_BEYOND_VOCABULARY.
+ */
+const ALLERGEN_ALIASES = new Map<string, string>([
+  ['shellfish', 'shellfish'],
+  ['えび', 'shellfish'],
+  ['エビ', 'shellfish'],
+  ['海老', 'shellfish'],
+  ['かに', 'shellfish'],
+  ['カニ', 'shellfish'],
+  ['蟹', 'shellfish'],
+  ['甲殻類', 'shellfish'],
+  ['甲殻', 'shellfish'],
+  ['shrimp', 'shellfish'],
+  ['prawn', 'shellfish'],
+  ['crab', 'shellfish'],
+  ['crustacean', 'shellfish'],
+  ['crustaceans', 'shellfish'],
+  ['egg', 'egg'],
+  ['eggs', 'egg'],
+  ['卵', 'egg'],
+  ['たまご', 'egg'],
+  ['タマゴ', 'egg'],
+  ['玉子', 'egg'],
+  ['鶏卵', 'egg'],
+  ['milk', 'milk'],
+  ['dairy', 'milk'],
+  ['乳', 'milk'],
+  ['牛乳', 'milk'],
+  ['ミルク', 'milk'],
+  ['乳製品', 'milk'],
+  ['乳成分', 'milk'],
+  ['チーズ', 'milk'],
+  ['バター', 'milk'],
+  ['peanut', 'peanut'],
+  ['peanuts', 'peanut'],
+  ['落花生', 'peanut'],
+  ['ピーナッツ', 'peanut'],
+  ['ピーナツ', 'peanut'],
+  ['wheat', 'wheat'],
+  ['小麦', 'wheat'],
+  ['こむぎ', 'wheat'],
+  ['コムギ', 'wheat'],
+  ['小麦粉', 'wheat'],
+  ['buckwheat', 'buckwheat'],
+  ['soba', 'buckwheat'],
+  ['そば', 'buckwheat'],
+  ['蕎麦', 'buckwheat'],
+  ['ソバ', 'buckwheat'],
+  ['そば粉', 'buckwheat'],
+])
+
+/** The same table for dietary tags — `fn_dietary_canonical` (0026). */
+const DIETARY_ALIASES = new Map<string, string>([
+  ['vegan', 'vegan'],
+  ['ヴィーガン', 'vegan'],
+  ['ビーガン', 'vegan'],
+  ['完全菜食', 'vegan'],
+  ['vegetarian', 'vegetarian'],
+  ['veggie', 'vegetarian'],
+  ['ベジタリアン', 'vegetarian'],
+  ['菜食', 'vegetarian'],
+  ['菜食主義', 'vegetarian'],
+  ['halal', 'halal'],
+  ['ハラル', 'halal'],
+  ['ハラール', 'halal'],
+  ['gluten_free', 'gluten_free'],
+  ['glutenfree', 'gluten_free'],
+  ['グルテンフリー', 'gluten_free'],
+  ['グルテン', 'gluten_free'],
+])
+
+/** `fn_taxonomy_token` (0026) — see llm-assist's `taxonomyToken` for why 'ー' is not folded. */
+function taxonomyToken(raw: string): string {
+  return raw.toLowerCase().replace(/[ 　\-－‐]/g, '_').trim()
+}
+
+/**
+ * Mirrors 0026's one-shot backfill (and `fn_allergen_canonical_value` /
+ * `fn_dietary_canonical_value`) for a snapshot this browser wrote before the vocabularies
+ * existed. A stored `{"allergens":["えび","かに"]}` MUST — which is exactly what the live model
+ * used to return for 「えびとかにのアレルギーがあります」 — can never be met by any
+ * `<allergen>_free` venue tag and is never relaxable, so leaving it alone would dead-end that
+ * event permanently.
+ *
+ *  - members that map onto the vocabulary are rewritten to it;
+ *  - members that do not are dropped from the value and kept as text in `semantic_remainder`;
+ *  - the row is NEVER re-typed. Unlike `canonicalizeAccessibilityNeeds` above, a row where
+ *    nothing survives stays a gating allergy (or dietary) MUST with an empty list: turning a
+ *    medical requirement into a non-gating note would let the group be recommended a venue
+ *    nobody has checked. It fails closed, and `recomputeFeasibility`'s
+ *    `allergy_unverified_count` is what makes the resulting zero legible.
+ */
+function canonicalizeAllergyAndDietary(db: Db): void {
+  for (const constraint of db.constraints) {
+    const key =
+      constraint.normalized_type === 'allergy'
+        ? 'allergens'
+        : constraint.normalized_type === 'dietary'
+          ? 'tags'
+          : null
+    if (key === null) continue
+    const aliases = key === 'allergens' ? ALLERGEN_ALIASES : DIETARY_ALIASES
+    const raw = constraint.normalized_value[key]
+    const stated = Array.isArray(raw) ? raw.filter((entry) => typeof entry === 'string') : []
+    const canonical = [
+      ...new Set(
+        stated
+          .map((entry) =>
+            aliases.get(
+              key === 'allergens'
+                ? taxonomyToken(entry).replace(/_?free$/, '')
+                : taxonomyToken(entry),
+            ) ?? null,
+          )
+          .filter((entry): entry is string => entry !== null),
+      ),
+    ].sort()
+    if (canonical.length === stated.length && canonical.every((entry, i) => entry === stated[i])) {
+      continue
+    }
+    // Keeping the participant's own wording is the point: an allergen the taxonomy cannot express
+    // must not disappear just because the engine cannot check it.
+    constraint.semantic_remainder =
+      constraint.semantic_remainder ?? (constraint.raw_text.trim() || null)
+    constraint.normalized_value = { [key]: canonical }
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Deterministic parser (replaces the llm-assist Edge Function)                */
 /* -------------------------------------------------------------------------- */
@@ -351,6 +507,14 @@ interface Rule {
   type: NormalizedType
   match: RegExp
   build: (text: string, matched: RegExpMatchArray) => NormalizedValue | null
+  /**
+   * Whether this parse captured only PART of what the writer said, so a human has to confirm it
+   * before it is saved. When true the result keeps the writer's whole text in
+   * `semantic_remainder` and sets `needs_clarification` — the contract llm-assist's
+   * `applyClosedTagVocabulary` implements server-side. Only the safety categories use it: a
+   * requirement the taxonomy weakened must never be recorded in silence.
+   */
+  clarify?: (text: string, value: NormalizedValue) => boolean
 }
 
 const CUISINE_WORDS: Array<[RegExp, string]> = [
@@ -382,15 +546,46 @@ const DIETARY_WORDS: Array<[RegExp, string]> = [
   [/グルテン|gluten/i, 'gluten_free'],
 ]
 
+/**
+ * Allergen words map onto the closed ALLERGEN_VOCABULARY (0026) — the six members the venue side
+ * can record as `<allergen>_free` — and onto nothing else, for the same reason the accessibility
+ * words do: feasibility is exact array containment and an allergy MUST is never relaxable, so a
+ * value outside the vocabulary means zero candidates forever.
+ *
+ * 貝 is deliberately NOT here any more. `shellfish` is this schema's CRUSTACEAN tag (甲殻類 —
+ * see `allergenLabel()` in src/design/copy.ts), so a venue that has confirmed itself
+ * `shellfish_free` has said nothing at all about oysters or clams; folding molluscs in would
+ * silently record a WEAKER requirement than the participant stated. 「貝アレルギー」 now goes to
+ * ALLERGEN_BEYOND_VOCABULARY below, which keeps the requirement gating, keeps their wording and
+ * asks — exactly what llm-assist does server-side.
+ */
 const ALLERGEN_WORDS: Array<[RegExp, string]> = [
-  // えび/かに are crustaceans, mapped onto the fixture's `shellfish_free` tag.
-  [/えび|海老|エビ|かに|蟹|カニ|甲殻|貝|shellfish|shrimp|crab/i, 'shellfish'],
-  [/卵|たまご|タマゴ|egg/i, 'egg'],
-  [/乳|牛乳|チーズ|milk|dairy/i, 'milk'],
-  [/落花生|ピーナッツ|peanut/i, 'peanut'],
-  [/小麦|wheat/i, 'wheat'],
-  [/そば|蕎麦|buckwheat/i, 'buckwheat'],
+  // えび/かに are the two crustaceans 特定原材料 names, mapped onto the `shellfish_free` tag.
+  [/えび|海老|エビ|かに|蟹|カニ|甲殻|shellfish|shrimp|prawn|crab/i, 'shellfish'],
+  [/卵|たまご|タマゴ|玉子|鶏卵|egg/i, 'egg'],
+  [/乳|牛乳|ミルク|チーズ|バター|milk|dairy/i, 'milk'],
+  [/落花生|ピーナッツ|ピーナツ|peanut/i, 'peanut'],
+  [/小麦|こむぎ|コムギ|wheat/i, 'wheat'],
+  [/そば|蕎麦|ソバ|buckwheat/i, 'buckwheat'],
 ]
+
+/**
+ * Allergen wording the vocabulary cannot express. Nothing records these on the venue side (no
+ * provider anywhere publishes restaurant allergen data — see 0026's header), and no
+ * `<allergen>_free` tag exists for them, so gating on the literal word would exclude every venue
+ * forever with no negotiation to escape through.
+ *
+ * Matching here does NOT drop the requirement and does NOT re-type it: unlike accessibility (0022
+ * turns an inexpressible need into a non-gating note) an allergy stays an allergy MUST, keeps the
+ * participant's own words in semantic_remainder and sets needs_clarification. Dropping a medical
+ * requirement out of the gate is the worst failure available here; llm-assist makes the identical
+ * call server-side.
+ *
+ * `(?<!ピー)ナッツ` so a tree-nut mention is caught without 「ピーナッツ」 — which IS a member —
+ * flagging itself.
+ */
+const ALLERGEN_BEYOND_VOCABULARY =
+  /貝|あさり|アサリ|牡蠣|ホタテ|大豆|豆乳|(?<!ピー)ナッツ|アーモンド|くるみ|クルミ|カシュー|魚|サバ|鯖|鮭|イカ|烏賊|ゼラチン|ごま|ゴマ|胡麻|山芋|やまいも|マンゴー|キウイ|バナナ|桃|りんご|リンゴ|セロリ|オレンジ/i
 
 /**
  * Accessibility words map onto the closed ACCESSIBILITY_VOCABULARY (0022) — the four booleans
@@ -428,8 +623,18 @@ const RULES: Rule[] = [
     match: /アレルギ|allerg|食べられない|だめ|ダメ|苦手/i,
     build: (text) => {
       const allergens = collect(text, ALLERGEN_WORDS)
-      return allergens.length > 0 ? { allergens } : null
+      if (allergens.length > 0) return { allergens }
+      // Nothing the six-member vocabulary can name. An explicit 「アレルギー」 is still an allergy
+      // MUST — 「マンゴーアレルギー」 must NOT become a non-gating note the way an inexpressible
+      // accessibility need does (0022), because that would drop a medical requirement out of the
+      // gate entirely. It gates, it fails closed, `clarify` keeps the writer's words and asks,
+      // and 0026's allergy_unverified_count is what stops the resulting zero from being silent.
+      // Without the word アレルギー we fall through instead, so 「ベジタリアンなので肉がだめです」
+      // is still read as dietary.
+      return /アレルギ|allerg/i.test(text) ? { allergens: [] } : null
     },
+    clarify: (text, value) =>
+      (value.allergens as string[]).length === 0 || ALLERGEN_BEYOND_VOCABULARY.test(text),
   },
   {
     type: 'allergy',
@@ -439,8 +644,13 @@ const RULES: Rule[] = [
       const allergens = collect(text, ALLERGEN_WORDS)
       return allergens.length > 0 ? { allergens } : null
     },
+    clarify: (text) => ALLERGEN_BEYOND_VOCABULARY.test(text),
   },
   {
+    // DIETARY_WORDS covers every trigger in `match`, so this rule can only ever emit members of
+    // the closed DIETARY_VOCABULARY (0026) — the mock has no way to produce the 'egg-free' /
+    // 'dairy-free' tags the live model invented for 「卵と乳製品がだめです」, which is exactly why
+    // llm-assist enforces the list on the model's answer rather than trusting its prompt.
     type: 'dietary',
     match: /ベジタリアン|ヴィーガン|ビーガン|菜食|ハラル|ハラール|グルテン|vegan|vegetarian|halal|gluten/i,
     build: (text) => {
@@ -547,14 +757,17 @@ export function parseConstraintText(rawText: string, kind: ConstraintKind = 'WAN
     if (!matched) continue
     const value = rule.build(text, matched)
     if (!value) continue
+    // A safety category that could only express PART of what was written asks instead of
+    // recording a weaker requirement quietly (see Rule.clarify). Everything else captured the
+    // whole meaning, so there is no leftover to preserve and nothing to confirm.
+    const partial = rule.clarify?.(text, value) ?? false
     return {
       normalized_type: rule.type,
       normalized_value: value,
       suggested_visibility: SENSITIVE_TYPES.includes(rule.type) ? 'ANONYMOUS' : 'PUBLIC',
-      confidence: 0.9,
-      needs_clarification: false,
-      // The taxonomy captured this one, so there is no leftover meaning to preserve.
-      semantic_remainder: null,
+      confidence: partial ? 0.5 : 0.9,
+      needs_clarification: partial,
+      semantic_remainder: partial ? text : null,
       sensitivity: sensitivityFor(rule.type),
       verification_requirement: verificationFor(kind, rule.type),
     }
@@ -606,6 +819,9 @@ export class MockBackend implements Backend {
         const stored = JSON.parse(raw) as Db
         // The only 0022 migration a stored snapshot needs; a no-op for every other row.
         canonicalizeAccessibilityNeeds(stored)
+        // Same for 0026: a Japanese `allergens` list (what the live model used to return) or an
+        // invented dietary tag can never match a venue and is never relaxable.
+        canonicalizeAllergyAndDietary(stored)
         return stored
       }
     } catch {
@@ -1323,6 +1539,13 @@ export class MockBackend implements Backend {
         room_type: feature.room_type,
         cuisine_tags: feature.cuisine_tags,
         atmosphere_tags: feature.atmosphere_tags,
+        // Projected explicitly, exactly like the six above, and exactly the column list
+        // SupabaseBackend.features() selects — so a card cannot render against a field one
+        // backend supplies and the other silently omits. `photo_url ?? null` because a snapshot
+        // this browser wrote before migration 0028 has no such key at all, and `undefined`
+        // would reach the card as "not loaded yet" rather than as "this venue has no
+        // photograph".
+        photo_url: feature.photo_url ?? null,
       }))
   }
 

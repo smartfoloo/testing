@@ -38,10 +38,19 @@ enum DemoFixture {
     static var projectURL: URL {
         get throws {
             // Accepts a bare host too: xcodebuild collapses `//` when forwarding
-            // environment values to the test runner.
+            // environment values to the test runner, so `https://x` can arrive as `https:/x`.
+            //
+            // The scheme is preserved rather than forced to https, so this suite can target a
+            // LOCAL stack as well as a hosted project. `supabase start` serves plain HTTP
+            // (config.toml sets `[api.tls] enabled = false`), and forcing https there made
+            // every test fail with a TLS handshake error — WRONG_VERSION_NUMBER, i.e. speaking
+            // TLS at a cleartext port — which read like a certificate problem rather than the
+            // wrong scheme. https is still the default for a bare host, because a hosted
+            // project is always https and nobody should have to spell that out.
             var raw = try env("SUPABASE_URL").trimmingCharacters(in: .whitespacesAndNewlines)
-            if let host = raw.split(separator: "/").last, !raw.hasPrefix("https://") {
-                raw = "https://\(host)"
+            let isCleartext = raw.hasPrefix("http:/") && !raw.hasPrefix("https:/")
+            if let host = raw.split(separator: "/").last(where: { !$0.isEmpty }) {
+                raw = "\(isCleartext ? "http" : "https")://\(host)"
             }
             guard let url = URL(string: raw), url.host != nil else {
                 throw MissingConfiguration(key: "SUPABASE_URL (got \"\(raw)\")")

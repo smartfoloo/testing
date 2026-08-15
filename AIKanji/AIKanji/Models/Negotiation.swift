@@ -44,11 +44,21 @@ struct FeasibilityResult: Codable, Hashable {
     /// group would see a bare 0 with no way to understand or act on it. Optional because a
     /// run recorded before 0022 does not carry the key.
     let accessibilityUnverifiedCount: Int?
+    /// The same number for allergy (0026). Allergy is never relaxable either, and no provider
+    /// anywhere publishes restaurant allergen data — Japan's 特定原材料 labelling obligation
+    /// covers packaged food, not menus — so `allergy_safe_tags` is empty for every venue live
+    /// discovery finds and the MUST fails closed. That is correct ("unknown ≠ supported") but it
+    /// must not be silent: this is the count behind 「N件はアレルギー対応が確認できませんでした
+    /// （お店に確認できます）」. "Unverified" rather than "unsuitable" because only positive
+    /// `<allergen>_free` claims are ever recorded, so absence is never a contradiction.
+    /// Optional because a run recorded before 0026 does not carry the key.
+    let allergyUnverifiedCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case runId = "run_id"
         case feasibleCount = "feasible_count"
         case accessibilityUnverifiedCount = "accessibility_unverified_count"
+        case allergyUnverifiedCount = "allergy_unverified_count"
     }
 
     init(from decoder: any Decoder) throws {
@@ -57,6 +67,9 @@ struct FeasibilityResult: Codable, Hashable {
         feasibleCount = try container.decode(Int.self, forKey: .feasibleCount)
         accessibilityUnverifiedCount = try container.decodeIfPresent(
             Int.self, forKey: .accessibilityUnverifiedCount
+        )
+        allergyUnverifiedCount = try container.decodeIfPresent(
+            Int.self, forKey: .allergyUnverifiedCount
         )
     }
 }

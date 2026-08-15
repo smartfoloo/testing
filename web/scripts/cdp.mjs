@@ -60,6 +60,17 @@ export async function connect() {
   await send('Page.enable')
   await send('Log.enable')
 
+  // `Log.enable` replays every entry the browser has stored for this tab, and the tab outlives
+  // a scenario — the same Chrome is reused for run after run. So without this, a run inherits
+  // the previous run's console errors and 「no console errors」 fails for something that
+  // happened before it started: a hosted run's expected 403 turning up in the next mock run,
+  // for instance. Both domains keep their own store, so both are cleared, and the replayed
+  // notifications (already delivered by the time these round-trips return) are dropped from the
+  // local list too.
+  await send('Log.clear')
+  await send('Runtime.discardConsoleEntries')
+  events.length = 0
+
   const evaluate = async (expression) => {
     const result = await send('Runtime.evaluate', {
       expression,
@@ -180,7 +191,11 @@ export async function connect() {
         )
         .map((e) =>
           e.method === 'Log.entryAdded'
-            ? e.params.entry.text
+            ? // The URL is the only thing that distinguishes one 「Failed to load resource:
+              // … 502」 from another, and a scenario that deliberately exercises a failing
+              // request (a dead provider, an RLS refusal it just asserted) has to be able to
+              // tell that apart from an error it did not ask for.
+              `${e.params.entry.text}${e.params.entry.url ? ` [${e.params.entry.url}]` : ''}`
             : e.method === 'Runtime.exceptionThrown'
               ? (e.params.exceptionDetails.exception?.description ?? e.params.exceptionDetails.text)
               : e.params.args.map((a) => a.description ?? JSON.stringify(a.value)).join(' '),

@@ -27,11 +27,21 @@
  * that stops a 個室 MUST from dead-ending on a Places-only candidate set, without ever
  * admitting a venue known to be the wrong room type (22).
  *
+ * Section 23 covers 0026_allergen_vocabulary_and_unverified_coverage.sql — the same shape of bug
+ * in the most safety-critical category. It asserts the closed allergen and dietary vocabularies,
+ * that a Japanese allergen (what the live model actually returned for
+ * 「えびとかにのアレルギーがあります」) can never match a venue, that an allergen the vocabulary
+ * cannot express stays a GATING allergy MUST with the writer's words preserved rather than
+ * degrading to a note, that allergy is still never negotiable, and that
+ * `allergy_unverified_count` makes the resulting zero legible instead of silent.
+ *
  * Run with `npm run verify:engine`.
  */
 
 import {
   ACCESSIBILITY_VOCABULARY,
+  ALLERGEN_VOCABULARY,
+  DIETARY_VOCABULARY,
   candidateBlockingTypes,
   candidateIsFeasible,
   countUnlockedIfRelaxed,
@@ -189,6 +199,11 @@ function addConstraint(
     updated_at: FIXED_TIME,
   })
   return id
+}
+
+/** `round(numeric, 4)` / engine.ts's `round4`, for hand-checking sums in the assertions below. */
+function round4(value: number): number {
+  return Math.round(value * 10000) / 10000
 }
 
 /** Scored rows in stored order — which is the objective ranking order. */
@@ -508,10 +523,15 @@ console.log('10. the event objective changes the ranking')
     'cheap_dive',
     'lux_room',
   ])
+  // 0.1*1 (fairness) + 0.1*0.8667 (access) + 0.15*1 (satisfaction) + 0.1*0.4 (quality)
+  //   + 0.45*0.5833 (cost_fit) + 0.1*1 (accessibility_fit) = 0.7392.
+  // The quality term is 0.4 rather than 0016's 0.732 because quality is now the venue's
+  // PERCENTILE among the feasible pool, banded: two venues, the cheaper one is the lower-rated,
+  // so it sits at (0 + 1/2)/2 = 0.25 and 0.2 + 0.8*0.25 = 0.4. Everything else is unchanged.
   assert(
     'cost objective_score for the cheap venue',
     scoresOf(cost.db, costRun.run_id)[0]?.objective_score,
-    0.7724,
+    0.7392,
   )
 
   const experience = build('experience')
@@ -605,7 +625,13 @@ console.log('12. labels are never handed to a row that does not lead')
   assertLabelsAreEarned('no badge is unearned', db, run.run_id)
 }
 
-/* 13. Gap 2: quality is review-volume adjusted, and falls back honestly. */
+/* 13. Gap 2: quality is review-volume adjusted, and falls back honestly.
+ *
+ * Since 0028 the volume adjustment is a step INSIDE the blend rather than the published score:
+ * it decides each venue's RANK within its provider's pool (`quality.google_shrunk`), and the
+ * score is that rank banded into [0.2, 1.0]. So the two things this section has always asserted
+ * are asserted in the two places they now live — the shrunk value still puts 800 reviews above
+ * 3, and the tag proxy still cannot outscore a real rating however poor. */
 console.log('13. quality is adjusted for review volume')
 {
   const db = emptyDb()
@@ -630,20 +656,50 @@ console.log('13. quality is adjusted for review volume')
     rows.find((row) => row.restaurant_place_id === placeId)!.quality_score!
   const method = (placeId: string) =>
     rows.find((row) => row.restaurant_place_id === placeId)!.score_breakdown?.quality.method
+  const breakdown = (placeId: string) =>
+    rows.find((row) => row.restaurant_place_id === placeId)!.score_breakdown?.quality as
+      | Record<string, unknown>
+      | undefined
 
-  assert('5.0 from 3 reviews is shrunk toward the prior', quality('hype_new'), 0.7925)
-  assert('4.3 from 800 reviews holds', quality('proven'), 0.8553)
-  assert('volume beats a small perfect score', quality('proven') > quality('hype_new'), true)
-  assert('rated venues report the method', method('proven'), 'rating_bayesian_shrunk')
+  // The shrinkage itself, on Google's 1-5 scale: (50*3.9 + r*n)/(50+n).
+  // hype_new  (195 + 5.0*3)/53      = 3.9623
+  // proven    (195 + 4.3*800)/850   = 4.2765
+  // terrible  (195 + 1.0*5000)/5050 = 1.0287
+  assert('5.0 from 3 reviews is shrunk toward the prior', breakdown('hype_new')?.google_shrunk, 3.9623)
+  assert('4.3 from 800 reviews holds', breakdown('proven')?.google_shrunk, 4.2765)
+  assert(
+    'volume beats a small perfect score',
+    (breakdown('proven')?.google_shrunk as number) >
+      (breakdown('hype_new')?.google_shrunk as number),
+    true,
+  )
+  // Three rated venues, so the percentiles are (0+1/2)/3, (1+1/2)/3 and (2+1/2)/3, and the
+  // published score is 0.2 + 0.8*percentile. The ORDER is the shrunk order, which is the whole
+  // point of shrinking first: 4.3-from-800 outranks 5.0-from-3.
+  assert('the pool ranks it above the hyped newcomer', breakdown('proven')?.google_percentile, 0.8333)
+  assert('and the newcomer sits in the middle', breakdown('hype_new')?.google_percentile, 0.5)
+  assert('the published score is that rank, banded', quality('proven'), 0.8666)
+  assert('and the middle of a three-venue pool bands to 0.6', quality('hype_new'), 0.6)
+  assert('volume still beats a small perfect score in the score', quality('proven') > quality('hype_new'), true)
+  assert('rated venues report which providers spoke', method('proven'), 'google_only')
+  assert('one provider, so one term in the mean', breakdown('proven')?.blended_percentile, 0.8333)
+  assert('and Tabelog is recorded as silent', breakdown('proven')?.tabelog_percentile, null)
+  assert('with an empty Tabelog pool', breakdown('proven')?.tabelog_ranked_candidates, 0)
+  assert('while Google\u2019s pool size is stated', breakdown('proven')?.google_ranked_candidates, 3)
 
   assert('no rating falls back to the tag proxy', quality('unrated_rich_tags'), 0.2)
   assert('the fallback is recorded', method('unrated_rich_tags'), 'atmosphere_tag_proxy')
+  assert('and it is out of the pool entirely', breakdown('unrated_rich_tags')?.google_percentile, null)
+  // THE INVARIANT THE BANDING EXISTS FOR. A bare percentile would have put the worst of three
+  // rated venues at 0.1667 — below the tag proxy's 0.2 ceiling — so a venue nobody has rated
+  // would have outranked one with a real, if terrible, score. Banded, it is 0.2 + 0.8*0.1667.
   assert(
     'missing rating data never scores better than present data',
     quality('unrated_rich_tags') < quality('rated_terrible'),
     true,
   )
-  assert('a 1.0 from 5000 reviews still beats "unknown"', quality('rated_terrible'), 0.2057)
+  assert('a 1.0 from 5000 reviews still beats "unknown"', quality('rated_terrible'), 0.3334)
+  assert('because the band floor is above the proxy ceiling', quality('rated_terrible') >= 0.2, true)
   assert('the best experience badge follows the real signal', 
     rows.find((row) => row.label === 'best_experience')?.restaurant_place_id, 'proven')
   assertLabelsAreEarned('no badge is unearned', db, run.run_id)
@@ -1402,6 +1458,593 @@ console.log('22. a room MUST is escapable, and consent does not admit the wrong 
       .map((score) => score.restaurant_place_id)
       .sort(),
     ['demo_place_001', 'demo_place_002', 'demo_place_004'],
+  )
+}
+
+/* 23. 0026: one closed allergen vocabulary, and an allergy zero that explains itself. */
+console.log('23. the allergen vocabulary is closed, and its exclusions are legible')
+{
+  // Asserted against literals, exactly as backend_tests.sql asserts fn_allergen_vocabulary() and
+  // fn_dietary_vocabulary(), so the two implementations cannot drift.
+  assert('the allergen vocabulary is the six labelled members', [...ALLERGEN_VOCABULARY], [
+    'buckwheat',
+    'egg',
+    'milk',
+    'peanut',
+    'shellfish',
+    'wheat',
+  ])
+  assert('and the dietary vocabulary is the four patterns', [...DIETARY_VOCABULARY], [
+    'gluten_free',
+    'halal',
+    'vegan',
+    'vegetarian',
+  ])
+
+  const db = emptyDb()
+  const eventId = addEvent(db)
+  const [p1] = addParticipants(db, eventId, 1)
+  const travel = { [p1]: 20 }
+  addConstraint(db, eventId, p1, 'MUST', 'budget', { max_yen: 4000 })
+  const allergyId = addConstraint(db, eventId, p1, 'MUST', 'allergy', {
+    allergens: ['shellfish', 'egg'],
+  })
+  addVenue(db, 'confirmed', {
+    allergy_safe_tags: ['shellfish_free', 'egg_free'],
+    travel_minutes_by_participant: travel,
+  })
+  addVenue(db, 'partly_confirmed', {
+    allergy_safe_tags: ['shellfish_free'],
+    travel_minutes_by_participant: travel,
+  })
+  // What every provider-discovered venue looks like: nobody publishes restaurant allergen data,
+  // so the column stays empty forever.
+  addVenue(db, 'unverified', { travel_minutes_by_participant: travel })
+  // Over budget too, so confirming its kitchen would NOT put it on the shortlist.
+  addVenue(db, 'unverified_and_pricey', {
+    price_yen_estimate: 9000,
+    travel_minutes_by_participant: travel,
+  })
+
+  assert(
+    'an allergy MUST is met when the recorded _free tags cover every allergen',
+    candidateIsFeasible(db, eventId, 'confirmed'),
+    true,
+  )
+  assert(
+    'tags covering only part of the allergens stay infeasible',
+    candidateIsFeasible(db, eventId, 'partly_confirmed'),
+    false,
+  )
+  assert(
+    'and no recorded tags at all stays infeasible — unknown is not safe',
+    candidateIsFeasible(db, eventId, 'unverified'),
+    false,
+  )
+  assert('blocking types name allergy alone', candidateBlockingTypes(db, eventId, 'unverified'), [
+    'allergy',
+  ])
+  assert(
+    'and name both obstacles when there are two',
+    candidateBlockingTypes(db, eventId, 'unverified_and_pricey'),
+    ['allergy', 'budget'],
+  )
+
+  const run = recompute(db, eventId)
+  assert('only the fully confirmed venue is feasible', run.feasible_count, 1)
+  // The whole point: 「N件はアレルギー対応が確認できませんでした（お店に確認できます）」 rather than
+  // 「0件」. `unverified_and_pricey` is excluded because a phone call cannot fix its price.
+  assert('the payload counts the venues only missing allergy proof', run.allergy_unverified_count, 2)
+  assert('and 0022 accessibility coverage is untouched', run.accessibility_unverified_count, 0)
+  assert('every pre-0026 key is still there', Object.keys(run).sort(), [
+    'accessibility_unverified_count',
+    'allergy_unverified_count',
+    'feasible_count',
+    'run_id',
+  ])
+  assert(
+    'an allergy MUST is still never proposed for relaxation',
+    proposeRelaxation(db, eventId, nextId, nextTime),
+    null,
+  )
+
+  // THE BUG, exactly as the live model produced it before 0026: the prompt gave allergy no
+  // example, so 「えびとかにのアレルギーがあります」 came back as {"allergens":["えび","かに"]}.
+  // Feasibility looks for 'えび_free', no venue has it, and allergy is never relaxable.
+  db.constraints.find((row) => row.id === allergyId)!.normalized_value = {
+    allergens: ['えび', 'かに'],
+  }
+  const dead = recompute(db, eventId)
+  assert('a Japanese allergen can never be matched by any venue', dead.feasible_count, 0)
+  assert(
+    'and every candidate in budget is reported as allergy-only, never a silent zero',
+    dead.allergy_unverified_count,
+    3,
+  )
+  assert(
+    'still not negotiable — consent is never asked for an unverified allergen claim',
+    proposeRelaxation(db, eventId, nextId, nextTime),
+    null,
+  )
+  // 0026 canonicalises exactly this row on the way in (llm-assist server-side, the parser below,
+  // and the one-shot backfill in the migration), which is what makes the venue reachable again.
+  db.constraints.find((row) => row.id === allergyId)!.normalized_value = {
+    allergens: ['egg', 'shellfish'],
+  }
+  assert(
+    'the canonical form matches the venue again',
+    candidateIsFeasible(db, eventId, 'confirmed'),
+    true,
+  )
+
+  // A MUST the vocabulary cannot express at all ({"allergens":[]}, what 「マンゴーアレルギー」
+  // becomes) still gates and still fails closed — but every candidate is now reported as
+  // unverified, which for a mango allergy is simply true: no dataset has that flag.
+  db.constraints.find((row) => row.id === allergyId)!.normalized_value = { allergens: [] }
+  const inexpressible = recompute(db, eventId)
+  assert('an inexpressible allergen fails closed', inexpressible.feasible_count, 0)
+  assert('and is reported rather than silent', inexpressible.allergy_unverified_count, 3)
+
+  /* The parser: it can only ever emit vocabulary members, and it never drops an allergen. */
+  const shellfish = parseConstraintText('えびとかにのアレルギーがあります', 'MUST')
+  assert('「えびとかにのアレルギー」 is an allergy MUST', shellfish.normalized_type, 'allergy')
+  assert('mapped onto the crustacean member', shellfish.normalized_value, {
+    allergens: ['shellfish'],
+  })
+  assert('and it still requires human confirmation', shellfish.verification_requirement, 'required')
+  assert('and defaults to ANONYMOUS', shellfish.suggested_visibility, 'ANONYMOUS')
+  const buckwheat = parseConstraintText('そばアレルギーです', 'MUST')
+  assert('「そばアレルギー」 is buckwheat, not the soba cuisine', buckwheat.normalized_value, {
+    allergens: ['buckwheat'],
+  })
+  assert('and needs no clarification', buckwheat.needs_clarification, false)
+  const eggMilk = parseConstraintText('卵と乳製品がだめです', 'MUST')
+  assert('「卵と乳製品がだめです」 is an allergy, not a dietary tag', eggMilk.normalized_type, 'allergy')
+  assert('with both ingredients named', eggMilk.normalized_value, { allergens: ['egg', 'milk'] })
+  const vegetarian = parseConstraintText('ベジタリアンです', 'MUST')
+  assert('「ベジタリアンです」 is still dietary', vegetarian.normalized_type, 'dietary')
+  assert('with the canonical tag', vegetarian.normalized_value, { tags: ['vegetarian'] })
+
+  // The case that must never be a silent weakening: an allergen with no member and no venue tag.
+  const mango = parseConstraintText('マンゴーアレルギー', 'MUST')
+  assert('an inexpressible allergen STAYS a gating allergy MUST', mango.normalized_type, 'allergy')
+  assert('with an empty list rather than an unmatchable one', mango.normalized_value, {
+    allergens: [],
+  })
+  assert('the writer’s own words are kept', mango.semantic_remainder, 'マンゴーアレルギー')
+  assert('and a human is asked before it is saved', mango.needs_clarification, true)
+  assert('while it still demands verification', mango.verification_requirement, 'required')
+  // 貝 is molluscs; `shellfish` is the CRUSTACEAN tag. Mapping it would record a weaker
+  // requirement than was stated, so it is preserved and asked about instead.
+  const mollusc = parseConstraintText('貝アレルギーです', 'MUST')
+  assert('貝 is not folded into the crustacean member', mollusc.normalized_value, { allergens: [] })
+  assert('it stays an allergy MUST', mollusc.normalized_type, 'allergy')
+  assert('and is asked about', mollusc.needs_clarification, true)
+  // Partial: what maps gates the search, what does not is kept and asked about.
+  const partial = parseConstraintText('えびと貝のアレルギーがあります', 'MUST')
+  assert('the expressible half still gates', partial.normalized_value, { allergens: ['shellfish'] })
+  assert('the whole wording survives', partial.semantic_remainder, 'えびと貝のアレルギーがあります')
+  assert('and the weakening is never silent', partial.needs_clarification, true)
+  // No allergy word at all: 「だめ」 must not turn a dietary statement into an empty allergy MUST.
+  const stillDietary = parseConstraintText('ベジタリアンなので肉がだめです', 'MUST')
+  assert('a dietary statement is not captured by the allergy rule', stillDietary.normalized_type, 'dietary')
+
+  // Whatever the phrasing, the parser can only ever emit vocabulary members.
+  const emitted = [
+    'えびアレルギーです',
+    '海老と蟹がだめです',
+    '卵アレルギーがあります',
+    '牛乳がだめです',
+    '落花生アレルギー',
+    '小麦アレルギーです',
+    'そばアレルギー',
+    'peanut allergy',
+    'shellfish allergy please',
+  ].flatMap((text) => {
+    const parsed = parseConstraintText(text, 'MUST')
+    const allergens = parsed.normalized_value.allergens
+    return Array.isArray(allergens) ? allergens.map(String) : []
+  })
+  assert('the parser only ever emits vocabulary members', emitted.length > 0, true)
+  assert(
+    'and never invents one outside it',
+    emitted.filter((allergen) => !(ALLERGEN_VOCABULARY as readonly string[]).includes(allergen)),
+    [],
+  )
+
+  // The demo invariant, once more against the new count: Emma's shellfish MUST is MET by every
+  // seeded venue, so allergy coverage is 0 and the 0-then-3 outcome is untouched.
+  const demo = fresh()
+  const demoBaseline = recompute(demo)
+  assert('the demo is still 0 feasible at baseline', demoBaseline.feasible_count, 0)
+  assert('and allergy coverage is 0 when the allergy MUST is met', demoBaseline.allergy_unverified_count, 0)
+  const demoProposal = proposeRelaxation(demo, DEMO_EVENT_ID, nextId, nextTime)
+  const demoNegotiation = demo.negotiations.find((row) => row.id === demoProposal)!
+  assert('the proposal still targets Bob, never Emma', demoNegotiation.participant_id, BOB)
+  demo.constraints.find((row) => row.id === demoNegotiation.constraint_id)!.normalized_value =
+    demoNegotiation.proposed_value
+  demoNegotiation.status = 'ACCEPTED'
+  const demoRun = recompute(demo)
+  assert('the 0-then-3 invariant survives 0026', demoRun.feasible_count, 3)
+  assert(
+    'and it is still 001, 002 and 004 — never 003',
+    demo.scores
+      .filter((score) => score.run_id === demoRun.run_id)
+      .map((score) => score.restaurant_place_id)
+      .sort(),
+    ['demo_place_001', 'demo_place_002', 'demo_place_004'],
+  )
+}
+
+/* 24. 0028: Tabelog counts toward quality, as a RANK inside its own provider's pool.
+ *
+ * The measurement this whole section exists to respect, over the same twenty Shinjuku izakaya:
+ *
+ *            min    p25   median   p75    max    span
+ *   Tabelog  3.07   3.09   3.22    3.39   3.53   0.46
+ *   Google   3.90   4.20   4.40    4.50   4.90   1.00
+ *
+ * A raw mean of the two is off by ~1.16 in level and misweights the spread by a factor of two,
+ * so it would rank venues by whether we managed to resolve them rather than by anything about
+ * the restaurant. 24f puts that failure side by side with the blend on the same four venues.
+ *
+ * The expected numbers below are hand-derived from the definitions in engine.ts and 0028, not
+ * captured from a run, and backend_tests.sql asserts the same figures against real Postgres.
+ * If the two suites ever disagree, the SQL is authoritative and this port is wrong. */
+console.log('24. quality blends providers by percentile, not by averaging their scales')
+{
+  /* 24a. THE SHAPE OF THE PERCENTILE: the median is 0.5, and reflecting the pool maps x to 1-x.
+   * Same review count everywhere, so the shrunk order is the rating order and nothing else
+   * moves. shrunk = (50*3.9 + r*200)/250. */
+  const db = emptyDb()
+  const eventId = addEvent(db)
+  const [p1] = addParticipants(db, eventId, 1)
+  const travel = { [p1]: 20 }
+  for (const [placeId, rating] of [
+    ['p10', 3.5],
+    ['p30', 3.8],
+    ['p50', 4.0],
+    ['p70', 4.2],
+    ['p90', 4.6],
+  ] as const) {
+    addVenue(db, placeId, {
+      rating,
+      user_rating_count: 200,
+      travel_minutes_by_participant: travel,
+    })
+  }
+  const run = recompute(db, eventId)
+  const rows = scoresOf(db, run.run_id)
+  const q = (placeId: string) =>
+    rows.find((row) => row.restaurant_place_id === placeId)!.score_breakdown?.quality as
+      | Record<string, unknown>
+      | undefined
+  const pct = (placeId: string) => q(placeId)?.google_percentile as number
+
+  assert('a pool of five ranks on (less + equal/2)/n', rows.map((row) => row.restaurant_place_id).length, 5)
+  assert('the median venue is exactly 0.5', pct('p50'), 0.5)
+  assert('the bottom of five is 0.1, never 0', pct('p10'), 0.1)
+  assert('the top of five is 0.9, never 1', pct('p90'), 0.9)
+  assert('and the scale reflects: 0.1 + 0.9', round4(pct('p10') + pct('p90')), 1)
+  assert('as does the pair inside it', round4(pct('p30') + pct('p70')), 1)
+  // The pool's percentiles always sum to n/2, whatever its shape — that is what makes the
+  // mid-rank symmetric and is why neither the best nor the worst venue is pushed to an extreme.
+  assert(
+    'the pool sums to n/2',
+    round4(['p10', 'p30', 'p50', 'p70', 'p90'].reduce((sum, id) => sum + pct(id), 0)),
+    2.5,
+  )
+  // Banded into [0.2, 1.0] like travel fairness and access, so the atmosphere-tag proxy's
+  // [0, 0.2) can never be beaten by an unrated venue.
+  assert(
+    'the published score is 0.2 + 0.8 * percentile',
+    rows.map((row) => row.quality_score),
+    [0.92, 0.76, 0.6, 0.44, 0.28],
+  )
+
+  /* 24b. TIES SHARE ONE VALUE. Two venues with the same adjusted score are the same venue as far
+   * as this dimension knows, so `equal / 2` gives both the midpoint of the range they jointly
+   * occupy rather than ordering them arbitrarily. */
+  const tied = emptyDb()
+  const tiedEvent = addEvent(tied)
+  const [t1] = addParticipants(tied, tiedEvent, 1)
+  const tiedTravel = { [t1]: 20 }
+  addVenue(tied, 'tie_a', { rating: 4.0, user_rating_count: 200, travel_minutes_by_participant: tiedTravel })
+  addVenue(tied, 'tie_b', { rating: 4.0, user_rating_count: 200, travel_minutes_by_participant: tiedTravel })
+  addVenue(tied, 'tie_low', { rating: 3.5, user_rating_count: 200, travel_minutes_by_participant: tiedTravel })
+  addVenue(tied, 'tie_high', { rating: 4.5, user_rating_count: 200, travel_minutes_by_participant: tiedTravel })
+  const tiedRun = recompute(tied, tiedEvent)
+  const tiedRows = scoresOf(tied, tiedRun.run_id)
+  const tiedPct = (placeId: string) =>
+    (tiedRows.find((row) => row.restaurant_place_id === placeId)!.score_breakdown?.quality as
+      | Record<string, unknown>
+      | undefined)?.google_percentile as number
+  assert('co-equal venues get one percentile, not two', tiedPct('tie_a'), tiedPct('tie_b'))
+  assert('and it is the midpoint of the range they share', tiedPct('tie_a'), 0.5)
+  assert('the venue below them is (0 + 1/2)/4', tiedPct('tie_low'), 0.125)
+  assert('the venue above them is (3 + 1/2)/4', tiedPct('tie_high'), 0.875)
+  assert(
+    'a tie does not change the pool total',
+    round4(['tie_a', 'tie_b', 'tie_low', 'tie_high'].reduce((sum, id) => sum + tiedPct(id), 0)),
+    2,
+  )
+  // Determinism: the percentile needs no tie-break at all, and the SHORTLIST's order is still
+  // decided by place_id when the objective scores tie, exactly as everywhere else in the engine.
+  assert('the shortlist order breaks the tie on place_id', rankingOf(tied, tiedRun.run_id), [
+    'tie_high',
+    'tie_a',
+    'tie_b',
+    'tie_low',
+  ])
+
+  /* 24c. A POOL OF ONE IS 0.5 — neither a bonus nor a penalty. SQL's percent_rank() would give
+   * it 0 and cume_dist() would give it 1; both would mean a venue's quality was decided by the
+   * fact that we managed to scrape exactly one venue. */
+  const lone = emptyDb()
+  const loneEvent = addEvent(lone)
+  const [l1] = addParticipants(lone, loneEvent, 1)
+  const loneTravel = { [l1]: 20 }
+  addVenue(lone, 'lone_google', {
+    rating: 4.4,
+    user_rating_count: 500,
+    travel_minutes_by_participant: loneTravel,
+  })
+  addVenue(lone, 'lone_tabelog', {
+    tabelog_rating: 3.22,
+    tabelog_review_count: 300,
+    travel_minutes_by_participant: loneTravel,
+  })
+  addVenue(lone, 'lone_nothing', { travel_minutes_by_participant: loneTravel })
+  const loneRun = recompute(lone, loneEvent)
+  const loneRows = scoresOf(lone, loneRun.run_id)
+  const loneQ = (placeId: string) =>
+    loneRows.find((row) => row.restaurant_place_id === placeId)!.score_breakdown?.quality as
+      | Record<string, unknown>
+      | undefined
+  assert('a one-venue Google pool lands on 0.5', loneQ('lone_google')?.google_percentile, 0.5)
+  assert('a one-venue Tabelog pool lands on 0.5 too', loneQ('lone_tabelog')?.tabelog_percentile, 0.5)
+  assert('so both band to the same 0.6', [
+    loneRows.find((row) => row.restaurant_place_id === 'lone_google')!.quality_score,
+    loneRows.find((row) => row.restaurant_place_id === 'lone_tabelog')!.quality_score,
+  ], [0.6, 0.6])
+  assert('and each pool knows its own size', [
+    loneQ('lone_google')?.google_ranked_candidates,
+    loneQ('lone_google')?.tabelog_ranked_candidates,
+  ], [1, 1])
+
+  /* 24d. THE FOUR METHODS, and PRESENCE IS NEITHER A BONUS NOR A PENALTY: a venue with no
+   * Tabelog score keeps its Google-only percentile, unchanged by what the other venues have. */
+  assert('Google alone', loneQ('lone_google')?.method, 'google_only')
+  assert('Tabelog alone', loneQ('lone_tabelog')?.method, 'tabelog_only')
+  assert('neither', loneQ('lone_nothing')?.method, 'atmosphere_tag_proxy')
+  assert('a Tabelog-only venue never borrows Google\u2019s columns', [
+    loneQ('lone_tabelog')?.rating,
+    loneQ('lone_tabelog')?.user_rating_count,
+    loneQ('lone_tabelog')?.tabelog_rating,
+  ], [null, null, 3.22])
+  assert('and a Google-only venue never borrows Tabelog\u2019s', [
+    loneQ('lone_google')?.tabelog_rating,
+    loneQ('lone_google')?.tabelog_shrunk,
+    loneQ('lone_google')?.rating,
+  ], [null, null, 4.4])
+
+  const unresolvedKeeps = (withTabelog: boolean) => {
+    const scratch = emptyDb()
+    const scratchEvent = addEvent(scratch)
+    const [s1] = addParticipants(scratch, scratchEvent, 1)
+    const scratchTravel = { [s1]: 20 }
+    addVenue(scratch, 'has_none', {
+      rating: 4.4,
+      user_rating_count: 500,
+      travel_minutes_by_participant: scratchTravel,
+    })
+    addVenue(scratch, 'peer_one', {
+      rating: 4.5,
+      user_rating_count: 500,
+      travel_minutes_by_participant: scratchTravel,
+      ...(withTabelog ? { tabelog_rating: 3.5, tabelog_review_count: 300 } : {}),
+    })
+    addVenue(scratch, 'peer_two', {
+      rating: 4.1,
+      user_rating_count: 500,
+      travel_minutes_by_participant: scratchTravel,
+      ...(withTabelog ? { tabelog_rating: 3.1, tabelog_review_count: 300 } : {}),
+    })
+    const scratchRun = recompute(scratch, scratchEvent)
+    return scoresOf(scratch, scratchRun.run_id).find(
+      (row) => row.restaurant_place_id === 'has_none',
+    )!
+  }
+  const withoutPeers = unresolvedKeeps(false)
+  const withPeers = unresolvedKeeps(true)
+  assert(
+    'an unresolved venue keeps its Google-only percentile whatever its peers carry',
+    withPeers.score_breakdown?.quality.score,
+    withoutPeers.score_breakdown?.quality.score,
+  )
+  assert(
+    'it is not pushed toward 0.5 by the providers it lacks',
+    (withPeers.score_breakdown?.quality as Record<string, unknown> | undefined)
+      ?.blended_percentile,
+    0.5,
+  )
+  assert('and its method still says so', withPeers.score_breakdown?.quality.method, 'google_only')
+
+  /* 24e. THE BLEND IS THE MEAN OF THE AVAILABLE PERCENTILES, rounded as an integer ratio so the
+   * SQL and this port cannot drift on the half-way case (a mean of two 4-decimal values lands
+   * exactly on a rounding boundary half the time). */
+
+  /* 24f. THE WORKED REORDERING, and the raw mean beside it.
+   *
+   *              Google        shrunk(3.9)   pct    Tabelog       shrunk(3.3)   pct    blend
+   *   alpha      4.5 / 500     4.4455       0.8333  3.10 / 300    3.1286       0.25    0.5417
+   *   bravo      4.3 / 500     4.2636       0.5     3.50 / 300    3.4714       0.75    0.625
+   *   delta      4.1 / 500     4.0818       0.1667  (unresolved)  -            -       0.1667
+   *
+   *   quality  = 0.2 + 0.8 * blend  ->  alpha 0.6334   bravo 0.7   delta 0.3334
+   *
+   * GOOGLE ALONE would order them alpha (0.8666), bravo (0.6), delta (0.3334).
+   * THE BLEND orders them bravo, alpha, delta: Tabelog ranks bravo top and alpha bottom of the
+   * two it scored, and a rank flip in one provider is enough to overturn a one-notch Google
+   * lead. That is Tabelog actually counting.
+   *
+   * A RAW MEAN OF THE RAW SCORES would have said: alpha (4.5+3.10)/2 = 3.80,
+   * bravo (4.3+3.50)/2 = 3.90, delta 4.4 -- sorry, 4.1, with nothing to average it against.
+   * So DELTA WOULD HAVE COME FIRST: the venue with the WORST Google score and no second opinion
+   * at all, purely because it was never dragged down by Tabelog's scale. The blend puts it last,
+   * which is where the only evidence about it puts it. */
+  const blend = emptyDb()
+  const blendEvent = addEvent(blend)
+  const [b1] = addParticipants(blend, blendEvent, 1)
+  const blendTravel = { [b1]: 20 }
+  addVenue(blend, 'alpha', {
+    rating: 4.5,
+    user_rating_count: 500,
+    tabelog_rating: 3.1,
+    tabelog_review_count: 300,
+    travel_minutes_by_participant: blendTravel,
+  })
+  addVenue(blend, 'bravo', {
+    rating: 4.3,
+    user_rating_count: 500,
+    tabelog_rating: 3.5,
+    tabelog_review_count: 300,
+    travel_minutes_by_participant: blendTravel,
+  })
+  addVenue(blend, 'delta', {
+    rating: 4.1,
+    user_rating_count: 500,
+    travel_minutes_by_participant: blendTravel,
+  })
+  const blendRun = recompute(blend, blendEvent)
+  const blendRows = scoresOf(blend, blendRun.run_id)
+  const blendQ = (placeId: string) =>
+    blendRows.find((row) => row.restaurant_place_id === placeId)!.score_breakdown?.quality as
+      | Record<string, unknown>
+      | undefined
+
+  assert('Google is shrunk toward 3.9', [
+    blendQ('alpha')?.google_shrunk,
+    blendQ('bravo')?.google_shrunk,
+    blendQ('delta')?.google_shrunk,
+  ], [4.4455, 4.2636, 4.0818])
+  // Tabelog's prior is 3.3, not Google's 3.9: 3.9 sits ABOVE the highest Tabelog score in the
+  // sample, so borrowing it would shrink every low-volume Tabelog venue UP past every
+  // high-volume one.
+  assert('Tabelog is shrunk toward 3.3', [
+    blendQ('alpha')?.tabelog_shrunk,
+    blendQ('bravo')?.tabelog_shrunk,
+    blendQ('delta')?.tabelog_shrunk,
+  ], [3.1286, 3.4714, null])
+  assert('the Google pool is all three', [
+    blendQ('alpha')?.google_percentile,
+    blendQ('bravo')?.google_percentile,
+    blendQ('delta')?.google_percentile,
+  ], [0.8333, 0.5, 0.1667])
+  assert('the Tabelog pool is only the two it scored', [
+    blendQ('alpha')?.tabelog_percentile,
+    blendQ('bravo')?.tabelog_percentile,
+    blendQ('delta')?.tabelog_percentile,
+  ], [0.25, 0.75, null])
+  assert('pool sizes are recorded per provider', [
+    blendQ('alpha')?.google_ranked_candidates,
+    blendQ('alpha')?.tabelog_ranked_candidates,
+  ], [3, 2])
+  // 0.8333 + 0.25 = 1.0833, halved = 0.54165 — exactly on a 4-decimal boundary, which is why
+  // both implementations round the integer ratio (10833/2 = 5416.5 -> 5417) rather than a float.
+  assert('the blend is the mean of the two, half away from zero', [
+    blendQ('alpha')?.blended_percentile,
+    blendQ('bravo')?.blended_percentile,
+    blendQ('delta')?.blended_percentile,
+  ], [0.5417, 0.625, 0.1667])
+  assert('the methods say which providers spoke', [
+    blendQ('alpha')?.method,
+    blendQ('bravo')?.method,
+    blendQ('delta')?.method,
+  ], ['google_and_tabelog', 'google_and_tabelog', 'google_only'])
+  assert('and the quality scores are the bands of those blends', [
+    blendRows.find((row) => row.restaurant_place_id === 'alpha')!.quality_score,
+    blendRows.find((row) => row.restaurant_place_id === 'bravo')!.quality_score,
+    blendRows.find((row) => row.restaurant_place_id === 'delta')!.quality_score,
+  ], [0.6334, 0.7, 0.3334])
+  // THE REORDERING ITSELF.
+  assert('the blended shortlist is ordered bravo, alpha, delta', rankingOf(blend, blendRun.run_id), [
+    'bravo',
+    'alpha',
+    'delta',
+  ])
+  assert(
+    'and the experience badge follows it',
+    blendRows.find((row) => row.label === 'best_experience')?.restaurant_place_id,
+    'bravo',
+  )
+  assertLabelsAreEarned('no badge is unearned by the blend', blend, blendRun.run_id)
+
+  // The same three venues with Tabelog's columns cleared: Google alone puts alpha first, which
+  // is the "before" half of the reordering above.
+  for (const feature of blend.features) {
+    feature.tabelog_rating = null
+    feature.tabelog_review_count = null
+  }
+  const googleOnlyRun = recompute(blend, blendEvent)
+  assert('without Tabelog the same three order alpha, bravo, delta', rankingOf(blend, googleOnlyRun.run_id), [
+    'alpha',
+    'bravo',
+    'delta',
+  ])
+  assert(
+    'so the blend genuinely moved the shortlist',
+    rankingOf(blend, blendRun.run_id)[0] !== rankingOf(blend, googleOnlyRun.run_id)[0],
+    true,
+  )
+  assert(
+    'and every venue reports google_only again',
+    scoresOf(blend, googleOnlyRun.run_id).map((row) => row.score_breakdown?.quality.method),
+    ['google_only', 'google_only', 'google_only'],
+  )
+
+  /* 24g. THE DEMO INVARIANT. seed.sql gives no venue a rating from either provider, so every
+   * demo card stays on the atmosphere-tag proxy with byte-identical scores, 0 stays 0, and the
+   * shortlist is still exactly 001 / 002 / 004. */
+  const demo = fresh()
+  assert('the demo is still 0 feasible at baseline', recompute(demo).feasible_count, 0)
+  const demoProposal = proposeRelaxation(demo, DEMO_EVENT_ID, nextId, nextTime)
+  const demoNegotiation = demo.negotiations.find((row) => row.id === demoProposal)!
+  demo.constraints.find((row) => row.id === demoNegotiation.constraint_id)!.normalized_value =
+    demoNegotiation.proposed_value
+  demoNegotiation.status = 'ACCEPTED'
+  const demoRun = recompute(demo)
+  assert('and 0-then-3 survives 0028', demoRun.feasible_count, 3)
+  assert(
+    'with the shortlist still 001, 002 and 004',
+    scoresOf(demo, demoRun.run_id)
+      .map((row) => row.restaurant_place_id)
+      .sort(),
+    ['demo_place_001', 'demo_place_002', 'demo_place_004'],
+  )
+  assert(
+    'every demo venue is still on the tag proxy, because no provider rated them',
+    scoresOf(demo, demoRun.run_id).map((row) => row.score_breakdown?.quality.method),
+    ['atmosphere_tag_proxy', 'atmosphere_tag_proxy', 'atmosphere_tag_proxy'],
+  )
+  assert(
+    'so the demo quality scores are 0016\u2019s, unchanged',
+    scoresOf(demo, demoRun.run_id)
+      .map((row) => [row.restaurant_place_id, row.quality_score])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    [
+      ['demo_place_001', 0.1333],
+      ['demo_place_002', 0.0667],
+      ['demo_place_004', 0.0667],
+    ],
+  )
+  assert(
+    'and no demo venue carries a Tabelog figure at all',
+    demo.features.map(
+      (feature) => (feature.tabelog_rating ?? null) === null &&
+        (feature.tabelog_review_count ?? null) === null,
+    ),
+    [true, true, true, true],
   )
 }
 

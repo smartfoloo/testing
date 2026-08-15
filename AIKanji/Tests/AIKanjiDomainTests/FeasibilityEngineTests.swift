@@ -78,7 +78,16 @@ final class FeasibilityEngineTests: XCTestCase {
             ["demo_place_001", "demo_place_002", "demo_place_004"]
         )
         XCTAssertFalse(scores.contains { $0.restaurantPlaceId == "demo_place_003" })
-        XCTAssertEqual(Set(scores.compactMap(\.label)).count, scores.count, "each card gets a distinct label")
+        // Labels are earned, not distributed. Only David has seeded travel legs, so every
+        // venue ties on travel fairness and none is demonstrably 'fairest' — that badge goes
+        // unused rather than being handed to an arbitrary row, which is what the earlier
+        // greedy assignment did (it once badged a 75-minute commute 'best access'). So three
+        // scored venues legitimately earn two labels here. Assert the invariant instead of a
+        // fixed count: the number depends on how much provider data has been gathered.
+        // Mirrors 'no label is applied twice' in supabase/tests/backend_tests.sql.
+        let labels = scores.compactMap(\.label)
+        XCTAssertEqual(Set(labels).count, labels.count, "no label is applied twice")
+        XCTAssertFalse(labels.isEmpty, "at least one candidate carries a differentiating label")
     }
 
     // 4. Safety rule: an allergy MUST is never proposed, even when it is the only

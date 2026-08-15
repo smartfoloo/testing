@@ -1,8 +1,10 @@
 /**
  * TypeScript port of the deterministic feasibility / scoring / relaxation engine
  * defined in AIKanji/supabase/migrations/0009_review_function_replacements.sql,
- * 0016_scoring_and_objective.sql, 0021_must_coverage_and_proposal_integrity.sql and
- * 0022_accessibility_vocabulary_and_room_unknown.sql (which together supersede
+ * 0016_scoring_and_objective.sql, 0021_must_coverage_and_proposal_integrity.sql,
+ * 0022_accessibility_vocabulary_and_room_unknown.sql,
+ * 0026_allergen_vocabulary_and_unverified_coverage.sql and
+ * 0028_provider_display_fields_and_quality_percentiles.sql (which together supersede
  * 0005_feasibility.sql).
  *
  * This exists so the mock backend behaves the same as the real Postgres one: the LLM
@@ -25,6 +27,12 @@
  *  - accessibility needs and recorded venue tags share ONE closed vocabulary
  *    (`ACCESSIBILITY_VOCABULARY`, 0022): four members mapped 1:1 from the four booleans
  *    Google Places' `accessibilityOptions` can return;
+ *  - allergens and `<allergen>_free` venue claims share ONE closed vocabulary too
+ *    (`ALLERGEN_VOCABULARY`, 0026), as do dietary tags (`DIETARY_VOCABULARY`). Before 0026 the
+ *    live model answered 「えびとかにのアレルギーがあります」 in Japanese, so the containment test
+ *    looked for `えび_free` and no venue ever matched — permanently, since an allergy MUST is
+ *    never relaxable. Feasibility is unchanged; the vocabularies are enforced at the boundaries
+ *    (`llm-assist`, `mock.ts`'s parser) and reported on by `recomputeFeasibility`;
  *  - `(value->>'key')::int` on a missing key yields SQL NULL, and `x > NULL` is NULL,
  *    which `if` treats as false — so the MUST passes. `nullableInt` + `exceeds` model that;
  *    since 0021 SQL reads those keys through fn_jsonb_int, which also yields NULL for a
@@ -36,6 +44,11 @@
  *  - scoring is objective-weighted (`fn_objective_weights`), missing data is confined to a
  *    band below measured data (`fn_banded_score`), and a label is only written when the row
  *    genuinely leads that metric — otherwise the badge is dropped, never reassigned;
+ *  - quality is a PER-PROVIDER PERCENTILE within the feasible candidate pool, averaged over the
+ *    providers that spoke (`fn_quality_signal_blended`, 0028), never a mean of Google's and
+ *    Tabelog's raw scores — the two sit on distributions ~1.16 apart with spans that differ by a
+ *    factor of two, so a raw mean would rank venues by which of them we managed to resolve. The
+ *    blend is a pool computation, which is why `scoreFeasibleCandidates` ranks before it scores;
  *  - a relaxation proposal is idempotent per event (`fn_propose_relaxation`, 0021): the open
  *    proposal is returned rather than duplicated, and a step already rejected is not re-asked.
  */
@@ -51,7 +64,6 @@ import type {
   NegotiationStatus,
   ObjectiveWeights,
   ParticipantRole,
-  QualityMethod,
   RecommendationLabel,
   ScoreBreakdown,
   ScoreDimension,
@@ -147,6 +159,30 @@ export interface FeatureRow {
    */
   rating?: number | null
   user_rating_count?: number | null
+  /**
+   * Tabelog's OWN score and review count (`restaurant_features.tabelog_rating` /
+   * `tabelog_review_count`, 0027), never merged into Google's two columns above. Optional and
+   * usually null: they are written only behind a feature flag, only for at most five already
+   * feasible venues per search, and only when the venue's identity was confirmed by an exact
+   * telephone match — so absent means "we did not confirm which Tabelog page this is", which
+   * `qualitySignalBlended` reads as "this provider said nothing" and not as a bad score.
+   *
+   * The mock backend never has them (it scrapes nothing), so mock mode is permanently
+   * `google_only` / `atmosphere_tag_proxy` — which is the right thing for a fixture to
+   * exercise, because it is also the state of every venue with the flag off.
+   *
+   * `tabelog_budget_yen` (0028) is deliberately NOT here: it gates nothing and scores nothing,
+   * so the engine has no business reading it, and no client type asks for it yet.
+   */
+  tabelog_rating?: number | null
+  tabelog_review_count?: number | null
+  /**
+   * `restaurant_features.photo_url` (0028) — Hot Pepper's `photo.pc.m` thumbnail on Recruit's
+   * own image host, or null. Carried here only so the mock backend can return the same shape
+   * the hosted one does; the engine never reads it, because a photograph neither gates a venue
+   * nor scores one.
+   */
+  photo_url?: string | null
   /**
    * `restaurant_features.accessibility_tags` (0016), constrained since 0022 to
    * `ACCESSIBILITY_VOCABULARY`. Absent or empty = no data, never "supported": only positives
@@ -362,6 +398,51 @@ export const ACCESSIBILITY_VOCABULARY = [
   'wheelchair_accessible_seating',
 ] as const
 
+/* -------------------------------------------------------------------------- */
+/* Allergen / dietary vocabularies — fn_allergen_vocabulary (0026)             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The closed allergen vocabulary, ported from `fn_allergen_vocabulary()` (0026) and kept in the
+ * same (sorted) order as the SQL array.
+ *
+ * Six members, none of them invented here: `allergenLabel()` in `src/design/copy.ts`,
+ * `AppCopy.allergen` in AppCopy.swift and `ALLERGEN_WORDS` in `mock.ts` already enumerate exactly
+ * these, so every member has a Japanese label (甲殻類・卵・乳・落花生・小麦・そば) a fully
+ * Japanese UI can print. Five are 消費者庁の特定原材料 and `shellfish` is the CRUSTACEAN tag
+ * (えび・かに), which is the granularity the venue side records.
+ *
+ * The venue side speaks the same vocabulary with a `_free` suffix
+ * (`restaurant_features.allergy_safe_tags`, constrained since 0026 by
+ * `restaurant_features_allergen_safe_tag_vocabulary`), and `llm-assist` states the six strings in
+ * its prompt AND enforces them on the model's answer. Feasibility itself stays a plain
+ * containment test: normalization belongs at the boundaries, never inside the deterministic
+ * engine.
+ *
+ * WHY IT HAS TO BE CLOSED: before 0026 the live model answered 「えびとかにのアレルギーがありま
+ * す」 with `{"allergens":["えび","かに"]}` — the prompt gave allergy no example, so the model
+ * mirrored the writer's language — and the containment test below then looked for `えび_free`
+ * against a venue recording `shellfish_free`. Zero candidates, and allergy is never relaxable,
+ * so there was no proposal to escape through either.
+ */
+export const ALLERGEN_VOCABULARY = [
+  'buckwheat',
+  'egg',
+  'milk',
+  'peanut',
+  'shellfish',
+  'wheat',
+] as const
+
+/**
+ * The closed dietary vocabulary, ported from `fn_dietary_vocabulary()` (0026). The same bug one
+ * category over: for 「卵と乳製品がだめです」 the live model invented
+ * `{"tags":["egg-free","dairy-free"]}`, which no `dietary_tags` value can ever match. Unlike
+ * allergens these are *patterns a kitchen claims to cater for*, which is why `gluten_free` is
+ * here and 小麦 is an allergen.
+ */
+export const DIETARY_VOCABULARY = ['gluten_free', 'halal', 'vegan', 'vegetarian'] as const
+
 /** `room_type` / `{"room": …}` domain — `restaurant_features.room_type`'s CHECK (0001). */
 const ROOM_TYPES = ['private', 'semi_private', 'open']
 
@@ -377,6 +458,33 @@ function accessibilityNeedsMet(venueTags: string[], value: NormalizedValue): boo
   const needs = stringArray(value, 'needs')
   return (
     needs !== null && needs.length > 0 && venueTags.length > 0 && contains(venueTags, needs)
+  )
+}
+
+/**
+ * Ports `fn_allergy_allergens_met` (0026): the allergy predicate, in one place, so the gate and
+ * the coverage count in `recomputeFeasibility` cannot disagree about what "unmet" means.
+ *
+ * Unchanged from 0009/0016/0021/0022 — this is that expression moved, not edited. `allergens`
+ * must be a non-empty array (a MUST whose own value cannot be read is not one we may certify as
+ * met), the venue must have tags recorded, and those tags must CONTAIN `<allergen>_free` for
+ * every allergen. No tags recorded means UNKNOWN, and unknown is not safe (PRD §11).
+ *
+ * There is deliberately no `accept_unknown` escape of the kind `room` and `smoking` have: 0021
+ * may ask a group to accept an unconfirmed smoking policy, but nobody may be asked to consent to
+ * an unverified allergen claim. The escape is the coverage count plus a phone call
+ * (`verification_requirement = 'required'`), never consent.
+ */
+function allergyAllergensMet(venueTags: string[], value: NormalizedValue): boolean {
+  const allergens = stringArray(value, 'allergens')
+  return (
+    allergens !== null &&
+    allergens.length > 0 &&
+    venueTags.length > 0 &&
+    contains(
+      venueTags,
+      allergens.map((allergen) => `${allergen}_free`),
+    )
   )
 }
 
@@ -450,16 +558,12 @@ export function candidateBlockingTypes(
         blocked.add('dietary')
       }
     } else if (must.normalized_type === 'allergy') {
-      const allergens = stringArray(value, 'allergens')
-      if (
-        allergens === null ||
-        allergens.length === 0 ||
-        candidate.allergy_safe_tags.length === 0 ||
-        !contains(
-          candidate.allergy_safe_tags,
-          allergens.map((allergen) => `${allergen}_free`),
-        )
-      ) {
+      // {"allergens": string[]} drawn from ALLERGEN_VOCABULARY (0026), against
+      // restaurant_features.allergy_safe_tags' `<allergen>_free` claims. Never relaxable and
+      // never granted an `accept_unknown` flag — see allergyAllergensMet. A venue with no tags
+      // recorded is UNKNOWN, and `recomputeFeasibility` reports how many candidates are excluded
+      // for exactly that reason so the zero is never silent.
+      if (!allergyAllergensMet(candidate.allergy_safe_tags, value)) {
         blocked.add('allergy')
       }
     } else if (must.normalized_type === 'accessibility') {
@@ -532,10 +636,29 @@ const TRAVEL_ACCESS_HORIZON_MINUTES = 120
 /**
  * Bayesian prior for the quality signal: every venue starts out as "an average Tokyo
  * izakaya with 50 reviews", so a 5.0 from 3 reviews cannot beat a 4.3 from 800.
+ *
+ * `QUALITY_PRIOR_RATING` is Google's and stays 3.9, both as the shrinkage prior and as the
+ * `prior_rating` key `score_breakdown` has always reported.
  */
 const QUALITY_PRIOR_RATING = 3.9
 const QUALITY_PRIOR_REVIEWS = 50
 const RATING_MAX = 5
+
+/**
+ * Ports `fn_quality_prior_rating` (0028): the prior each provider's score is shrunk toward.
+ *
+ *   google   3.9 — 0016's number, unchanged.
+ *   tabelog  3.3 — Tabelog's own averages cluster there (0027's header says so) and the
+ *                  twenty-venue Shinjuku sample behind 0028 puts its median at 3.22. Borrowing
+ *                  Google's 3.9 would put the prior ABOVE the highest Tabelog score in that
+ *                  sample (3.53), so every low-volume Tabelog venue would be shrunk UP past
+ *                  every high-volume one — the ranking inverted by a constant taken from
+ *                  another scale, which is the same category error as averaging the raw scores.
+ */
+const QUALITY_PRIOR_RATING_BY_PROVIDER = {
+  google: QUALITY_PRIOR_RATING,
+  tabelog: 3.3,
+} as const
 
 /**
  * Only used when nobody stated a budget MUST, so the `cost` objective still has a signal
@@ -650,43 +773,238 @@ function travelProfile(db: Db, eventId: string, placeId: string): ScoreBreakdown
 }
 
 /**
- * Ports `fn_quality_signal`: a review-volume-adjusted quality signal.
+ * Which providers actually spoke about a venue's quality, recorded in
+ * `score_breakdown.quality.method` — ports 0028's four values.
  *
- * quality = shrink(rating, n) / 5 with shrink(r, n) = (50 * 3.9 + r * n) / (50 + n), so a
- * 5.0 from 3 reviews lands at 0.79 while a 4.3 from 800 lands at 0.86. Google's scale
- * starts at 1.0 and the field is absent for unrated places, so `rating <= 0` or a zero
- * review count means "no signal", not "terrible": those fall back to the historical
- * atmosphere-tag proxy, capped at COMPLETE_DATA_FLOOR so an unrated venue can never
- * outscore a rated one (a rated venue is always > 0.2 because shrink() > 1).
+ * `atmosphere_tag_proxy` is 0016's and keeps its exact meaning and its exact score; clients
+ * already branch on that one string to say 「口コミ評価が取れていない」. The other three replace
+ * 0016's single `rating_bayesian_shrunk`, because the shrinkage is now a step INSIDE the blend
+ * rather than the method: a venue Google alone scored is `google_only`.
+ *
+ * NOTE FOR THE CLIENT-SIDE CONTRACT: `QualityMethod` in src/models/types.ts still enumerates
+ * 0016's two values, and that file belongs to the client work being done in parallel. The
+ * runtime value written here is one of the four below; the single assertion in
+ * `qualitySignalBlended` is where the two meet, and it also lets the new provenance keys
+ * through the closed `ScoreBreakdown['quality']` shape. Widening `QualityMethod` to these four
+ * members and adding the eleven keys listed in `qualitySignalBlended` is the only change
+ * types.ts needs.
  */
-function qualitySignal(feature: FeatureRow): ScoreBreakdown['quality'] {
-  const rating =
-    typeof feature.rating === 'number' && Number.isFinite(feature.rating) ? feature.rating : null
-  const count =
-    typeof feature.user_rating_count === 'number' && Number.isFinite(feature.user_rating_count)
-      ? Math.trunc(feature.user_rating_count)
-      : null
+export type QualityBlendMethod =
+  | 'google_only'
+  | 'google_and_tabelog'
+  | 'tabelog_only'
+  | 'atmosphere_tag_proxy'
+
+/**
+ * Ports `fn_provider_quality_shrunk` (0028): one provider's volume-adjusted score for one
+ * venue, on that provider's own 1–5 scale, or null when the provider gave us nothing usable.
+ *
+ * shrink(r, n) = (50 * prior + r * n) / (50 + n) — 0016's arithmetic with the prior made a
+ * parameter and without the /5 rescale, because the value is only ever compared against other
+ * venues' values from the SAME provider, so the scale it lives on does not matter.
+ *
+ * This is what keeps 「volume beats a small perfect score」 true INSIDE a provider: a Tabelog
+ * 3.53 from two reviews must not outrank a 3.50 from four hundred, which is the exact bug 0016
+ * fixed for Google. The percentile then handles the part shrinkage cannot: making two
+ * providers' scales comparable at all.
+ *
+ * `rating <= 0` or a zero review count is "no signal", never "terrible" — both providers omit
+ * the score entirely for an unrated venue (Google's field is absent, Tabelog prints 「-」) and
+ * both scales start above 0. A score with no review count is "no signal" too: there is nothing
+ * to shrink it by.
+ *
+ * Rounded to 4 decimals, which also means two venues whose adjusted scores differ by less than
+ * 0.0001 TIE rather than being ordered by float noise. See `providerPercentiles` for what a tie
+ * does.
+ */
+function providerQualityShrunk(
+  rating: number | null,
+  reviewCount: number | null,
+  prior: number,
+): number | null {
+  if (rating === null || !(rating > 0)) return null
+  if (reviewCount === null || !(reviewCount > 0)) return null
+  const clamped = Math.min(RATING_MAX, Math.max(1, rating))
+  return round4(
+    (QUALITY_PRIOR_REVIEWS * prior + clamped * reviewCount) / (QUALITY_PRIOR_REVIEWS + reviewCount),
+  )
+}
+
+/**
+ * One provider's percentile for every candidate in the pool, `null` where the provider said
+ * nothing. Ports the percentile definition stated in section E of 0028.
+ *
+ * For the members of the pool that HAVE a score (n of them), and for one of them v:
+ *   less  = how many score strictly BELOW v
+ *   equal = how many score exactly the same as v (v itself included, so >= 1)
+ *   percentile(v) = round((less + equal / 2) / n, 4)
+ *
+ * WHY THE MID-RANK AND NOT SQL's percent_rank() OR cume_dist():
+ *  - percent_rank() is (rank-1)/(n-1): the worst venue and a lone venue both score 0. Zero is a
+ *    PENALTY, and "we resolved exactly one venue on Tabelog" must not push that venue to the
+ *    bottom of the quality dimension;
+ *  - cume_dist() is (less+equal)/n: the best venue and a lone venue both score 1. Same mistake
+ *    with the sign flipped — a BONUS for having been scraped;
+ *  - (less + equal/2)/n is symmetric. The median of an odd-sized pool is exactly 0.5, reflecting
+ *    the pool maps x to 1-x, and a pool of ONE lands on 0.5 — the honest reading of "there is
+ *    nobody to be ranked against". That neutral 0.5 is what makes a single resolution neither a
+ *    reward nor a punishment.
+ *
+ * TIES SHARE ONE VALUE, deliberately rather than as a missing tie-break: two venues with the
+ * same adjusted score are the same venue as far as this dimension knows, and ordering them
+ * against each other would invent a distinction. `equal / 2` gives both the midpoint of the
+ * range they jointly occupy. There is no arbitrary choice left to make, so the result is
+ * deterministic; the place_id tie-break the engine uses elsewhere still decides the shortlist's
+ * ORDER and the label loop's co-leader.
+ *
+ * The rounding is done on an INTEGER RATIO — (2*less + equal) / (2*n) — so this cannot drift
+ * from SQL's `round(numeric, 4)`: multiplying the numerator by 10000 first is exact in a
+ * double, so a value that lands exactly on a .00005 boundary is representable and rounds half
+ * away from zero on both sides.
+ */
+function providerPercentiles(values: Array<number | null>): Array<number | null> {
+  const scored = values.filter((value): value is number => value !== null)
+  const n = scored.length
+  if (n === 0) return values.map(() => null)
+  return values.map((value) => {
+    if (value === null) return null
+    const less = scored.filter((other) => other < value).length
+    const equal = scored.filter((other) => other === value).length
+    return Math.round(((2 * less + equal) * 10000) / (2 * n)) / 10000
+  })
+}
+
+/**
+ * Ports `fn_quality_signal_blended` (0028): quality as the MEAN OF THE AVAILABLE PROVIDERS'
+ * PERCENTILES, banded into [0.2, 1.0].
+ *
+ * WHY A RANK AND NOT A NUMBER. Over the same twenty Shinjuku izakaya:
+ *
+ *            min    p25   median   p75    max    span
+ *   Tabelog  3.07   3.09   3.22    3.39   3.53   0.46
+ *   Google   3.90   4.20   4.40    4.50   4.90   1.00
+ *
+ * A raw mean of the two is off by ~1.16 in level, so a venue's blended score would be decided
+ * by WHETHER WE MANAGED TO RESOLVE IT ON TABELOG rather than by anything about the restaurant —
+ * resolution runs at ~60% and is capped at five venues per search. A fixed rescale is wrong
+ * too: Tabelog's span (0.46) is half Google's (1.00), so any multiplier that lines the medians
+ * up misweights the spread and Tabelog's best venue lands level with Google's median one.
+ * A percentile has neither problem: a median-for-Tabelog venue and a median-for-Google venue
+ * both land at 0.5.
+ *
+ * PRESENCE IS NEITHER A BONUS NOR A PENALTY. A venue with no Tabelog score keeps its
+ * Google-only percentile unchanged — a provider that said nothing contributes no term to the
+ * mean, so nothing pushes the venue toward 0 or toward 0.5.
+ *
+ * AND 0016's BAND IS KEPT. A bare percentile would break the rule that measured data lives in
+ * [0.2, 1.0] and gaps live in [0, 0.2): the lowest-ranked venue in a pool of twenty scores
+ * 0.025, BELOW the atmosphere-tag proxy's ceiling of 0.2, so a venue nobody has rated would
+ * outrank a venue with a real if poor score — the same "ranked by what we happened to collect"
+ * failure in the other direction. The blend therefore goes through `bandedScore(1, …)` exactly
+ * as travel fairness and access do, and the proxy keeps [0, 0.2) to itself.
+ *
+ * EVERY EXISTING KEY KEEPS ITS NAME AND MEANING (clients decode this): `rating` and
+ * `user_rating_count` are still GOOGLE's, `prior_rating` / `prior_reviews` are still Google's
+ * prior, `atmosphere_tags` is unchanged. The eleven added keys are `google_shrunk`,
+ * `google_percentile`, `google_ranked_candidates`, `tabelog_rating`, `tabelog_review_count`,
+ * `tabelog_prior_rating`, `tabelog_shrunk`, `tabelog_percentile`,
+ * `tabelog_ranked_candidates` and `blended_percentile`, plus the widened `method`.
+ */
+function qualitySignalBlended(
+  feature: FeatureRow,
+  googlePercentile: number | null,
+  googleRanked: number,
+  tabelogPercentile: number | null,
+  tabelogRanked: number,
+): ScoreBreakdown['quality'] {
+  const rating = finiteOrNull(feature.rating)
+  const count = intOrNull(feature.user_rating_count)
+  const tabelogRating = finiteOrNull(feature.tabelog_rating)
+  const tabelogCount = intOrNull(feature.tabelog_review_count)
   const tags = Math.min(feature.atmosphere_tags.length, 3)
 
-  const shared = {
+  const googleShrunk = providerQualityShrunk(
+    rating,
+    count,
+    QUALITY_PRIOR_RATING_BY_PROVIDER.google,
+  )
+  const tabelogShrunk = providerQualityShrunk(
+    tabelogRating,
+    tabelogCount,
+    QUALITY_PRIOR_RATING_BY_PROVIDER.tabelog,
+  )
+
+  // A percentile counts only when this venue actually HAS that provider's adjusted score. The
+  // two conditions are separate on purpose: the pool is ranked by the caller, so requiring the
+  // score as well means a caller that ranked the wrong pool cannot smuggle in a percentile for
+  // a venue the provider never scored.
+  const google = googleShrunk === null ? null : googlePercentile
+  const tabelog = tabelogShrunk === null ? null : tabelogPercentile
+
+  let blended: number | null = null
+  let method: QualityBlendMethod = 'atmosphere_tag_proxy'
+  if (google !== null && tabelog !== null) {
+    blended = midpoint4(google, tabelog)
+    method = 'google_and_tabelog'
+  } else if (google !== null) {
+    blended = google
+    method = 'google_only'
+  } else if (tabelog !== null) {
+    blended = tabelog
+    method = 'tabelog_only'
+  }
+
+  return {
+    score:
+      blended === null ? round4(COMPLETE_DATA_FLOOR * (tags / 3)) : bandedScore(1, blended),
+    method,
     rating,
     user_rating_count: count,
     prior_rating: QUALITY_PRIOR_RATING,
     prior_reviews: QUALITY_PRIOR_REVIEWS,
     atmosphere_tags: tags,
-  }
+    google_shrunk: googleShrunk,
+    google_percentile: google,
+    google_ranked_candidates: googleRanked,
+    tabelog_rating: tabelogRating,
+    tabelog_review_count: tabelogCount,
+    tabelog_prior_rating: QUALITY_PRIOR_RATING_BY_PROVIDER.tabelog,
+    tabelog_shrunk: tabelogShrunk,
+    tabelog_percentile: tabelog,
+    tabelog_ranked_candidates: tabelogRanked,
+    blended_percentile: blended,
+    // THE ONE ASSERTION IN THIS FILE, and it is a contract note rather than a shortcut:
+    // `ScoreBreakdown['quality']` in src/models/types.ts is a closed shape that still names
+    // 0016's two `QualityMethod` values and none of the eleven provenance keys above. That file
+    // belongs to the client work happening in parallel and is not this change's to edit, so the
+    // runtime object — which is what the SQL engine writes too, key for key — is asserted into
+    // it here. The values are honest; only the type is temporarily narrower than the data.
+  } as ScoreBreakdown['quality']
+}
 
-  if (rating !== null && rating > 0 && count !== null && count > 0) {
-    const clamped = Math.min(RATING_MAX, Math.max(1, rating))
-    const shrunk =
-      (QUALITY_PRIOR_REVIEWS * QUALITY_PRIOR_RATING + clamped * count) /
-      (QUALITY_PRIOR_REVIEWS + count)
-    const method: QualityMethod = 'rating_bayesian_shrunk'
-    return { score: round4(clamp01(shrunk / RATING_MAX)), method, ...shared }
-  }
+/**
+ * The mean of two values that are already rounded to 4 decimals, rounded to 4 decimals — the
+ * blend of two providers' percentiles.
+ *
+ * The mean of two multiples of 0.0001 is a multiple of 0.00005, so it lands EXACTLY on a
+ * rounding boundary half the time, and that is the one place in this engine where "round to 4
+ * decimals" could genuinely disagree between Postgres' exact numeric and a double here. So it
+ * is rounded as an integer ratio on both sides: scale up by 10000 (exact for a 4-decimal
+ * value), halve (a sum of integers halved is exactly representable), round half away from
+ * zero, scale back. `fn_quality_signal_blended` does the same three steps in the same order.
+ */
+function midpoint4(left: number, right: number): number {
+  return Math.round((Math.round(left * 10000) + Math.round(right * 10000)) / 2) / 10000
+}
 
-  const method: QualityMethod = 'atmosphere_tag_proxy'
-  return { score: round4(COMPLETE_DATA_FLOOR * (tags / 3)), method, ...shared }
+/** A finite number, or null — `numeric` columns arrive as either, and NaN is not a rating. */
+function finiteOrNull(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** `::int` semantics for a review count: truncated, or null when there is nothing to read. */
+function intOrNull(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : null
 }
 
 /**
@@ -785,11 +1103,40 @@ export function scoreFeasibleCandidates(
   const objective = db.events.find((event) => event.id === eventId)?.objective ?? 'balanced'
   const weights = OBJECTIVE_WEIGHTS[objective] ?? BALANCED_WEIGHTS
 
-  const rows = db.restaurants
+  const feasible = db.restaurants
     .map((restaurant) => db.features.find((feature) => feature.place_id === restaurant.place_id))
     .filter((feature): feature is FeatureRow => feature !== undefined)
     .filter((feature) => candidateIsFeasible(db, eventId, feature.place_id))
-    .map((feature) => {
+
+  // The quality dimension cannot be computed one venue at a time any more: a percentile is a
+  // statement about a POOL (0028). Each provider is ranked over its OWN pool — only the
+  // candidates it actually scored — which is what keeps a venue with no Tabelog score OUT of
+  // the Tabelog ranking rather than last in it.
+  //
+  // The pool is the FEASIBLE set and not the five cards: the limit is applied after ordering,
+  // the ordering depends on quality, so ranking inside the five would be circular. It is also
+  // the right set on its own terms — a venue that broke somebody's MUST is not a peer.
+  const googleValues = feasible.map((feature) =>
+    providerQualityShrunk(
+      finiteOrNull(feature.rating),
+      intOrNull(feature.user_rating_count),
+      QUALITY_PRIOR_RATING_BY_PROVIDER.google,
+    ),
+  )
+  const tabelogValues = feasible.map((feature) =>
+    providerQualityShrunk(
+      finiteOrNull(feature.tabelog_rating),
+      intOrNull(feature.tabelog_review_count),
+      QUALITY_PRIOR_RATING_BY_PROVIDER.tabelog,
+    ),
+  )
+  const googlePercentiles = providerPercentiles(googleValues)
+  const tabelogPercentiles = providerPercentiles(tabelogValues)
+  const googleRanked = googleValues.filter((value) => value !== null).length
+  const tabelogRanked = tabelogValues.filter((value) => value !== null).length
+
+  const rows = feasible
+    .map((feature, index) => {
       const wantsMatched = wants.filter((want) => {
         if (want.normalized_type === 'cuisine') {
           const include = stringArray(want.normalized_value, 'include') ?? []
@@ -806,7 +1153,13 @@ export function scoreFeasibleCandidates(
       }).length
 
       const travel = travelProfile(db, eventId, feature.place_id)
-      const quality = qualitySignal(feature)
+      const quality = qualitySignalBlended(
+        feature,
+        googlePercentiles[index] ?? null,
+        googleRanked,
+        tabelogPercentiles[index] ?? null,
+        tabelogRanked,
+      )
       const cost = costBurden(db, eventId, feature)
       const accessibility = accessibilityBurden(db, eventId, feature)
 
@@ -933,24 +1286,43 @@ function assignHonestLabels(db: Db, runId: string): void {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Ports `fn_recompute_feasibility` (0022, itself 0018's definition).
+ * Ports `fn_recompute_feasibility` (0026, itself 0022's definition of 0018's).
  *
- * `accessibility_unverified_count` is the one key 0022 adds, and no existing key changed
- * meaning — the web and Swift clients decode this payload. It counts the candidates whose ONLY
- * unmet MUSTs are accessibility ones: the venues that would be on the shortlist if their
- * accessibility could be confirmed. That is the honest number behind 「N件は車椅子対応が確認
- * できませんでした（お店に確認できます）」, and it is why a wheelchair user is never shown a bare
- * 「0件」. It deliberately excludes venues that also break another MUST — a phone call would not
- * make those available — and it is 0 for every event that stated no accessibility MUST.
+ * `accessibility_unverified_count` (0022) and `allergy_unverified_count` (0026) are the two keys
+ * added since, and no existing key changed meaning — the web and Swift clients decode this
+ * payload, so adding a key is the only backwards-compatible way to say something new.
+ *
+ * Each counts the candidates whose ONLY unmet MUSTs are of that one type: the venues that would
+ * be on the shortlist if somebody could confirm the thing nobody has recorded. They are the
+ * honest numbers behind 「N件は車椅子対応が確認できませんでした（お店に確認できます）」 and
+ * 「N件はアレルギー対応が確認できませんでした（お店に確認できます）」, and they are why a
+ * wheelchair user or somebody with a shellfish allergy is never shown a bare 「0件」 — neither
+ * MUST is relaxable, so without them there is nothing to show and nothing to do.
+ *
+ * Both deliberately exclude venues that also break another MUST (a phone call would not make
+ * those available), and both are 0 for an event that stated no MUST of that type — including the
+ * five-persona demo, where Emma's shellfish MUST is met by every seeded venue.
+ *
+ * "Unverified" rather than "unsuitable" is accurate in both dimensions for the same reason: only
+ * POSITIVE claims are ever recorded (`accessibility_tags`, `<allergen>_free`), so a requirement
+ * the recorded data does not cover is unconfirmed, never confirmed-absent. On the allergy side
+ * that is the normal case rather than an edge one — no provider anywhere supplies restaurant
+ * allergen data (see 0026's header for the survey), so every live candidate arrives with `[]`.
  */
 export function recomputeFeasibility(
   db: Db,
   eventId: string,
   newId: () => string,
   now: () => string,
-): { run_id: string; feasible_count: number; accessibility_unverified_count: number } {
+): {
+  run_id: string
+  feasible_count: number
+  accessibility_unverified_count: number
+  allergy_unverified_count: number
+} {
   let feasibleCount = 0
   let accessibilityUnverifiedCount = 0
+  let allergyUnverifiedCount = 0
   const candidates = db.restaurants
     .slice()
     .sort((a, b) => a.place_id.localeCompare(b.place_id))
@@ -960,6 +1332,8 @@ export function recomputeFeasibility(
     if (blocked.length === 0) feasibleCount += 1
     else if (blocked.length === 1 && blocked[0] === 'accessibility') {
       accessibilityUnverifiedCount += 1
+    } else if (blocked.length === 1 && blocked[0] === 'allergy') {
+      allergyUnverifiedCount += 1
     }
   }
 
@@ -982,6 +1356,7 @@ export function recomputeFeasibility(
     run_id: runId,
     feasible_count: feasibleCount,
     accessibility_unverified_count: accessibilityUnverifiedCount,
+    allergy_unverified_count: allergyUnverifiedCount,
   }
 }
 
@@ -1008,10 +1383,11 @@ export function recomputeFeasibility(
  * いないお店も候補に入れてよいですか？」 (the constraint already carries
  * verification_requirement = 'recommended', the UI's cue to suggest phoning the venue). It
  * never trades away what was asked for: a venue known to be 喫煙可 still fails a
- * non_smoking MUST afterwards. accessibility deliberately has NO step — it stays on
- * NEVER_RELAXED, because accepting an unverified step-free entrance is accepting the risk of
- * not getting in; there the escape hatch is human verification and the coverage count in
- * `recomputeFeasibility`, not a negotiation.
+ * non_smoking MUST afterwards. accessibility and allergy deliberately have NO step — they stay
+ * on NEVER_RELAXED, because accepting an unverified step-free entrance is accepting the risk of
+ * not getting in, and accepting an unverified allergen claim is accepting a medical risk on the
+ * strength of data that (0026) no provider on earth publishes. For both, the escape hatch is
+ * human verification and the coverage counts in `recomputeFeasibility`, not a negotiation.
  *
  * WHY THE TWO ROOM CONCESSIONS ARE ONE STEP (0022). `room_type` is filled only from Hot
  * Pepper, so every Places-only candidate has it NULL and a 個室 MUST used to be infeasible
