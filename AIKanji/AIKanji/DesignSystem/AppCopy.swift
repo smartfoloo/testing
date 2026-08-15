@@ -5,6 +5,14 @@ enum AppCopy {
     static let tagline = "みんなの条件から、ちょうどいい店を。"
     static let create = "お店選びをはじめる"
     static let join = "招待コードで参加"
+    static let login = "ログイン"
+    static let logout = "ログアウト"
+    static let optionalLogin = "ログインは任意です。匿名のままでも利用できます。"
+    static let loginCaveat = "匿名で参加した集まりは、ログイン後のアカウントには引き継がれません。"
+    static let email = "メールアドレス"
+    static let password = "パスワード"
+    static let loginSubmit = "ログインする"
+    static let invalidCredentialsError = "メールアドレスまたはパスワードが正しくありません。"
     static let retry = "もう一度試す"
     static let networkError = "通信できませんでした。時間をおいて、もう一度お試しください。"
     static let save = "保存する"
@@ -95,6 +103,12 @@ enum AppCopy {
 
     static func errorMessage(for error: Error) -> String {
         let description = error.localizedDescription.lowercased()
+        if description.contains("invalid login credentials")
+            || description.contains("invalid email")
+            || description.contains("invalid password")
+        {
+            return invalidCredentialsError
+        }
         if description.contains("only the organizer")
             || description.contains("not permitted")
             || description.contains("permission")
