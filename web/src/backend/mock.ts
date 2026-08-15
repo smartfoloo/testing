@@ -214,6 +214,19 @@ export function createSeedDb(): Db {
     // is UNKNOWN, and none of these are.
     accessibility_tags: [],
     smoking_policy: null,
+    // photo_url (migration 0028) exists on every mock venue and is null on every one of them,
+    // which is deliberate rather than lazy. It is Hot Pepper's `photo.pc.m` on Recruit's own
+    // image host, written only for candidates a live search MATCHED to a Hot Pepper shop by
+    // exact telephone number — and these four venues are fictional, so no such shop and no such
+    // URL exists for them. Writing a plausible-looking https://imgfp.hotp.jp/... would put a
+    // guaranteed 404 in the demo and would be inventing provider data, which is the one habit
+    // this fixture is careful not to have (it already sets accessibility_tags and
+    // smoking_policy to "no data" for the same reason).
+    //
+    // Null is also the case the card has to get right: about 40% of live venues resolve to no
+    // Hot Pepper shop at all, so absence is the NORMAL state and not an error, and mock mode is
+    // where that path gets exercised on every render.
+    photo_url: null,
   })
 
   return {
@@ -1526,6 +1539,13 @@ export class MockBackend implements Backend {
         room_type: feature.room_type,
         cuisine_tags: feature.cuisine_tags,
         atmosphere_tags: feature.atmosphere_tags,
+        // Projected explicitly, exactly like the six above, and exactly the column list
+        // SupabaseBackend.features() selects — so a card cannot render against a field one
+        // backend supplies and the other silently omits. `photo_url ?? null` because a snapshot
+        // this browser wrote before migration 0028 has no such key at all, and `undefined`
+        // would reach the card as "not loaded yet" rather than as "this venue has no
+        // photograph".
+        photo_url: feature.photo_url ?? null,
       }))
   }
 

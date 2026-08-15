@@ -280,6 +280,9 @@ export function RecommendationCard({
   isChoosing,
   onChoose,
 }: RecommendationCardProps) {
+  // Reset per URL, so a card recycled for a different venue retries rather than inheriting the
+  // previous venue's failure.
+  const [failedPhotoUrl, setFailedPhotoUrl] = useState<string | null>(null)
   const name = feature?.name?.trim()
   const title = name && name.length > 0 ? name : 'おすすめのお店'
 
@@ -298,6 +301,10 @@ export function RecommendationCard({
   const breakdown = score.score_breakdown
   const readings = breakdown ? readingsFromBreakdown(breakdown) : readingsFromFlatScore(score)
   const gapNote = breakdown ? scoreDataGapNote(breakdown) : null
+  // Decorative: the name is already the heading right below it, so an alt text repeating it
+  // would make a screen reader announce the venue twice. Hence alt="" and no role.
+  const photoUrl = feature?.photo_url?.trim() || null
+  const photoFailed = photoUrl !== null && photoUrl === failedPhotoUrl
 
   return (
     <AppCard>
@@ -305,8 +312,34 @@ export function RecommendationCard({
         className="flex flex-col gap-md"
         data-testid={`recommendation-card-${score.restaurant_place_id}`}
       >
-        <div className="flex h-[150px] items-center justify-center rounded-card bg-accent-soft">
-          <ForkKnifeIcon className="size-[42px] text-accent" />
+        {/*
+          The venue's own photo when Hot Pepper supplied one, and the same accent block as
+          before when it did not. Absence is the NORMAL case, not an error: only venues matched
+          to a Hot Pepper shop by exact phone have an image, which was about 60% in live
+          measurement, and the mock fixture has none at all. So the fallback is the original
+          design rather than a broken-image frame or an empty gap.
+
+          `object-cover` on a 168x168 source in a full-width 150px band means a mild upscale on
+          a retina screen. That is the size Recruit publishes for this slot; switching the
+          extractor to `photo.pc.l` (238x238) is a one-line change if it ever looks too soft.
+
+          A URL that 404s or is blocked falls back to exactly the same block — a stale image
+          host must not leave a broken frame in the middle of the card.
+        */}
+        <div className="flex h-[150px] items-center justify-center overflow-hidden rounded-card bg-accent-soft">
+          {photoUrl && !photoFailed ? (
+            <img
+              src={photoUrl}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              onError={() => setFailedPhotoUrl(photoUrl)}
+              className="size-full object-cover"
+              data-testid="venue-photo"
+            />
+          ) : (
+            <ForkKnifeIcon className="size-[42px] text-accent" />
+          )}
         </div>
 
         <div className="flex items-start justify-between gap-sm">

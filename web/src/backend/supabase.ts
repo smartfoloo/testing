@@ -618,7 +618,7 @@ export class SupabaseBackend implements Backend {
         // display it, and Places requires that the per-place credits it returns are shown
         // with the content they belong to (0023).
         .select(
-          'place_id, name, price_yen_estimate, room_type, cuisine_tags, atmosphere_tags, provider_attributions',
+          'place_id, name, price_yen_estimate, room_type, cuisine_tags, atmosphere_tags, provider_attributions, photo_url',
         )
         .in('place_id', placeIds),
     )

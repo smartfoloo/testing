@@ -357,6 +357,12 @@ struct RestaurantFeature: Codable, Identifiable, Hashable {
     let roomType: String?
     let cuisineTags: [String]
     let atmosphereTags: [String]
+    /// `photo.pc.m` from Hot Pepper (168x168, on Recruit's image host), supplied by their API
+    /// for display and already covered by the Recruit credit under the shortlist. Nil for the
+    /// venues no Hot Pepper shop was matched to, so the card treats absence as normal rather
+    /// than as an error. Never a Google Places photo (separate paid SKU, own per-image
+    /// attribution) and never a Tabelog image.
+    let photoUrl: String?
 
     var id: String { placeId }
 
@@ -371,6 +377,7 @@ struct RestaurantFeature: Codable, Identifiable, Hashable {
         case roomType = "room_type"
         case cuisineTags = "cuisine_tags"
         case atmosphereTags = "atmosphere_tags"
+        case photoUrl = "photo_url"
     }
 }
 

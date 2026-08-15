@@ -47,6 +47,15 @@
 //     third-party attributions the API returns are retrieved and displayed; neither
 //     field mask asked for them, so the data was not held anywhere a client could
 //     read it. Elements are stored exactly as the provider sent them.
+//   * Hot Pepper's `photo.pc.m` is recorded as restaurant_features.photo_url
+//     (migration 0028). Same story as `non_smoking` before 0023: it was already on
+//     the wire — no `lite` parameter is sent, so the full shop object arrives — and
+//     was discarded because HotPepperShop never declared it. It is a sanctioned API
+//     field supplied for display by a provider we already credit, and the image
+//     stays on Recruit's own host, so we store a URL and never a copy. Only an
+//     https URL on that host is accepted (hotPepperPhotoUrl); a Google Places photo
+//     is a separate paid SKU with its own per-image attribution and is never
+//     requested, and a Tabelog image is never taken at all — see hotPepperPhotoUrl.
 //
 // ============================================================================
 // TABELOG (食べログ) IS A THIRD ENRICHMENT PROVIDER, AND THE ONLY ONE WITH NO API.
@@ -73,6 +82,12 @@
 //   * robots.txt IS HONOURED BY A GUARD IN CODE, not by convention:
 //     tabelogUrlAllowed() below carries Tabelog's current `User-agent: *`
 //     Disallow list and every request goes through it, including after redirects.
+//   * THE DINNER BUDGET BAND (migration 0028) COSTS NO ADDITIONAL REQUEST. It is
+//     read out of the venue page tabelogResolve already downloads, in the same
+//     parse as the score — see tabelogDinnerBudgetYen. Every limit above is
+//     therefore untouched: same five-venue cap, same >=2 s gap, same 15-request
+//     ceiling, same 24 h cache. A new FIELD off a page we already have is not a
+//     new page, and nothing in this file may ever be changed to make it one.
 // ============================================================================
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -252,6 +267,19 @@ interface Candidate {
    * clear a stale credit. See fn_record_provider_attributions in migration 0023.
    */
   attributions: unknown[] | null;
+  /**
+   * Hot Pepper's `photo.pc.m` (168x168, ~40 KB) for this venue, or null when no Hot Pepper
+   * shop was matched to it or the field held nothing we are willing to display. See
+   * hotPepperPhotoUrl for why the host is checked and why no other provider's image is
+   * eligible.
+   *
+   * The load-bearing distinction is NOT null-vs-non-null on this field but whether the
+   * candidate was matched at all, which `hotpepper_id` already records: the write payload
+   * carries the `photo_url` key if and only if `hotpepper_id` is set, so a matched shop that
+   * no longer offers a photograph RETRACTS a stale URL, while an unmatched candidate leaves
+   * whatever is stored alone. See fn_record_provider_photo in migration 0028.
+   */
+  photo_url: string | null;
   location: LatLng | null;
   /**
    * `places.nationalPhoneNumber`, as Google formats it (`03-1234-5678`). Held only to resolve
@@ -478,6 +506,10 @@ async function searchRestaurants(
         // Hot Pepper is the only provider with a smoking field; a candidate that
         // is never matched below keeps null, which records nothing.
         hotpepper_non_smoking: null,
+        // Likewise the photograph: Places has one, but only behind a separate paid SKU with
+        // its own per-image attribution, and we do not request it. A candidate never matched
+        // in Hot Pepper therefore has no photo and its key is omitted from the write.
+        photo_url: null,
         phone: typeof p.nationalPhoneNumber === "string"
           ? p.nationalPhoneNumber
           : null,
@@ -655,8 +687,67 @@ interface HotPepperShop {
   // purpose: see hotPepperNonSmokingText's second comment block and section B of
   // migration 0023 for why it cannot honestly justify any accessibility tag.
   barrier_free?: string;
+  // 店舗写真. Three sizes on Recruit's own image host: pc.l is 238x238, pc.m is 168x168
+  // (~40 KB) and pc.s is a 58x58 avatar. `m` is the one taken — see hotPepperPhotoUrl.
+  // `mobile` is not declared because we have no mobile-specific surface to serve it to.
+  photo?: { pc?: { l?: string; m?: string; s?: string } };
   lat?: string;
   lng?: string;
+}
+
+/** Longest photo URL we will store. Recruit's are ~70 characters, so this is generous; it
+ * exists so a pathological value cannot be written into a column a client puts in an
+ * `<img src>`, and it is the same ceiling migration 0028's CHECK enforces. */
+const HOTPEPPER_PHOTO_URL_MAX_CHARS = 500;
+
+/**
+ * The shape a stored photo URL must have, character for character the CHECK constraint
+ * `restaurant_features_photo_url_recruit_https` in migration 0028. Restating it here rather
+ * than trusting the database is the same discipline 0027 applies to `tabelog_id`: a value this
+ * function accepts can never violate the column's constraint, so a provider anomaly degrades
+ * one card's photograph instead of failing the whole search on a check violation.
+ *
+ * `hotp.jp` with an optional subdomain is Recruit's own image host (`imgfp.hotp.jp` today).
+ */
+const RECRUIT_PHOTO_URL_SHAPE = /^https:\/\/([a-z0-9-]+\.)*hotp\.jp\/\S*$/;
+
+/**
+ * Hot Pepper's 168x168 shop photograph, or null.
+ *
+ * WHY THIS FIELD IS FREE, AND WHY IT CREATES NO NEW OBLIGATION. It is already in the
+ * `gourmet/v1` response for every shop we matched — the request sets no `lite` parameter, so
+ * the full shop object arrives — so no extra call is made. It is a field Recruit supplies FOR
+ * DISPLAY, from a provider whose credit the shortlist already shows (migration 0023 records
+ * provider_attributions precisely so that credit is displayable), and the image is served from
+ * Recruit's own host: we store a URL, never a copy.
+ *
+ * `pc.m` and not `pc.l` or `pc.s`: a card shows a thumbnail, 238x238 is more bytes than a
+ * thumbnail needs, and 58x58 is an avatar.
+ *
+ * WHY THE HOST IS CHECKED RATHER THAN TRUSTED, AND WHY NO OTHER PROVIDER'S IMAGE IS ELIGIBLE:
+ *   * A GOOGLE PLACES PHOTO IS NOT TAKEN. Places photos are a separate, separately billed SKU
+ *     whose media URLs carry their own per-photo attribution requirements, and this function's
+ *     field mask never asks for `photos` at all — so there is nothing here to take even by
+ *     accident.
+ *   * A TABELOG IMAGE IS NEVER TAKEN. Tabelog's photo pages are on this file's OWN stricter
+ *     disallow list (TABELOG_SELF_DISALLOW contains `dtlphotolst`), the photographs are
+ *     user-submitted and are not Tabelog's to license onward, and its terms forbid reproducing
+ *     its content without prior written consent we do not have. Putting a tabelog.com image
+ *     URL in a client's `<img src>` would be exactly that reproduction, performed by the
+ *     reader's browser on our instruction.
+ *   * So the only host this can ever be is Recruit's, and that is enforced by a pattern rather
+ *     than asserted in a comment — here and again by a CHECK in the database.
+ * Anything else — an http URL, another host, whitespace, an over-long value, a non-string —
+ * records null, which is "this venue has no photograph we may show", not an error.
+ */
+function hotPepperPhotoUrl(shop: HotPepperShop): string | null {
+  const raw = shop.photo?.pc?.m;
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (value.length === 0 || value.length > HOTPEPPER_PHOTO_URL_MAX_CHARS) {
+    return null;
+  }
+  return RECRUIT_PHOTO_URL_SHAPE.test(value) ? value : null;
 }
 
 /**
@@ -829,11 +920,18 @@ function hotPepperBudgetYen(shop: HotPepperShop): number | null {
 // partner agreement.
 //
 // WHAT IS TAKEN, EXHAUSTIVELY: the Tabelog id, the venue name, its score, its review COUNT,
-// and its telephone number (used for the identity check and never persisted). Nothing else.
+// the upper bound of its DINNER budget band, and its telephone number (used for the identity
+// check and never persisted). Nothing else.
 // No review text — not one character, not in a column, not in the raw-payload cache, not in a
-// log line. No menus, no courses, no reservation URLs: each was considered and deliberately
-// left out, because every extra field is more of somebody else's content held without their
-// consent for no additional decision this app actually makes.
+// log line. No menus, no courses, no reservation URLs, no photographs: each was considered and
+// deliberately left out, because every extra field is more of somebody else's content held
+// without their consent for no additional decision this app actually makes.
+//
+// The dinner budget (migration 0028) was added to that list on exactly those terms and no
+// others: it is on the venue page this code ALREADY downloads, it is read in the SAME parse, it
+// costs NO additional request, and it answers a question the app genuinely asks — what a 飲み会
+// at this venue costs per head. The lunch band on the same page is NOT read, because nobody
+// here is having lunch.
 //
 // The URL patterns below were cross-checked against narumiruna/gurume (MIT,
 // github.com/narumiruna/gurume), which is the same site read from Python. Only the URL shapes
@@ -1132,11 +1230,17 @@ interface TabelogVenue {
   phone: string | null;
   rating: number | null;
   review_count: number | null;
+  /**
+   * The upper bound of the DINNER budget band, in yen, or null (`-`, absent, unparseable, or
+   * open-ended at the top). Read off THIS page, in THIS parse, so it costs no request — see
+   * tabelogDinnerBudgetBand and tabelogBudgetYen. Lunch is deliberately never read.
+   */
+  budget_yen: number | null;
   source_url: string;
 }
 
 /**
- * One venue page, reduced to five scalars.
+ * One venue page, reduced to six scalars.
  *
  * WHERE THE NUMBERS COME FROM, AND HOW THE SELECTOR WAS VALIDATED. Each page carries a
  * schema.org `Restaurant` object in a `<script type="application/ld+json">` block, and the
@@ -1147,6 +1251,12 @@ interface TabelogVenue {
  *   review count  ld+json `aggregateRating.ratingCount`   (note: NOT `reviewCount`, which
  *                 Tabelog does not emit)
  *                 <i>口コミ</i><em class="num">360</em>人
+ *   dinner budget c-rating-v3__time--dinner -> <span class="c-rating-v3__val">￥8,000～￥9,999
+ *                 There is no schema.org counterpart to cross-check it against — the ld+json
+ *                 block carries no price band — so this one has a single source, and the
+ *                 selector is narrowly anchored on the DINNER marker for that reason. See
+ *                 tabelogDinnerBudgetBand for the five venues it was validated against and
+ *                 tabelogBudgetYen for why the top of the band is the figure taken.
  *
  * They were checked against each other on six live venues spanning 3.08 to 4.24 (Shinjuku
  * A1304/A130401 plus the venue in the earlier session's notes) and agreed exactly on all six,
@@ -1248,6 +1358,7 @@ function tabelogParseVenue(
       sourceUrl,
       incidents,
     ),
+    budget_yen: tabelogBudgetYen(tabelogDinnerBudgetBand(html)),
     source_url: sourceUrl,
   };
 }
@@ -1293,6 +1404,131 @@ function tabelogReviewCount(value: unknown): number | null {
   return Math.round(num);
 }
 
+/**
+ * How far past a dinner marker we will look for a band value, in characters. Measured against
+ * the live markup below, the whole dinner block is ~300 characters and the LUNCH marker follows
+ * it about 430 characters later — so the real bound is the lunch marker and this is only a
+ * backstop for a page that has no lunch band at all. It exists so a dinner block with no value
+ * cannot fall through and pick up the lunch block's, which would answer a dinner question with
+ * a lunch price; on the venues sampled the two differ by a factor of three.
+ */
+const TABELOG_BUDGET_SEARCH_WINDOW_CHARS = 600;
+
+/**
+ * The DINNER budget band's text as Tabelog prints it (`￥8,000～￥9,999`, or `-`), or null.
+ *
+ * THE SELECTOR IS c-rating-v3__time--dinner -> <span class="c-rating-v3__val">, and this is the
+ * markup it has to survive, copied from a live venue page:
+ *
+ *   <p class="c-rating-v3 c-rating-v3--s rdheader-budget__icon">
+ *     <i class="c-rating-v3__time c-rating-v3__time--dinner" aria-label="Dinner" role="img"></i>
+ *     <span class="c-rating-v3__val">
+ *       <a href="…/dtlratings/#price-range" class="rdheader-budget__price-target"
+ *          >￥6,000～￥7,999</a>
+ *     </span>
+ *   <p class="c-rating-v3 c-rating-v3--s rdheader-budget__icon">
+ *     <i class="c-rating-v3__time c-rating-v3__time--lunch" …></i>
+ *     <span class="c-rating-v3__val"><a …>-</a></span>
+ *
+ * TWO THINGS THAT ARE EASY TO GET WRONG AND WERE:
+ *   * the figure is NESTED IN AN <a>, not a text node of the span, so the span's content is
+ *     taken whole and its tags stripped. A `[^<]*` capture matches the empty string here and
+ *     silently records "no band" for every venue on earth;
+ *   * `c-rating-v3__time--dinner` occurs FIVE times on a typical page. Once in the header
+ *     budget (this one), once in the 予算 table further down, and once per pickup review card —
+ *     and a review card's marker is followed by a star icon, never a `__val` span. So every
+ *     occurrence is tried in document order and the first one that yields a non-empty value
+ *     wins, rather than trusting the header to stay first.
+ *
+ * DINNER ONLY, deliberately. This app plans 飲み会: the group eats dinner, so a lunch figure is
+ * a number about a meal nobody here is having. Each window is cut at the next `--lunch` marker
+ * so the lunch band cannot be reached even by accident.
+ *
+ * THE SAME FIGURE APPEARS AGAIN in the 予算（口コミ集計） table row as
+ * `rstinfo-table__budget-item` + `<em>￥6,000～￥7,999</em>`, and is deliberately NOT read as a
+ * cross-check. The score's cross-check (tabelogCrossCheck) is worth having because ld+json is
+ * an independent REPRESENTATION produced by a different code path; two renderings of the same
+ * template field are not independent evidence, and a second selector is a second thing to
+ * break.
+ *
+ * NO ADDITIONAL REQUEST IS MADE. This runs on the HTML tabelogParseVenue already holds.
+ */
+function tabelogDinnerBudgetBand(html: string): string | null {
+  for (const marker of html.matchAll(/c-rating-v3__time--dinner/g)) {
+    const from = marker.index ?? 0;
+    const lunch = html.indexOf("c-rating-v3__time--lunch", from);
+    const end = Math.min(
+      lunch < 0 ? html.length : lunch,
+      from + TABELOG_BUDGET_SEARCH_WINDOW_CHARS,
+    );
+    const value = html.slice(from, end).match(
+      /<span class="c-rating-v3__val">([\s\S]*?)<\/span>/,
+    )?.[1];
+    if (value === undefined) continue;
+    const text = value.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+    if (text.length > 0) return text;
+  }
+  return null;
+}
+
+/**
+ * The upper bound of a Tabelog budget band, in yen, or null.
+ *
+ * THE UPPER BOUND, for the same reason placesPriceYen takes Google's `endPrice` and
+ * hotPepperBudgetYen takes the top of 「3001〜4000円」: a budget MUST asks 「max_yen」, so the
+ * only honest reduction of ￥8,000～￥9,999 to one number is 9999 — the answer to
+ * 「is it under ￥9,000?」 has to be NO. Reporting the floor would quietly promise somebody a
+ * bill they never agreed to.
+ *
+ * NULL, NEVER 0, for `-` / absent / unparseable. Tabelog prints 「-」 when a venue publishes no
+ * dinner band, and NULL is 「we do not know what dinner costs here」 — a state 0021 already
+ * handles (a NULL price fails a budget MUST closed and is reported as coverage). A 0 would say
+ * the venue is free, which is both wrong and flattering.
+ *
+ * WHAT IS STRIPPED, and nothing else: the currency mark, thousands separators, and the
+ * full-width tilde Tabelog uses as its range separator (U+FF5E; the visually identical wave
+ * dash U+301C is accepted too, because which of the two a page carries depends on the encoder,
+ * not on the venue). FULL-WIDTH DIGITS ARE NOT ACCEPTED: the test is ASCII `[0-9]+` only, so
+ * 「￥８,０００」 records NULL rather than a guess — the same line 0027's tests already drew
+ * when they established that 「４.２」 is not read as 4.2.
+ *
+ * An open-ended TOP (`￥50,000～`) has no upper bound to take, so it is NULL — hotPepperBudgetYen
+ * makes the same call about 「5001円以上」. An open-ended BOTTOM (`～￥999`) does have one, and 999
+ * is a perfectly good answer, so that form is read.
+ */
+function tabelogBudgetYen(band: string | null): number | null {
+  if (band === null) return null;
+  const text = band.trim();
+  if (text.length === 0) return null;
+  // Tabelog's "no band" mark, in the four dashes a page might carry it as.
+  if (/^[-−–—－]$/.test(text)) return null;
+  const parts = text.replace(/[￥¥,，]/g, "").split(/[～〜~]/);
+  if (parts.length > 2) return null;
+  const upper = parts[parts.length - 1].trim();
+  if (!/^[0-9]+$/.test(upper)) return null;
+  // A lower bound that is present but unreadable means we do not understand the band at all,
+  // so we do not get to keep the half of it we liked.
+  if (parts.length === 2) {
+    const lower = parts[0].trim();
+    if (lower.length > 0 && !/^[0-9]+$/.test(lower)) return null;
+  }
+  const yen = Number(upper);
+  if (!Number.isFinite(yen) || yen <= 0) return null;
+  return Math.round(yen);
+}
+
+/** A yen figure read back out of the resolution CACHE, where it is already a number. Mirrors
+ * tabelogReviewCount's job for the count: a cached payload is ours, but it is still parsed
+ * rather than trusted, because it may have been written by an older version of this file. 0 is
+ * not a legal value (migration 0028's CHECK), so it is refused here too. */
+function tabelogStoredYen(value: unknown): number | null {
+  const num = typeof value === "number" ? value : Number(
+    typeof value === "string" ? value : NaN,
+  );
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return Math.round(num);
+}
+
 /** The subset of a shortlisted candidate tabelogResolve needs. Cached candidates are not
  * `Candidate` objects, so this is the shape both paths can produce. */
 interface TabelogCandidate {
@@ -1307,6 +1543,8 @@ interface TabelogResolution {
   tabelog_id: string;
   rating: number | null;
   review_count: number | null;
+  /** The dinner band's upper bound in yen, or null. Same page, same parse, no extra request. */
+  budget_yen: number | null;
   name: string | null;
   matched_by: "phone_search" | "name_search";
   source_url: string;
@@ -1397,6 +1635,7 @@ async function tabelogResolve(
       tabelog_id: venue.tabelog_id,
       rating: venue.rating,
       review_count: venue.review_count,
+      budget_yen: venue.budget_yen,
       name: venue.name,
       matched_by: attempt.matchedBy,
       source_url: venue.source_url,
@@ -1924,6 +2163,12 @@ Deno.serve(async (req: Request) => {
           best.hotpepper_non_smoking = hotPepperNonSmokingText(
             shop.non_smoking,
           );
+          // Assigned rather than `??`-merged for the same reason: Places contributes no
+          // photograph (its own is a separate paid SKU we never request), so there is no
+          // earlier value in this run to preserve. Staying null here does NOT leave a stale URL
+          // alone — this candidate is matched, so the write below sends the key and null
+          // retracts. See fn_record_provider_photo in migration 0028.
+          best.photo_url = hotPepperPhotoUrl(shop);
           // Hot Pepper's genre is Japanese and often compounded (「イタリアン・フレンチ」), so it
           // is translated into the same closed vocabulary and merged rather than appended raw —
           // otherwise it joined Google's identifier in matching nothing. Re-canonicalising the
@@ -1970,6 +2215,13 @@ Deno.serve(async (req: Request) => {
   // for smoking that is the common case, because only candidates MATCHED in Hot
   // Pepper have any answer at all and a Places-only candidate must not erase a
   // policy an earlier matched run recorded. 0017's writer ignores both keys.
+  //
+  // `photo_url` (migration 0028) is the fourth, with one difference worth stating: its key is
+  // gated on `hotpepper_id` rather than on the value being non-null. Being MATCHED is what
+  // makes Hot Pepper's silence an answer — a matched shop with no photograph should retract a
+  // URL we stored last week, while an unmatched candidate (about 40% of live venues, because
+  // the join is an exact telephone match and nothing weaker) has learned nothing and must not
+  // erase anything.
   if (fetchedCandidates.length > 0) {
     const candidatePayload = fetchedCandidates.map((c) => ({
       place_id: c.place_id,
@@ -1990,6 +2242,7 @@ Deno.serve(async (req: Request) => {
         ? {}
         : { hotpepper_non_smoking: c.hotpepper_non_smoking }),
       ...(c.attributions === null ? {} : { attributions: c.attributions }),
+      ...(c.hotpepper_id === null ? {} : { photo_url: c.photo_url }),
     }));
     const { error: recordErr } = await supabase.rpc(
       "fn_record_provider_candidates",
@@ -2027,6 +2280,26 @@ Deno.serve(async (req: Request) => {
       { p_event_id: eventId, p_candidates: candidatePayload },
     );
     if (attributionErr) return json({ error: attributionErr.message }, 500);
+
+    // NOT surfaced as a 500, unlike the four above. Those decide the shortlist or a licence
+    // obligation; a missing thumbnail changes nothing about which venues the group is shown or
+    // what has to be credited alongside them (Recruit's credit rides on
+    // provider_attributions, which is written above and IS fatal). Failing an entire search
+    // over a photograph would make the search less reliable than the data is worth, so this
+    // one is recorded as a provider incident and the shortlist is returned.
+    const { error: photoErr } = await supabase.rpc(
+      "fn_record_provider_photo",
+      { p_event_id: eventId, p_candidates: candidatePayload },
+    );
+    if (photoErr) {
+      recordIncident(
+        incidents,
+        "hotpepper",
+        "gourmet.photo.record",
+        null,
+        photoErr.message,
+      );
+    }
   }
 
   // The zones this run actually searched (PRD §15), and the freshness signal for
@@ -2227,11 +2500,18 @@ Deno.serve(async (req: Request) => {
     //
     // WHICH five, when more than five are feasible, is a REQUEST BUDGET and not a ranking. The
     // order is place_id, which is stable and arbitrary on purpose: the shortlist the group
-    // actually sees is decided later by fn_score_feasible_candidates, and since nothing here
-    // feeds scoring (migration 0027 is explicit that it must not), choosing a different five
-    // changes only which venues carry displayable Tabelog data. Ordering them by some quality
-    // guess of our own would be inventing a second opinion about ranking, in the one place
-    // that has no business having one.
+    // actually sees is decided later by fn_score_feasible_candidates, and ordering these five
+    // by some quality guess of our own would be inventing a second opinion about ranking, in
+    // the one place that has no business having one.
+    //
+    // SINCE MIGRATION 0028 THIS CHOICE DOES REACH SCORING, and the honest statement of the
+    // consequence is: a venue we resolved on Tabelog is scored on two providers' percentiles
+    // and a venue we did not is scored on Google's alone. That is why 0028 blends RANKS rather
+    // than raw scores — the ranks are what make the two comparable, so being in this five
+    // changes how much evidence a venue's quality rests on without shifting its level up or
+    // down. `tabelog_ranked_candidates` in every score_breakdown records how large the Tabelog
+    // pool actually was, so a client (or a reviewer) can see exactly how much weight this
+    // arbitrary five is carrying rather than having to infer it.
     const shortlist: string[] = [];
     for (const placeId of [...activePlaceIds].sort()) {
       if (shortlist.length >= TABELOG_MAX_VENUES) break;
@@ -2279,6 +2559,11 @@ Deno.serve(async (req: Request) => {
           tabelog_id: payload.tabelog_id,
           rating: tabelogRating(payload.rating),
           review_count: tabelogReviewCount(payload.review_count),
+          // Absent on rows written before migration 0028, which is exactly the "we have no
+          // band for this venue" state and needs no special case: a cache hit costs zero
+          // requests and re-reading the page for a field alone would be the one thing the
+          // 24-hour TTL exists to prevent.
+          budget_yen: tabelogStoredYen(payload.budget_yen),
           name: typeof payload.name === "string" ? payload.name : null,
           matched_by: payload.matched_by === "name_search"
             ? "name_search"
@@ -2380,6 +2665,7 @@ Deno.serve(async (req: Request) => {
             name: resolution.name,
             rating: resolution.rating,
             review_count: resolution.review_count,
+            budget_yen: resolution.budget_yen,
             matched_by: resolution.matched_by,
             phone_match: "exact",
             source_url: resolution.source_url,
@@ -2390,9 +2676,12 @@ Deno.serve(async (req: Request) => {
 
     // 12e. The write. One element per shortlisted venue, and the `tabelog` key present ONLY
     // for the ones whose identity was confirmed — the same present/absent contract 0022 and
-    // 0023 use, and the reason an unresolved venue is left NULL instead of guessed. The three
-    // columns are Tabelog's own (migration 0027); `rating` and `user_rating_count` remain
-    // Google's and are not touched here.
+    // 0023 use, and the reason an unresolved venue is left NULL instead of guessed. The four
+    // columns are Tabelog's own (0027's three plus 0028's tabelog_budget_yen); `rating`,
+    // `user_rating_count` and `price_yen_estimate` remain Google's and Hot Pepper's and are
+    // not touched here. tabelog_budget_yen in particular is NOT price_yen_estimate: the budget
+    // MUST is decided against a figure we hold under terms that permit it, and conflating the
+    // two providers is what 0027 exists to avoid.
     if (shortlist.length > 0) {
       const { error: tabelogErr } = await supabase.rpc(
         "fn_record_tabelog_enrichment",
@@ -2408,6 +2697,7 @@ Deno.serve(async (req: Request) => {
                     tabelog_id: resolution.tabelog_id,
                     rating: resolution.rating,
                     review_count: resolution.review_count,
+                    budget_yen: resolution.budget_yen,
                   },
                 }
                 : {}),

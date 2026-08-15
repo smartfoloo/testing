@@ -745,6 +745,17 @@ export function scoreDimensionEvidence(
       if (quality.method === 'atmosphere_tag_proxy') {
         return `口コミ評価が取れていないため、雰囲気タグ${quality.atmosphere_tags}件からの暫定値です。低い評価という意味ではありません。`
       }
+      // Each provider is named, because 0028 blends them by percentile rather than averaging
+      // their scores — Google's median over the same venues is 4.40 against Tabelog's 3.22, so
+      // presenting one combined figure would imply a comparison that was never made.
+      if (quality.method === 'google_and_tabelog') {
+        return `Google の口コミ${quality.rating}（${quality.user_rating_count}件）と、食べログ${quality.tabelog_rating}（${quality.tabelog_review_count}件）を、それぞれの評価の付き方の違いをふまえて見ています。`
+      }
+      // Tabelog resolved a venue Google discovered but never rated. Without this branch the
+      // line below would read 「口コミnull（null件）」, since `rating` is Google's alone.
+      if (quality.method === 'tabelog_only') {
+        return `Google の口コミ評価がないため、食べログ${quality.tabelog_rating}（${quality.tabelog_review_count}件）をもとに、件数の少なさを補正して見ています。`
+      }
       return `口コミ${quality.rating}（${quality.user_rating_count}件）をもとに、件数の少なさを補正して見ています。`
     case 'cost_fit':
       if (cost.price_yen === null) {

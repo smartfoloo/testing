@@ -241,7 +241,22 @@ export type ObjectiveWeights = Record<ScoreDimension, number>
  * the real signal; `atmosphere_tag_proxy` is the legacy tag-richness stand-in used when
  * the provider gave us no rating, and it is deliberately capped below any real rating.
  */
-export type QualityMethod = 'rating_bayesian_shrunk' | 'atmosphere_tag_proxy'
+/**
+ * How the quality dimension was arrived at (0028 widened this; `rating_bayesian_shrunk` was
+ * 0016's single rated method and is now `google_only`).
+ *
+ * The two rating providers are NOT averaged: Google's median over the same twenty Shinjuku
+ * izakaya is 4.40 against Tabelog's 3.22, so a raw mean would rank venues by whether we
+ * happened to resolve them. Each provider's score becomes a percentile within the feasible
+ * candidates it scored, and the available percentiles are averaged — a median venue on either
+ * provider lands at 0.5. The method says which providers actually contributed, so the card can
+ * explain the number instead of asserting it.
+ */
+export type QualityMethod =
+  | 'google_only'
+  | 'google_and_tabelog'
+  | 'tabelog_only'
+  | 'atmosphere_tag_proxy'
 
 /**
  * `recommendation_scores.score_breakdown`. PRD §9: never present one opaque universal
@@ -271,11 +286,24 @@ export interface ScoreBreakdown {
   quality: {
     score: number
     method: QualityMethod
+    /** Google's raw score and volume. Google's alone — Tabelog's live in their own keys. */
     rating: number | null
     user_rating_count: number | null
     prior_rating: number
     prior_reviews: number
     atmosphere_tags: number
+    /* 0028 provenance: what each provider contributed, so the blend can be shown rather than
+     * asserted. All optional — a run recorded before 0028 carries none of them. */
+    google_shrunk?: number | null
+    google_percentile?: number | null
+    google_ranked_candidates?: number | null
+    tabelog_rating?: number | null
+    tabelog_review_count?: number | null
+    tabelog_prior_rating?: number | null
+    tabelog_shrunk?: number | null
+    tabelog_percentile?: number | null
+    tabelog_ranked_candidates?: number | null
+    blended_percentile?: number | null
   }
   cost: {
     burden: number
@@ -330,6 +358,18 @@ export interface RestaurantFeature {
    * mock backend does not model provider payloads.
    */
   provider_attributions?: unknown[] | null
+  /**
+   * `photo.pc.m` from Hot Pepper's Gourmet response — a 168x168 thumbnail on Recruit's own
+   * image host, supplied by the API for display and already covered by the Recruit credit at
+   * the foot of the shortlist. Null for the ~40% of venues no Hot Pepper shop was matched to,
+   * and for every venue when the fixture is the mock, so the card must treat absence as the
+   * normal case rather than an error.
+   *
+   * Deliberately NOT a Google Places photo (a separate paid SKU with its own per-image
+   * attribution) and never a Tabelog image (its photo pages are on the scraper's own
+   * disallow list, and the images are not Tabelog's to license).
+   */
+  photo_url?: string | null
 }
 
 /** `run_updated` broadcast payload from the `trg_broadcast_run` trigger. */
