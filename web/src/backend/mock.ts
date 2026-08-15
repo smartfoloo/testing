@@ -2,7 +2,8 @@
  * In-browser stand-in for the Supabase backend, used when no credentials are configured.
  *
  * It reproduces, in order of importance:
- *  - the deterministic engine (see engine.ts, ported from 0009_review_function_replacements.sql);
+ *  - the deterministic engine (see engine.ts, ported from 0009_review_function_replacements.sql,
+ *    0016_scoring_and_objective.sql and 0021_must_coverage_and_proposal_integrity.sql);
  *  - the authorization guards the security definer RPCs raise ('not a participant of this
  *    event', 'only the organizer can choose the restaurant', 'negotiation already resolved');
  *  - the sanitized broadcast contract from 0004 — PRIVATE rows are never emitted and
@@ -62,6 +63,10 @@ import type {
  * snapshot re-seeds instead of running with columns the engine now expects. v2 added
  * travel_matrix_cache legs, events.preferences_closed_at and the derived constraint
  * metadata. The user key is separate so the current identity survives a re-seed.
+ *
+ * 0021's `smoking_policy` deliberately does NOT need a bump: it is optional and an absent
+ * value means "unconfirmed", which is exactly what a v2 snapshot (and seed.sql) implies, so
+ * an existing snapshot keeps evaluating identically instead of throwing the user's event away.
  */
 const STORAGE_KEY = 'matomeshi.mock.db.v2'
 const USER_KEY = 'matomeshi.mock.user.v1'
@@ -134,6 +139,12 @@ export function createSeedDb(): Db {
     atmosphere_tags: atmosphere,
     travel_minutes_by_participant: travel,
     fetched_at: at(0),
+    // Exactly as seed.sql leaves them: no accessibility tags and no smoking policy. Both
+    // MUST types are fail-closed since 0021, so claiming either here would be inventing
+    // venue facts — and the five personas state neither requirement, so the 0-then-3
+    // invariant is untouched.
+    accessibility_tags: [],
+    smoking_policy: null,
   })
 
   return {
@@ -141,9 +152,9 @@ export function createSeedDb(): Db {
       {
         id: DEMO_EVENT_ID,
         name: 'Team 飲み会',
-        // seed.sql uses 'DEMO01', but fn_generate_invite_code only ever emits lowercase
-        // characters from INVITE_ALPHABET and the join screen lowercases what you type,
-        // so the uppercase seed value is unreachable through the UI. Seeded lowercase here.
+        // Identical to seed.sql, which used to seed 'DEMO01' — unreachable, because
+        // fn_generate_invite_code only ever emits lowercase characters from INVITE_ALPHABET
+        // and both join screens lowercase and clamp what you type. The seed now matches this.
         invite_code: 'demo01',
         organizer_participant_id: P.alice,
         objective: 'balanced',

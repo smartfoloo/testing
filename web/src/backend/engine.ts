@@ -1,23 +1,34 @@
 /**
  * TypeScript port of the deterministic feasibility / scoring / relaxation engine
- * defined in AIKanji/supabase/migrations/0009_review_function_replacements.sql and
- * 0016_scoring_and_objective.sql (which together supersede 0005_feasibility.sql).
+ * defined in AIKanji/supabase/migrations/0009_review_function_replacements.sql,
+ * 0016_scoring_and_objective.sql and 0021_must_coverage_and_proposal_integrity.sql
+ * (which together supersede 0005_feasibility.sql).
  *
  * This exists so the mock backend behaves the same as the real Postgres one: the LLM
  * never decides feasibility or which MUST gets relaxed, it is all deterministic here too.
  *
  * SQL semantics that are deliberately reproduced:
- *  - a MUST of a type with no branch below (smoking, accessibility, cuisine, atmosphere,
- *    other) is silently satisfied, exactly as the `if/elsif` chain does;
+ *  - every MUST type that can gate a venue has a branch: budget, room, dietary, allergy,
+ *    accessibility, smoking, travel_time. Before 0021 the last two fell through the
+ *    `if/elsif` chain and were SILENTLY MET, so 「車椅子で入れる店」 was ignored as a hard
+ *    requirement. Only the non-gating types (cuisine, atmosphere, other — they are scored,
+ *    not filtered) still pass by default;
+ *  - absent venue data is never satisfaction (PRD §11 "unknown ≠ supported"): dietary,
+ *    allergy, accessibility and smoking all fail closed on a venue we know nothing about,
+ *    and on a MUST whose own normalized_value cannot be read;
  *  - `(value->>'key')::int` on a missing key yields SQL NULL, and `x > NULL` is NULL,
  *    which `if` treats as false — so the MUST passes. `nullableInt` + `exceeds` model that;
+ *    since 0021 SQL reads those keys through fn_jsonb_int, which also yields NULL for a
+ *    non-numeric value instead of raising — i.e. SQL now matches `nullableInt`;
  *  - `is distinct from` is null-safe inequality;
  *  - `@>` is array containment, `&&` is array overlap;
  *  - travel minutes are read through one helper with the cache-then-feature precedence of
  *    `fn_travel_minutes` (0016), so an event never sees another event's travel times;
  *  - scoring is objective-weighted (`fn_objective_weights`), missing data is confined to a
  *    band below measured data (`fn_banded_score`), and a label is only written when the row
- *    genuinely leads that metric — otherwise the badge is dropped, never reassigned.
+ *    genuinely leads that metric — otherwise the badge is dropped, never reassigned;
+ *  - a relaxation proposal is idempotent per event (`fn_propose_relaxation`, 0021): the open
+ *    proposal is returned rather than duplicated, and a step already rejected is not re-asked.
  */
 
 import type {
@@ -129,6 +140,14 @@ export interface FeatureRow {
   user_rating_count?: number | null
   /** `restaurant_features.accessibility_tags` (0016). Absent = no data, never "supported". */
   accessibility_tags?: string[]
+  /**
+   * `restaurant_features.smoking_policy` (0021), the venue attribute a smoking MUST is
+   * judged against. Optional and nullable for the same reason the column is: no provider
+   * fills it yet, and absent/null means UNCONFIRMED — which fails a smoking MUST rather
+   * than satisfying it. 分煙 is recorded as null, not as a third value: we cannot certify
+   * from provider text which side of the partition the group would sit on.
+   */
+  smoking_policy?: 'non_smoking' | 'smoking_ok' | null
 }
 
 /** A row of `travel_matrix_cache` (event-scoped travel times, created by 0017). */
@@ -183,18 +202,66 @@ export interface Db {
 /* SQL-ish helpers                                                             */
 /* -------------------------------------------------------------------------- */
 
-/** `(jsonb->>'key')::int` — SQL NULL for a missing key or a non-numeric value. */
+/**
+ * `fn_jsonb_int(value, 'key')` (0021) — SQL NULL for a missing key or a non-numeric value.
+ * This port always behaved this way; 0021 replaced the raw `(value->>'key')::int` casts in
+ * SQL with the same rule, because a single `{"max_yen":"cheap"}` row raised
+ * invalid_text_representation and aborted the whole event's recompute. NULL is not a
+ * loophole: `x > NULL` is falsey, so an unreadable key leaves the MUST passing exactly as a
+ * missing key always did.
+ */
 function nullableInt(value: NormalizedValue, key: string): number | null {
   const raw = value[key]
   if (raw === undefined || raw === null) return null
-  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10)
-  return Number.isFinite(parsed) ? Math.trunc(parsed) : null
+  // fn_jsonb_int guards the cast with `~ '^-?[0-9]+(\.[0-9]+)?$'` on the text form, so
+  // "40abc" is NULL there rather than 40 as Number.parseInt would have it. Same rule here, so
+  // the two implementations cannot disagree about a hand-written value.
+  let numeric = Number.NaN
+  if (typeof raw === 'number') numeric = raw
+  else if (/^-?\d+(\.\d+)?$/.test(String(raw))) numeric = Number(raw)
+  if (!Number.isFinite(numeric)) return null
+  const truncated = Math.trunc(numeric)
+  // `::int`: a value outside the 32-bit range is reported as absent rather than silently
+  // becoming a different number. Both implementations then leave the MUST passing, because
+  // `x > null` is falsey — the same outcome a missing key has always had.
+  if (truncated < -2147483648 || truncated > 2147483647) return null
+  return truncated
 }
 
 /** `left > right` where a NULL right-hand side makes the whole predicate NULL (falsey). */
 function exceeds(left: number, right: number | null): boolean {
   if (right === null) return false
   return left > right
+}
+
+/** `(jsonb->>'key')` — the value's text form, or null for a missing key or a JSON null. */
+function nullableText(value: NormalizedValue, key: string): string | null {
+  const raw = value[key]
+  if (raw === undefined || raw === null) return null
+  return typeof raw === 'string' ? raw : JSON.stringify(raw)
+}
+
+/**
+ * `fn_jsonb_flag(value, key)` (0021): true only for a real JSON `true`. The flag is written
+ * by `relaxedValue`, so anything else in that key is malformed and must not widen a MUST.
+ */
+function flag(value: NormalizedValue, key: string): boolean {
+  return value[key] === true
+}
+
+/**
+ * Postgres `jsonb = jsonb`: key order is not part of the value. Used to recognise a
+ * relaxation step a participant already rejected. Our relaxation values are flat objects of
+ * scalars, which is the only shape this canonicalisation has to handle.
+ */
+function sameValue(left: NormalizedValue, right: NormalizedValue): boolean {
+  const canonical = (value: NormalizedValue) =>
+    JSON.stringify(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, value[key]]),
+    )
+  return canonical(left) === canonical(right)
 }
 
 function stringArray(value: NormalizedValue, key: string): string[] | null {
@@ -308,6 +375,36 @@ export function candidateIsFeasible(
           candidate.allergy_safe_tags,
           allergens.map((allergen) => `${allergen}_free`),
         )
+      ) {
+        return false
+      }
+    } else if (must.normalized_type === 'accessibility') {
+      // {"needs": string[]} against restaurant_features.accessibility_tags (0016). Same
+      // shape as dietary/allergy, and the same rule: a venue with no tags recorded is
+      // UNKNOWN, and unknown is not step-free. Before 0021 this MUST had no branch at all,
+      // so 「車椅子で入れる店」 was silently satisfied while also being un-negotiable.
+      const needs = stringArray(value, 'needs')
+      const venueTags = candidate.accessibility_tags ?? []
+      if (
+        needs === null ||
+        needs.length === 0 ||
+        venueTags.length === 0 ||
+        !contains(venueTags, needs)
+      ) {
+        return false
+      }
+    } else if (must.normalized_type === 'smoking') {
+      // {"preference": "non_smoking"|"smoking_ok"}, plus "accept_unknown": true once the
+      // participant has accepted the relaxation step (see relaxedValue). An unreadable
+      // preference is not a satisfied one, an unconfirmed venue only passes with the flag,
+      // and a venue KNOWN to have the other policy always fails.
+      const preference = nullableText(value, 'preference')
+      const policy = candidate.smoking_policy ?? null
+      if (
+        preference === null ||
+        (preference !== 'non_smoking' && preference !== 'smoking_ok') ||
+        (policy === null && !flag(value, 'accept_unknown')) ||
+        (policy !== null && policy !== preference)
       ) {
         return false
       }
@@ -534,9 +631,10 @@ function costBurden(db: Db, eventId: string, feature: FeatureRow): ScoreBreakdow
 }
 
 /**
- * Ports `fn_accessibility_burden`. Both MUST and WANT accessibility rows count: an
- * accessibility MUST is never enforced by fn_candidate_is_feasible and is never eligible
- * for relaxation either, so ranking is the only place the need can be honoured.
+ * Ports `fn_accessibility_burden`. Both MUST and WANT accessibility rows count. Since 0021 a
+ * MUST is also a hard gate in candidateIsFeasible, so this no longer carries the whole
+ * weight of the requirement — but a WANT still has nowhere else to be honoured, and among
+ * venues that all clear the MUST this is what orders "meets more of the group's needs" first.
  *
  * A venue with no accessibility data at all is treated as UNKNOWN — full burden — never as
  * "supported". The worst-affected request set decides, so one participant whose needs are
@@ -778,7 +876,31 @@ export function recomputeFeasibility(
 /* Relaxation                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** The single relaxation step the engine is willing to propose, per constraint type. */
+/**
+ * The single relaxation step the engine is willing to propose, per constraint type. Ports
+ * `fn_relaxed_value` (0021), which is also what `fn_propose_relaxation` compares a REJECTED
+ * proposal against — so "what would we offer" and "what did we offer" cannot drift.
+ *
+ *   room         private → semi_private (a divider instead of a door)
+ *   travel_time  +10 minutes
+ *   budget       +500 yen
+ *   smoking      keep the preference, accept an UNCONFIRMED venue
+ *
+ * WHY the smoking step is `accept_unknown` and nothing else: no provider fills
+ * `smoking_policy`, so a fail-closed smoking MUST is unsatisfiable and — with no step —
+ * `countUnlockedIfRelaxed` would return 0, no proposal would ever be offered, and the group
+ * would be left with zero candidates and no question to answer. What actually blocks those
+ * venues is missing data, not a known conflict, so the honest question is 「禁煙が確認できて
+ * いないお店も候補に入れてよいですか？」 (the constraint already carries
+ * verification_requirement = 'recommended', the UI's cue to suggest phoning the venue). It
+ * never trades away what was asked for: a venue known to be 喫煙可 still fails a
+ * non_smoking MUST afterwards. accessibility deliberately has NO step — it stays on
+ * NEVER_RELAXED, because accepting an unverified step-free entrance is accepting the risk of
+ * not getting in; there the escape hatch is human verification, not a negotiation.
+ *
+ * A type with no step returns its value unchanged, so countUnlockedIfRelaxed measures a
+ * no-op and reports 0 unlocked.
+ */
 export function relaxedValue(constraint: ConstraintRow): NormalizedValue {
   switch (constraint.normalized_type) {
     case 'room':
@@ -791,6 +913,14 @@ export function relaxedValue(constraint: ConstraintRow): NormalizedValue {
       const current = nullableInt(constraint.normalized_value, 'max_yen')
       return { max_yen: (current ?? 0) + 500 }
     }
+    case 'smoking':
+      // `(value->>'preference')` is carried over verbatim: an unreadable preference stays
+      // unreadable, so the relaxed value is still infeasible and never gets proposed. We do
+      // not invent a preference on somebody's behalf.
+      return {
+        preference: nullableText(constraint.normalized_value, 'preference'),
+        accept_unknown: true,
+      }
     default:
       return constraint.normalized_value
   }
@@ -823,18 +953,54 @@ export function countUnlockedIfRelaxed(db: Db, eventId: string, constraintId: st
  */
 const NEVER_RELAXED: NormalizedType[] = ['allergy', 'dietary', 'accessibility']
 
+/**
+ * Ports `fn_propose_relaxation` (0021), including its three idempotency rules:
+ *
+ *  1. an OPEN proposal is returned, never duplicated. Pressing 「条件に合うお店を探す」 four
+ *     times while feasible = 0 used to write four identical PROPOSED rows and ask the same
+ *     participant the same question four times, which the PRD forbids;
+ *  2. if the open proposal targets a DIFFERENT constraint than the one now judged best, the
+ *     open one still wins and nothing is written. Retargeting would withdraw a question
+ *     somebody is looking at, or put a second question to a second person while the first is
+ *     unanswered — and since each unlocked_count assumes every other MUST is unchanged, two
+ *     acceptances relax more than the group needed. Answering the open proposal takes it out
+ *     of PROPOSED and the next call re-ranks from scratch, so the better target is deferred
+ *     one round, not dropped;
+ *  3. a step already REJECTED is never offered again ("on rejection, keep the MUST and do not
+ *     pressure repeatedly"). Matched on (constraint, proposed value) rather than the
+ *     constraint alone, so "no" means no to THAT question: if the participant later edits
+ *     their own MUST the step differs and asking it is a new question, and a single "no" does
+ *     not blacklist the constraint forever and dead-end the event.
+ *
+ * In SQL rule 1 is additionally a partial unique index on `negotiations (event_id) where
+ * status = 'PROPOSED'`, so a concurrent double-press cannot slip past the check. There is no
+ * concurrency here (one JS event loop, one localStorage snapshot), so the check is the whole
+ * mechanism.
+ */
 export function proposeRelaxation(
   db: Db,
   eventId: string,
   newId: () => string,
   now: () => string,
 ): string | null {
+  // Reuse before propose.
+  const open = db.negotiations
+    .filter((row) => row.event_id === eventId && row.status === 'PROPOSED')
+    .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))[0]
+  if (open) return open.id
+
   const candidates = db.constraints
     .filter(
       (constraint) =>
         constraint.event_id === eventId &&
         constraint.kind === 'MUST' &&
-        !NEVER_RELAXED.includes(constraint.normalized_type),
+        !NEVER_RELAXED.includes(constraint.normalized_type) &&
+        !db.negotiations.some(
+          (row) =>
+            row.constraint_id === constraint.id &&
+            row.status === 'REJECTED' &&
+            sameValue(row.proposed_value, relaxedValue(constraint)),
+        ),
     )
     .sort((a, b) => a.id.localeCompare(b.id))
 

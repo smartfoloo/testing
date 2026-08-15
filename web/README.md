@@ -103,16 +103,19 @@ preview` — service workers do not run in dev.
 
 1. **Mock-mode footnote on the welcome screen.** The only UI not in the iOS app: without
    it there is no way to discover the demo invite code. Guarded by `backend.mode === 'mock'`.
-2. **`demo01` instead of `DEMO01`.** `AIKanji/supabase/seed.sql` seeds an uppercase invite code, but
-   `fn_generate_invite_code` only emits lowercase characters from a 31-character alphabet
-   that excludes `0` and `1`, and the join screen lowercases input — so the seeded value is
-   unreachable through the UI. The mock seeds it lowercase.
+2. ~~**`demo01` instead of `DEMO01`.**~~ **Fixed upstream in 0021.** The seed used to carry an
+   uppercase invite code that `fn_generate_invite_code` could never emit (its alphabet is
+   lowercase and excludes `0`/`1`) and that the join screen's lowercasing could never match,
+   making the documented demo event unreachable. `seed.sql` now seeds `demo01`, so the mock
+   and the real fixture agree.
 3. **Restaurant names in the fixture.** `AIKanji/supabase/seed.sql` leaves `restaurant_features.name` null;
    the real pipeline fills it from the Places `displayName`. The mock seeds Japanese names
    so the recommendation cards are not all titled 「おすすめのお店」.
 4. **Mock travel times.** Standing in for `restaurant-search`, the mock fills the travel
    matrix for participants with no cached entry using a stable hash, as the real function
    would. Feasibility is unaffected; fairness scores become meaningful rather than all `1.0`.
-5. **Numeric-cast robustness.** In Postgres a non-numeric `max_yen` aborts the whole
-   recompute (`invalid input syntax for integer`). The port treats it as absent instead, so
-   one malformed constraint cannot break the screen. Noted in `engine.ts`.
+5. ~~**Numeric-cast robustness.**~~ **Fixed upstream in 0021.** A non-numeric `max_yen` used to
+   abort the entire recompute in Postgres (`invalid input syntax for integer`), while the port
+   treated it as absent — so one malformed constraint could break the real backend but never
+   the mock. SQL now reads jsonb integers through `fn_jsonb_int`, which matches the port's
+   `nullableInt`. The two engines agree again.

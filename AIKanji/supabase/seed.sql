@@ -1,8 +1,15 @@
 -- Deterministic demo fixture: exactly 0 feasible restaurants initially, exactly 3
 -- after Bob's room MUST relaxes to semi_private. Do not alter the values.
 
+-- The invite code is lowercase because that is the only thing that can be typed in:
+-- fn_generate_invite_code (0007) emits 6 characters from '23456789abcdefghjkmnpqrstuvwxyz'
+-- — all lowercase — and both join screens lowercase and clamp to 6 what the user enters
+-- (JoinEventView on iOS, JoinEvent.tsx on the web). The former 'DEMO01' could therefore
+-- never be matched, which made the documented demo fixture unreachable on a real project.
+-- Kept as 'demo01' to stay identical to the web mock fixture (web/src/backend/mock.ts) and
+-- to the code the mock-mode welcome screen and the browser suites tell people to type.
 insert into events (id, name, invite_code, objective, status)
-values ('00000000-0000-0000-0000-000000000001', 'Team 飲み会', 'DEMO01', 'balanced', 'collecting');
+values ('00000000-0000-0000-0000-000000000001', 'Team 飲み会', 'demo01', 'balanced', 'collecting');
 
 insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference) values
 ('00000000-0000-0000-0000-0000000000a1','00000000-0000-0000-0000-000000000001',gen_random_uuid(),'Alice','organizer','office'),
@@ -26,6 +33,10 @@ insert into participant_constraints (event_id, participant_id, kind, raw_text, n
 insert into restaurants (place_id) values
 ('demo_place_001'), ('demo_place_002'), ('demo_place_003'), ('demo_place_004');
 
+-- `accessibility_tags` (0016) and `smoking_policy` (0021) are deliberately left at their
+-- defaults (empty / NULL = no data). Both MUST types are enforced fail-closed since 0021, so
+-- claiming step-free access or a non-smoking floor here would be inventing venue facts; the
+-- five personas state neither requirement, so the 0-then-3 invariant is untouched either way.
 insert into restaurant_features
   (place_id, price_yen_estimate, room_type, dietary_tags, allergy_safe_tags,
    atmosphere_tags, travel_minutes_by_participant) values

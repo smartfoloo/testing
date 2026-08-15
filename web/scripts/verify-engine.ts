@@ -13,6 +13,14 @@
  * numbers are hand-derived from the formulas documented in engine.ts, not captured from a
  * run, so a formula change has to be justified rather than re-recorded.
  *
+ * Sections 17–20 cover 0021_must_coverage_and_proposal_integrity.sql, one section per bug:
+ * an accessibility MUST is enforced fail-closed and stays un-negotiable (17), a smoking MUST
+ * is enforced and escapable through exactly one documented step (18), a malformed integer is
+ * absent rather than an exception or a loophole (19), and proposing a relaxation is idempotent
+ * per event, including the different-constraint and REJECTED cases (20). The same four bugs
+ * are asserted against real Postgres in AIKanji/supabase/tests/backend_tests.sql; if the two
+ * suites ever disagree, the SQL is authoritative and this port is wrong.
+ *
  * Run with `npm run verify:engine`.
  */
 
@@ -692,7 +700,11 @@ console.log('15. accessibility burden treats unknown as unmet')
   const eventId = addEvent(db)
   const [p1] = addParticipants(db, eventId, 1)
   const travel = { [p1]: 20 }
-  addConstraint(db, eventId, p1, 'MUST', 'accessibility', { needs: ['step_free', 'wheelchair'] })
+  // A WANT, not a MUST. Since 0021 an accessibility MUST is a hard gate (section 17), so the
+  // only way to observe how burden ORDERS venues is a requirement that does not exclude them.
+  // fn_accessibility_burden counts MUST and WANT rows alike, which is exactly the point: a
+  // WANT has nowhere else to be honoured at all.
+  addConstraint(db, eventId, p1, 'WANT', 'accessibility', { needs: ['step_free', 'wheelchair'] })
   addVenue(db, 'barrier_free', {
     accessibility_tags: ['step_free', 'wheelchair'],
     travel_minutes_by_participant: travel,
@@ -704,9 +716,9 @@ console.log('15. accessibility burden treats unknown as unmet')
   addVenue(db, 'no_data', { travel_minutes_by_participant: travel })
 
   const run = recompute(db, eventId)
-  // The accessibility MUST is not a feasibility gate (no branch in fn_candidate_is_feasible),
-  // so it must not silently exclude anything — it can only change the ranking.
-  assert('accessibility never gates feasibility', run.feasible_count, 3)
+  // A WANT is never a feasibility gate, so it must not exclude anything — it can only
+  // change the ranking.
+  assert('an accessibility WANT never gates feasibility', run.feasible_count, 3)
   const rows = scoresOf(db, run.run_id)
   const row = (placeId: string) => rows.find((entry) => entry.restaurant_place_id === placeId)!
 
@@ -730,7 +742,7 @@ console.log('15. accessibility burden treats unknown as unmet')
     'no_data',
   ])
   assert(
-    'an accessibility MUST is still never proposed for relaxation',
+    'an accessibility row is never proposed for relaxation',
     proposeRelaxation(db, eventId, nextId, nextTime),
     null,
   )
@@ -783,6 +795,348 @@ console.log('16. travel minutes are read event-scoped, with a fallback')
     'and the same MUST now fails',
     candidateIsFeasible(db, eventA, 'shared_place'),
     false,
+  )
+}
+
+/* 17. Bug 1a: an accessibility MUST is enforced, fail-closed, and never relaxable. */
+console.log('17. an accessibility MUST gates feasibility')
+{
+  const db = emptyDb()
+  const eventId = addEvent(db)
+  const [p1] = addParticipants(db, eventId, 1)
+  const travel = { [p1]: 20 }
+  addConstraint(db, eventId, p1, 'MUST', 'accessibility', { needs: ['step_free', 'wheelchair'] })
+  addVenue(db, 'barrier_free', {
+    accessibility_tags: ['step_free', 'wheelchair'],
+    travel_minutes_by_participant: travel,
+  })
+  addVenue(db, 'step_free_only', {
+    accessibility_tags: ['step_free'],
+    travel_minutes_by_participant: travel,
+  })
+  // No accessibility_tags at all — the state every venue is in until somebody records data.
+  addVenue(db, 'no_data', { travel_minutes_by_participant: travel })
+
+  assert('every need met is feasible', candidateIsFeasible(db, eventId, 'barrier_free'), true)
+  assert(
+    'a partially accessible venue is infeasible',
+    candidateIsFeasible(db, eventId, 'step_free_only'),
+    false,
+  )
+  // This is the bug: 「車椅子で入れる店」 used to be silently satisfied here.
+  assert(
+    'absent venue data is infeasible, not satisfied',
+    candidateIsFeasible(db, eventId, 'no_data'),
+    false,
+  )
+
+  const run = recompute(db, eventId)
+  assert('only the venue that meets every need survives', run.feasible_count, 1)
+  assert('and it is the only card', rankingOf(db, run.run_id), ['barrier_free'])
+  assert(
+    'the need is still never proposed for relaxation',
+    proposeRelaxation(db, eventId, nextId, nextTime),
+    null,
+  )
+
+  // A MUST whose own value cannot be read is not a MUST we may certify as met.
+  const unreadable = emptyDb()
+  const unreadableEvent = addEvent(unreadable)
+  const [q1] = addParticipants(unreadable, unreadableEvent, 1)
+  addConstraint(unreadable, unreadableEvent, q1, 'MUST', 'accessibility', { needs: [] })
+  addVenue(unreadable, 'barrier_free', {
+    accessibility_tags: ['step_free', 'wheelchair'],
+    travel_minutes_by_participant: { [q1]: 20 },
+  })
+  assert(
+    'an empty needs array fails closed',
+    candidateIsFeasible(unreadable, unreadableEvent, 'barrier_free'),
+    false,
+  )
+}
+
+/* 18. Bug 1b: a smoking MUST is enforced, and escapable through one documented step. */
+console.log('18. a smoking MUST gates feasibility and can be negotiated')
+{
+  const db = emptyDb()
+  const eventId = addEvent(db)
+  const [p1] = addParticipants(db, eventId, 1)
+  const travel = { [p1]: 20 }
+  const smokingId = addConstraint(db, eventId, p1, 'MUST', 'smoking', {
+    preference: 'non_smoking',
+  })
+  addVenue(db, 'confirmed_non_smoking', {
+    smoking_policy: 'non_smoking',
+    travel_minutes_by_participant: travel,
+  })
+  addVenue(db, 'smoky_izakaya', {
+    smoking_policy: 'smoking_ok',
+    travel_minutes_by_participant: travel,
+  })
+  // No smoking_policy: the state every venue is in until somebody records one.
+  addVenue(db, 'unconfirmed', { travel_minutes_by_participant: travel })
+
+  assert(
+    'a confirmed non-smoking venue passes',
+    candidateIsFeasible(db, eventId, 'confirmed_non_smoking'),
+    true,
+  )
+  assert(
+    'a venue known to allow smoking fails',
+    candidateIsFeasible(db, eventId, 'smoky_izakaya'),
+    false,
+  )
+  // This is the bug: a smoking MUST used to be silently satisfied by every venue.
+  assert(
+    'an unconfirmed venue fails — unknown is not non-smoking',
+    candidateIsFeasible(db, eventId, 'unconfirmed'),
+    false,
+  )
+  assert('baseline feasibility', recompute(db, eventId).feasible_count, 1)
+
+  // The escape hatch: without a relaxation step this MUST would be a dead end on real data,
+  // where nothing fills smoking_policy at all.
+  assert('the step unlocks the unconfirmed venue', countUnlockedIfRelaxed(db, eventId, smokingId), 1)
+  const proposalId = proposeRelaxation(db, eventId, nextId, nextTime)
+  assert('a smoking MUST is negotiable', proposalId !== null, true)
+  const negotiation = db.negotiations.find((row) => row.id === proposalId)!
+  assert('the proposal keeps the preference and only accepts unknowns', negotiation.proposed_value, {
+    preference: 'non_smoking',
+    accept_unknown: true,
+  })
+  assert('and quantifies the unlock', negotiation.unlocked_count, 1)
+
+  // fn_respond_negotiation with p_accept = true.
+  db.constraints.find((row) => row.id === negotiation.constraint_id)!.normalized_value =
+    negotiation.proposed_value
+  negotiation.status = 'ACCEPTED'
+  assert(
+    'accepting admits the unconfirmed venue',
+    candidateIsFeasible(db, eventId, 'unconfirmed'),
+    true,
+  )
+  assert(
+    'but never the venue known to allow smoking',
+    candidateIsFeasible(db, eventId, 'smoky_izakaya'),
+    false,
+  )
+  assert('feasibility after accepting', recompute(db, eventId).feasible_count, 2)
+
+  // The other direction is symmetric: somebody who wants to be able to smoke.
+  const smoker = emptyDb()
+  const smokerEvent = addEvent(smoker)
+  const [s1] = addParticipants(smoker, smokerEvent, 1)
+  addConstraint(smoker, smokerEvent, s1, 'MUST', 'smoking', { preference: 'smoking_ok' })
+  addVenue(smoker, 'smoky_izakaya', {
+    smoking_policy: 'smoking_ok',
+    travel_minutes_by_participant: { [s1]: 20 },
+  })
+  addVenue(smoker, 'confirmed_non_smoking', {
+    smoking_policy: 'non_smoking',
+    travel_minutes_by_participant: { [s1]: 20 },
+  })
+  assert(
+    'a smoking_ok MUST is met by a smoking venue',
+    candidateIsFeasible(smoker, smokerEvent, 'smoky_izakaya'),
+    true,
+  )
+  assert(
+    'and not by a non-smoking one',
+    candidateIsFeasible(smoker, smokerEvent, 'confirmed_non_smoking'),
+    false,
+  )
+
+  // An unreadable preference fails closed, and its step unlocks nothing, so nobody is asked
+  // a question the engine cannot phrase.
+  const malformed = emptyDb()
+  const malformedEvent = addEvent(malformed)
+  const [m1] = addParticipants(malformed, malformedEvent, 1)
+  addConstraint(malformed, malformedEvent, m1, 'MUST', 'smoking', { preference: 'たばこ' })
+  addVenue(malformed, 'confirmed_non_smoking', {
+    smoking_policy: 'non_smoking',
+    travel_minutes_by_participant: { [m1]: 20 },
+  })
+  assert(
+    'an unreadable smoking preference fails closed',
+    candidateIsFeasible(malformed, malformedEvent, 'confirmed_non_smoking'),
+    false,
+  )
+  assert(
+    'and is not proposed, because the step would unlock nothing',
+    proposeRelaxation(malformed, malformedEvent, nextId, nextTime),
+    null,
+  )
+}
+
+/* 19. Bug 3: one malformed constraint no longer breaks the event's engine. */
+console.log('19. a malformed integer is treated as absent, never as an error')
+{
+  // RLS lets any participant write an arbitrary normalized_value, and in Postgres
+  // (v->>'max_yen')::int raised invalid_text_representation on this row — aborting the whole
+  // event's recompute. Both implementations now read it through the same NULL rule.
+  const db = fresh()
+  const budget = db.constraints.find(
+    (row) => row.event_id === DEMO_EVENT_ID && row.normalized_type === 'budget',
+  )!
+  budget.normalized_value = { max_yen: 'cheap' }
+
+  const baseline = recompute(db)
+  assert('the recompute completes', baseline.feasible_count, 0)
+  // …and the malformed row did not open the floodgates either: Bob's room MUST still gates.
+  const proposalId = proposeRelaxation(db, DEMO_EVENT_ID, nextId, nextTime)
+  assert('a proposal is still produced', proposalId !== null, true)
+  const negotiation = db.negotiations.find((row) => row.id === proposalId)!
+  assert('and it still targets the room MUST', negotiation.proposed_value.room, 'semi_private')
+  db.constraints.find((row) => row.id === negotiation.constraint_id)!.normalized_value =
+    negotiation.proposed_value
+  negotiation.status = 'ACCEPTED'
+  assert('the 0-then-3 invariant survives a junk budget row', recompute(db).feasible_count, 3)
+
+  // The documented semantics of "absent": `price > null` is falsey, so a PRICED venue passes
+  // a ceiling it cannot read — exactly as it always did for a missing key — while an UNPRICED
+  // venue still fails, because that branch is an explicit null check and not a comparison.
+  const scratch = emptyDb()
+  const eventId = addEvent(scratch)
+  const [p1] = addParticipants(scratch, eventId, 1)
+  addConstraint(scratch, eventId, p1, 'MUST', 'budget', { max_yen: 'cheap' })
+  addVenue(scratch, 'priced', {
+    price_yen_estimate: 3000,
+    travel_minutes_by_participant: { [p1]: 20 },
+  })
+  addVenue(scratch, 'unpriced', {
+    price_yen_estimate: null,
+    travel_minutes_by_participant: { [p1]: 20 },
+  })
+  assert(
+    'a priced venue is judged as if the ceiling were absent',
+    candidateIsFeasible(scratch, eventId, 'priced'),
+    true,
+  )
+  assert(
+    'an unknown price never satisfies a budget MUST',
+    candidateIsFeasible(scratch, eventId, 'unpriced'),
+    false,
+  )
+  assert('so exactly one venue is feasible', recompute(scratch, eventId).feasible_count, 1)
+
+  // The same rule fn_jsonb_int applies, so neither implementation invents a number the other
+  // would not: a fully numeric string IS the number, a partly numeric one is absent.
+  const scratchBudget = scratch.constraints.find((row) => row.normalized_type === 'budget')!
+  scratchBudget.normalized_value = { max_yen: '2000' }
+  assert(
+    'a numeric string is read as the number it spells',
+    candidateIsFeasible(scratch, eventId, 'priced'),
+    false,
+  )
+  scratchBudget.normalized_value = { max_yen: '40abc' }
+  assert(
+    'a partly numeric value is absent, not 40',
+    candidateIsFeasible(scratch, eventId, 'priced'),
+    true,
+  )
+
+  // max_minutes has the same exposure and the same rule.
+  const travelDb = emptyDb()
+  const travelEvent = addEvent(travelDb)
+  const [t1] = addParticipants(travelDb, travelEvent, 1)
+  addConstraint(travelDb, travelEvent, t1, 'MUST', 'travel_time', { max_minutes: 'すぐ' })
+  addVenue(travelDb, 'near', { travel_minutes_by_participant: { [t1]: 10 } })
+  assert(
+    'a malformed max_minutes is absent, not an error',
+    candidateIsFeasible(travelDb, travelEvent, 'near'),
+    true,
+  )
+  assert('and the run completes', recompute(travelDb, travelEvent).feasible_count, 1)
+}
+
+/* 20. Bug 4: proposing a relaxation is idempotent. */
+console.log('20. a second propose returns the same negotiation')
+{
+  const db = fresh()
+  recompute(db)
+  const first = proposeRelaxation(db, DEMO_EVENT_ID, nextId, nextTime)
+  const repeats = [
+    proposeRelaxation(db, DEMO_EVENT_ID, nextId, nextTime),
+    proposeRelaxation(db, DEMO_EVENT_ID, nextId, nextTime),
+    proposeRelaxation(db, DEMO_EVENT_ID, nextId, nextTime),
+  ]
+  assert('the first press proposes something', first !== null, true)
+  // Measured before the fix: 4 calls → 4 PROPOSED rows, and Bob was asked four times.
+  assert('three more presses return the same negotiation', repeats, [first, first, first])
+  assert(
+    'exactly one negotiation exists',
+    db.negotiations.filter((row) => row.event_id === DEMO_EVENT_ID).length,
+    1,
+  )
+  assert(
+    'and exactly one question is open',
+    db.negotiations.filter(
+      (row) => row.event_id === DEMO_EVENT_ID && row.status === 'PROPOSED',
+    ).length,
+    1,
+  )
+
+  // The open proposal wins even when another constraint would now unlock more: retargeting
+  // would withdraw a question somebody is looking at, or ask a second person before the first
+  // answered. The better target is deferred one round, not dropped.
+  const other = db.constraints.find(
+    (row) => row.event_id === DEMO_EVENT_ID && row.normalized_type === 'travel_time',
+  )!
+  const open = db.negotiations.find((row) => row.id === first)!
+  open.constraint_id = other.id
+  open.participant_id = other.participant_id
+  open.proposed_value = { max_minutes: 45 }
+  const deferred = proposeRelaxation(db, DEMO_EVENT_ID, nextId, nextTime)
+  assert('an open proposal for another constraint is returned as is', deferred, first)
+  assert(
+    'and nothing was written for the better target',
+    db.negotiations.filter((row) => row.event_id === DEMO_EVENT_ID).length,
+    1,
+  )
+
+  // Rejection is final for THAT question: re-asking it is the pressure the PRD forbids.
+  const rejected = fresh()
+  recompute(rejected)
+  const askedId = proposeRelaxation(rejected, DEMO_EVENT_ID, nextId, nextTime)
+  const asked = rejected.negotiations.find((row) => row.id === askedId)!
+  asked.status = 'REJECTED'
+  asked.responded_at = nextTime()
+  assert(
+    'a rejected step is never re-proposed',
+    proposeRelaxation(rejected, DEMO_EVENT_ID, nextId, nextTime),
+    null,
+  )
+  assert('and no second row is written', rejected.negotiations.length, 1)
+
+  // …but a genuinely different question is allowed, so one "no" cannot dead-end the event.
+  const edited = emptyDb()
+  const eventId = addEvent(edited)
+  const [p1] = addParticipants(edited, eventId, 1)
+  const budgetId = addConstraint(edited, eventId, p1, 'MUST', 'budget', { max_yen: 4000 })
+  addVenue(edited, 'slightly_over', {
+    price_yen_estimate: 4300,
+    travel_minutes_by_participant: { [p1]: 20 },
+  })
+  assert('nothing fits the stated budget', recompute(edited, eventId).feasible_count, 0)
+  const firstAskId = proposeRelaxation(edited, eventId, nextId, nextTime)
+  const firstAsk = edited.negotiations.find((row) => row.id === firstAskId)!
+  assert('+500 yen is proposed', firstAsk.proposed_value, { max_yen: 4500 })
+  firstAsk.status = 'REJECTED'
+  firstAsk.responded_at = nextTime()
+  assert(
+    'the same +500 step is not asked again',
+    proposeRelaxation(edited, eventId, nextId, nextTime),
+    null,
+  )
+
+  // The participant moves their own ceiling, so the step is a different question now.
+  edited.constraints.find((row) => row.id === budgetId)!.normalized_value = { max_yen: 4200 }
+  const secondAskId = proposeRelaxation(edited, eventId, nextId, nextTime)
+  assert('a different step may be asked', secondAskId !== null, true)
+  assert(
+    'and it is the new step, not the rejected one',
+    edited.negotiations.find((row) => row.id === secondAskId)?.proposed_value,
+    { max_yen: 4700 },
   )
 }
 

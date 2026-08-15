@@ -165,6 +165,17 @@ export function recommendationBadge(label: RecommendationLabel | null): string {
   }
 }
 
+export function smokingLabel(value: string): string | null {
+  switch (value) {
+    case 'non_smoking':
+      return '禁煙'
+    case 'smoking_ok':
+      return '喫煙可'
+    default:
+      return null
+  }
+}
+
 export function roomLabel(value: string): string | null {
   switch (value) {
     case 'private':

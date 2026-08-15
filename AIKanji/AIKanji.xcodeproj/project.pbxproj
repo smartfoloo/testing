@@ -10,6 +10,7 @@
 		085AE9D33267D6F3056F1D9F /* SupabaseClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FDAD8DC8C184999E08DFF9C /* SupabaseClient.swift */; };
 		08DECD8526807BFD2408B590 /* NegotiationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0AD690D8624CF9FA6B904DD /* NegotiationService.swift */; };
 		0A7A24CB571606D8281213C5 /* ConstraintService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3F1151085B9A53E6FB321A9 /* ConstraintService.swift */; };
+		0C9F1A4B72E85D3306A1B4C2 /* RealtimeTopicRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D7E62A0F35B94C81E0D77A3 /* RealtimeTopicRegistry.swift */; };
 		104181BD06A601C90BFB9624 /* TabPillBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 185EA0C5D68E56610B6C0D65 /* TabPillBar.swift */; };
 		13397E73EE9C59B30D61F72C /* Negotiation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B29819771D99BBD4666D03C /* Negotiation.swift */; };
 		166976D96EAAC1FB848FA0C5 /* NegotiationConsentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D439F6D3946509F667A2895A /* NegotiationConsentView.swift */; };
@@ -60,6 +61,7 @@
 		0FDAD8DC8C184999E08DFF9C /* SupabaseClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseClient.swift; sourceTree = "<group>"; };
 		16A9541602D5EB0C012A1254 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
 		185EA0C5D68E56610B6C0D65 /* TabPillBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabPillBar.swift; sourceTree = "<group>"; };
+		1D7E62A0F35B94C81E0D77A3 /* RealtimeTopicRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimeTopicRegistry.swift; sourceTree = "<group>"; };
 		3917D6B26E792A2075CF4EED /* RecommendationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationListView.swift; sourceTree = "<group>"; };
 		3B29819771D99BBD4666D03C /* Negotiation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Negotiation.swift; sourceTree = "<group>"; };
 		3C97401E850C0F14E20AE547 /* CreateEventView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateEventView.swift; sourceTree = "<group>"; };
@@ -192,6 +194,7 @@
 			isa = PBXGroup;
 			children = (
 				B2F2CAF055921EC6CC7092E7 /* AIKanjiApp.swift */,
+				1D7E62A0F35B94C81E0D77A3 /* RealtimeTopicRegistry.swift */,
 				0FDAD8DC8C184999E08DFF9C /* SupabaseClient.swift */,
 			);
 			path = App;
@@ -434,6 +437,7 @@
 				08DECD8526807BFD2408B590 /* NegotiationService.swift in Sources */,
 				BF50CCCAF1B2E5D0C0FF4BAF /* OrganizerDashboardView.swift in Sources */,
 				874AC221B39CC80685D041F1 /* Participant.swift in Sources */,
+				0C9F1A4B72E85D3306A1B4C2 /* RealtimeTopicRegistry.swift in Sources */,
 				EC87B91ABD2D17D72373904D /* Recommendation.swift in Sources */,
 				834697C2FE22239102D92A94 /* RecommendationCardView.swift in Sources */,
 				8052BF0F6A458DCD21419D81 /* RecommendationListView.swift in Sources */,

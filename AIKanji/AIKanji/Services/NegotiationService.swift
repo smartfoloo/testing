@@ -151,13 +151,20 @@ struct NegotiationService {
     // MARK: - Live run updates
 
     /// Subscribes to `run_updated` on the private `event-{id}` topic, so the dashboard's
-    /// feasible count is push-driven rather than polled.
-    func runUpdates(eventId: UUID) async throws -> (channel: RealtimeChannelV2, stream: AsyncStream<RunUpdate>) {
-        let channel = client.channel("event-\(eventId.uuidString.lowercased())") { config in
-            config.isPrivate = true
-        }
-        let broadcasts = channel.broadcastStream(event: "run_updated")
-        try await channel.subscribeWithError()
+    /// feasible count is push-driven rather than polled. Aggregates only: the payload the
+    /// trigger sends carries a run id and a count, never a participant.
+    ///
+    /// The channel comes from `RealtimeTopicRegistry` because the group feed listens for
+    /// `constraint_added` on this same topic, and Realtime keys channels by topic — a second
+    /// channel here would fight the feed's instead of multiplexing with it. What is handed
+    /// back is this listener's hold on the shared channel, which
+    /// `Supa.client.removeChannel(_:)` releases; the channel goes only with the last release.
+    func runUpdates(eventId: UUID) async throws -> (channel: RealtimeTopicSubscription, stream: AsyncStream<RunUpdate>) {
+        let (subscription, broadcasts) = try await RealtimeTopicRegistry.shared.subscribe(
+            topic: RealtimeTopicRegistry.eventTopic(eventId: eventId),
+            event: .runUpdated,
+            client: client
+        )
 
         let stream = AsyncStream<RunUpdate> { continuation in
             let task = Task {
@@ -173,6 +180,6 @@ struct NegotiationService {
             continuation.onTermination = { _ in task.cancel() }
         }
 
-        return (channel, stream)
+        return (subscription, stream)
     }
 }
