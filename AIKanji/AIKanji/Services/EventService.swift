@@ -54,6 +54,51 @@ struct EventService {
             .value
     }
 
+    func decision(eventId: UUID) async throws -> EventDecision {
+        try await client
+            .from("events")
+            .select("chosen_place_id, chosen_at")
+            .eq("id", value: eventId)
+            .single()
+            .execute()
+            .value
+    }
+
+    private struct ChooseRestaurantParams: Encodable {
+        let p_event_id: UUID
+        let p_place_id: String
+    }
+
+    func chooseRestaurant(eventId: UUID, placeId: String) async throws -> EventDecision {
+        let rows: [EventDecision] = try await client
+            .rpc("fn_choose_restaurant", params: ChooseRestaurantParams(
+                p_event_id: eventId,
+                p_place_id: placeId
+            ))
+            .execute()
+            .value
+        guard let decision = rows.first else {
+            throw NSError(domain: "EventService", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "empty restaurant decision response"
+            ])
+        }
+        return decision
+    }
+
+    func restaurantName(placeId: String) async throws -> String? {
+        struct NameRow: Decodable {
+            let name: String?
+        }
+        let row: NameRow = try await client
+            .from("restaurant_features")
+            .select("name")
+            .eq("place_id", value: placeId)
+            .single()
+            .execute()
+            .value
+        return row.name
+    }
+
     private struct RoleRow: Decodable {
         let role: ParticipantRole
     }

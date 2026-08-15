@@ -1,10 +1,6 @@
 import Foundation
-import Supabase
 import SwiftUI
 
-/// Organizer-visible state. Every property here is an aggregate: there is deliberately no
-/// negotiation id, participant id or constraint id, so the organizer's device never receives
-/// who is being asked to relax what — only that something is in flight.
 @MainActor
 final class OrganizerDashboardViewModel: ObservableObject {
     @Published var responseCount = 0
@@ -14,13 +10,8 @@ final class OrganizerDashboardViewModel: ObservableObject {
     @Published var isWorking = false
     @Published var statusMessage: String?
     @Published var errorMessage: String?
-
     private let service: NegotiationService
-
-    init(service: NegotiationService = NegotiationService()) {
-        self.service = service
-    }
-
+    init(service: NegotiationService = NegotiationService()) { self.service = service }
     var negotiationInProgress: Bool { openNegotiations > 0 }
 
     func load(eventId: UUID) async {
@@ -31,30 +22,28 @@ final class OrganizerDashboardViewModel: ObservableObject {
                 feasibleCount = run.feasibleCount
                 latestRunId = run.id
             }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = AppCopy.networkError }
     }
 
-    /// Live updates come from the `run_updated` broadcast, not a polling timer: a recompute
-    /// triggered by someone else's accept lands here without any refresh.
     func listenForRuns(eventId: UUID) async {
         do {
             let (channel, stream) = try await service.runUpdates(eventId: eventId)
             defer { Task { await Supa.client.removeChannel(channel) } }
-
             for await update in stream {
                 feasibleCount = update.feasibleCount
                 latestRunId = update.runId
-                openNegotiations = (try? await service.pendingNegotiationCount(eventId: eventId)) ?? 0
-                responseCount = (try? await service.responseCount(eventId: eventId)) ?? responseCount
+                do {
+                    openNegotiations = try await service.pendingNegotiationCount(eventId: eventId)
+                    responseCount = try await service.responseCount(eventId: eventId)
+                } catch {
+                    errorMessage = AppCopy.networkError
+                }
             }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = AppCopy.networkError }
     }
 
     func findRestaurants(eventId: UUID) async {
+        guard !isWorking else { return }
         isWorking = true
         errorMessage = nil
         statusMessage = nil
@@ -63,72 +52,105 @@ final class OrganizerDashboardViewModel: ObservableObject {
             let result = try await service.recomputeFeasibility(eventId: eventId)
             feasibleCount = result.feasibleCount
             latestRunId = result.runId
-
             if result.feasibleCount == 0 {
                 statusMessage = try await service.proposeRelaxation(eventId: eventId) == nil
-                    ? "No requirement can be eased automatically — the group needs to talk this one through."
-                    : "Nothing fits everyone yet. We asked one person about a small change."
-                openNegotiations = (try? await service.pendingNegotiationCount(eventId: eventId)) ?? 0
+                    ? "今の条件では、まだ候補が見つかりません。みんなで相談してみましょう。"
+                    : "条件に合うお店がありません。参加者に条件の変更をお願いしました。"
+                do {
+                    openNegotiations = try await service.pendingNegotiationCount(eventId: eventId)
+                } catch {
+                    errorMessage = AppCopy.networkError
+                }
             } else if candidates == 0 {
-                statusMessage = "Using previously fetched candidates."
+                statusMessage = "以前に取得した候補を表示しています。"
             }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = AppCopy.networkError }
         isWorking = false
     }
 }
 
 struct OrganizerDashboardView: View {
     let eventId: UUID
-
+    let isOrganizer: Bool
+    @Binding var decision: EventDecision?
+    @Binding var chosenRestaurantName: String?
     @StateObject private var viewModel = OrganizerDashboardViewModel()
     @State private var openRunId: UUID?
-
-    private var canShowRecommendations: Bool {
-        (viewModel.feasibleCount ?? 0) > 0 && viewModel.latestRunId != nil
-    }
+    private let eventService = EventService()
 
     var body: some View {
-        List {
-            Section("Responses") {
-                LabeledContent("Requirements submitted", value: "\(viewModel.responseCount)")
-            }
-
-            Section("Feasible restaurants") {
-                LabeledContent(
-                    "Matching every requirement",
-                    value: viewModel.feasibleCount.map(String.init) ?? "—"
-                )
-                if viewModel.negotiationInProgress {
-                    Label("Negotiation in progress…", systemImage: "clock.arrow.circlepath")
-                        .foregroundStyle(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: AppSpacing.xl) {
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    Text(AppCopy.homeOrganizer).font(AppTypography.title)
+                    Text("みんなの条件を集計して、お店を探します。")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.ink.opacity(0.72))
                 }
-            }
-
-            Section {
-                Button(viewModel.isWorking ? "Searching…" : "Find restaurants") {
+                HStack(spacing: AppSpacing.sm) {
+                    StatTile(value: "\(viewModel.responseCount)", title: "回答数", tint: AppColors.card)
+                    StatTile(value: viewModel.feasibleCount.map(String.init) ?? "—", title: "条件を満たすお店", tint: (viewModel.feasibleCount ?? 0) > 0 ? AppColors.accentSoft : AppColors.card)
+                }
+                if viewModel.negotiationInProgress {
+                    Text("調整中…").font(AppTypography.caption.weight(.bold))
+                        .foregroundStyle(AppColors.ink).padding(.horizontal, AppSpacing.md).frame(minHeight: 36)
+                        .background(AppColors.yellow).clipShape(Capsule())
+                }
+                PrimaryButton(title: AppCopy.findRestaurants, isLoading: viewModel.isWorking) {
                     Task { await viewModel.findRestaurants(eventId: eventId) }
                 }
-                .disabled(viewModel.isWorking)
-
-                if canShowRecommendations, let runId = viewModel.latestRunId {
-                    Button("See recommendations") { openRunId = runId }
+                .accessibilityIdentifier("find-restaurants")
+                if let runId = viewModel.latestRunId, (viewModel.feasibleCount ?? 0) > 0 {
+                    Button("おすすめを見る") { openRunId = runId }
+                        .frame(maxWidth: .infinity).frame(minHeight: 48)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(AppColors.ink)
+                        .background(AppColors.card)
+                        .overlay(Capsule().strokeBorder(AppColors.border, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
+                        .clipShape(Capsule())
+                        .accessibilityIdentifier("recommendations")
                 }
-            } footer: {
-                Text("We never show you who asked for what — only how many requirements are in.")
+                if decision?.chosenPlaceId != nil {
+                    AppCard {
+                        Label(
+                            chosenRestaurantName.map { "\(AppCopy.chosen)：\($0)" } ?? AppCopy.chosen,
+                            systemImage: "checkmark.seal.fill"
+                        )
+                            .foregroundStyle(AppColors.accent)
+                    }
+                }
+                Text("誰がどの条件を出したかは表示せず、集計結果だけを共有します。")
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.ink.opacity(0.72))
+                if let statusMessage = viewModel.statusMessage {
+                    Text(statusMessage).font(AppTypography.body)
+                }
+                if let errorMessage = viewModel.errorMessage {
+                    InlineErrorView(message: errorMessage) { Task { await viewModel.load(eventId: eventId) } }
+                }
             }
-
-            if let statusMessage = viewModel.statusMessage {
-                Section { Text(statusMessage).foregroundStyle(.secondary) }
-            }
-            if let errorMessage = viewModel.errorMessage {
-                Section { Text(errorMessage).foregroundStyle(.red) }
-            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.bottom, AppSpacing.xxl)
         }
-        .navigationTitle("Organizer")
+        .background(AppColors.background)
         .navigationDestination(item: $openRunId) { runId in
-            RecommendationListView(runId: runId)
+            RecommendationListView(
+                runId: runId,
+                eventId: eventId,
+                isOrganizer: isOrganizer,
+                onChosen: { result in
+                    decision = result
+                    Task {
+                        if let placeId = result.chosenPlaceId {
+                            do {
+                                chosenRestaurantName = try await eventService.restaurantName(placeId: placeId)
+                            } catch {
+                                viewModel.errorMessage = AppCopy.errorMessage(for: error)
+                            }
+                        }
+                    }
+                }
+            )
         }
         .task { await viewModel.load(eventId: eventId) }
         .task { await viewModel.listenForRuns(eventId: eventId) }

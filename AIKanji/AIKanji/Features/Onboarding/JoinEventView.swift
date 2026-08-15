@@ -3,7 +3,6 @@ import VisionKit
 
 struct JoinEventView: View {
     private let service = EventService()
-
     @State private var inviteCode = ""
     @State private var displayName = ""
     @State private var travelReference: TravelReference = .office
@@ -13,53 +12,71 @@ struct JoinEventView: View {
     @State private var errorMessage: String?
 
     private var canSubmit: Bool {
-        inviteCode.trimmed.count == 6 && !displayName.trimmed.isEmpty && !isSubmitting
+        inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).count == 6 &&
+            !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
-        Form {
-            Section("Invite code") {
-                TextField("6-character code", text: $inviteCode)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .onChange(of: inviteCode) { _, newValue in
-                        inviteCode = String(newValue.lowercased().prefix(6))
+        ScrollView {
+            VStack(alignment: .leading, spacing: AppSpacing.xl) {
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    Text("招待コード").font(AppTypography.section)
+                    TextField("6桁のコード", text: $inviteCode)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .appInputFieldStyle()
+                        .font(.system(.body, design: .monospaced))
+                        .accessibilityIdentifier("invite-code")
+                        .onChange(of: inviteCode) { _, value in inviteCode = String(value.lowercased().prefix(6)) }
+                    if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
+                        Button {
+                            isScanning = true
+                        } label: {
+                            Label("QRコードを読み取る", systemImage: "qrcode.viewfinder")
+                        }
+                        .frame(minHeight: 44)
+                        .foregroundStyle(AppColors.accent)
+                        .accessibilityIdentifier("scan-qr")
                     }
-                if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
-                    Button("Scan QR") { isScanning = true }
                 }
-            }
-
-            Section("You") {
-                TextField("Your name", text: $displayName)
-                Picker("Travel reference", selection: $travelReference) {
-                    ForEach(TravelReference.allCases) { Text($0.label).tag($0) }
+                Divider().overlay(AppColors.border)
+                VStack(alignment: .leading, spacing: AppSpacing.xs) {
+                    Text("あなたの名前").font(AppTypography.section)
+                    TextField("例：佐藤", text: $displayName)
+                        .appInputFieldStyle()
+                        .accessibilityIdentifier("join-display-name")
                 }
-            }
-
-            Section {
-                Button(isSubmitting ? "Joining…" : "Join Event") {
+                VStack(alignment: .leading, spacing: AppSpacing.sm) {
+                    Text("移動の基準").font(AppTypography.section)
+                    HStack {
+                        ForEach([TravelReference.office, .home, .station]) { value in
+                            SelectionChip(title: value.label, isSelected: travelReference == value) { travelReference = value }
+                        }
+                    }
+                }
+                PrimaryButton(title: "参加する", isLoading: isSubmitting) {
                     Task { await join() }
                 }
-                .disabled(!canSubmit)
-            }
-
-            if let joined {
-                Section {
-                    NavigationLink("Continue") {
-                        EventHomeView(
-                            eventId: joined.eventId,
-                            participantId: joined.participantId,
-                            inviteCode: inviteCode
-                        )
+                .accessibilityIdentifier("join-submit")
+                .disabled(!canSubmit || isSubmitting)
+                if let joined {
+                    NavigationLink(AppCopy.continueAction) {
+                        EventHomeView(eventId: joined.eventId, participantId: joined.participantId, inviteCode: inviteCode)
                     }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("continue-event")
+                }
+                if let errorMessage {
+                    InlineErrorView(message: errorMessage) { Task { await join() } }
                 }
             }
-            if let errorMessage {
-                Section { Text(errorMessage).foregroundStyle(.red) }
-            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.bottom, AppSpacing.xxl)
         }
-        .navigationTitle("Join Event")
+        .background(AppColors.background)
+        .navigationTitle(AppCopy.join)
+        .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $isScanning) {
             QRScannerView { scanned in
                 inviteCode = Self.extractInviteCode(from: scanned)
@@ -69,10 +86,8 @@ struct JoinEventView: View {
         }
     }
 
-    /// Accepts either a bare invite code or a URL carrying one (`?code=` query item
-    /// or last path component), so QR payloads can evolve without breaking the scanner.
     static func extractInviteCode(from payload: String) -> String {
-        let trimmed = payload.trimmed
+        let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
         if let components = URLComponents(string: trimmed), components.scheme != nil {
             let candidate = components.queryItems?.first(where: { $0.name == "code" })?.value
                 ?? components.path.split(separator: "/").last.map(String.init)
@@ -83,18 +98,19 @@ struct JoinEventView: View {
     }
 
     private func join() async {
+        guard !isSubmitting else { return }
         isSubmitting = true
         errorMessage = nil
         do {
             let participantId = try await service.joinEvent(
-                inviteCode: inviteCode.trimmed,
-                displayName: displayName.trimmed,
+                inviteCode: inviteCode.trimmingCharacters(in: .whitespacesAndNewlines),
+                displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
                 travelReference: travelReference
             )
-            let event = try await service.event(inviteCode: inviteCode.trimmed)
+            let event = try await service.event(inviteCode: inviteCode.trimmingCharacters(in: .whitespacesAndNewlines))
             joined = (event.id, participantId)
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = AppCopy.networkError
         }
         isSubmitting = false
     }
@@ -102,9 +118,7 @@ struct JoinEventView: View {
 
 struct QRScannerView: UIViewControllerRepresentable {
     let onScan: (String) -> Void
-
     func makeCoordinator() -> Coordinator { Coordinator(onScan: onScan) }
-
     func makeUIViewController(context: Context) -> DataScannerViewController {
         let controller = DataScannerViewController(
             recognizedDataTypes: [.barcode(symbologies: [.qr])],
@@ -115,35 +129,18 @@ struct QRScannerView: UIViewControllerRepresentable {
         try? controller.startScanning()
         return controller
     }
-
     func updateUIViewController(_ uiViewController: DataScannerViewController, context: Context) {}
-
     final class Coordinator: NSObject, DataScannerViewControllerDelegate {
         private let onScan: (String) -> Void
-
-        init(onScan: @escaping (String) -> Void) {
-            self.onScan = onScan
-        }
-
-        func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
-            handle(addedItems)
-        }
-
-        func dataScanner(_ dataScanner: DataScannerViewController, didTapOn item: RecognizedItem) {
-            handle([item])
-        }
-
+        init(onScan: @escaping (String) -> Void) { self.onScan = onScan }
+        func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) { handle(addedItems) }
+        func dataScanner(_ dataScanner: DataScannerViewController, didTapOn item: RecognizedItem) { handle([item]) }
         private func handle(_ items: [RecognizedItem]) {
             for case let .barcode(barcode) in items {
-                if let value = barcode.payloadStringValue {
-                    onScan(value)
-                    return
-                }
+                if let value = barcode.payloadStringValue { onScan(value); return }
             }
         }
     }
 }
 
-#Preview {
-    NavigationStack { JoinEventView() }
-}
+#Preview { NavigationStack { JoinEventView() } }

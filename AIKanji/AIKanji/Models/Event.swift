@@ -3,6 +3,7 @@ import Foundation
 enum EventObjective: String, Codable, CaseIterable, Identifiable {
     case balanced, access, cost, experience, custom
     var id: String { rawValue }
+    var label: String { AppCopy.objective(self) }
 }
 
 enum EventStatus: String, Codable {
@@ -39,5 +40,15 @@ struct CreatedEvent: Codable, Hashable {
         case eventId = "event_id"
         case inviteCode = "invite_code"
         case participantId = "participant_id"
+    }
+}
+
+struct EventDecision: Codable, Hashable {
+    let chosenPlaceId: String?
+    let chosenAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case chosenPlaceId = "chosen_place_id"
+        case chosenAt = "chosen_at"
     }
 }
