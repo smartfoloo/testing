@@ -45,11 +45,44 @@ begin
   execute 'set role authenticated';
 end; $$;
 
+-- Impersonate an API caller the way PostgREST ACTUALLY does: the whole claims JSON, not just
+-- the individual `sub` claim.
+--
+-- The difference is load-bearing, and it is why one whole class of guard had no test. 0014's
+-- request-context guards — fn_recompute_feasibility and fn_choose_restaurant — fire only when
+-- `request.jwt.claims` is non-null, deliberately, so that migrations and this harness can call
+-- them directly (see the header of 0014_request_context_guard.sql). t_as_user sets only
+-- `request.jwt.claim.sub`, which is enough for auth.uid() and therefore for RLS and for guards
+-- written against auth.uid() alone (fn_respond_negotiation's, which IS tested) — but it leaves
+-- `request.jwt.claims` unset, so a 0014-shaped guard treats the caller as a trusted direct
+-- session and never raises. Those guards could not be exercised from here at all.
+--
+-- Both spellings are set to the same identity because auth.uid() and auth.role() each prefer
+-- the singular and fall back to the JSON; leaving them to disagree would test a state no real
+-- caller is ever in.
+create or replace function t_as_api_user(p_uid uuid)
+returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', p_uid::text, false);
+  perform set_config('request.jwt.claim.role', 'authenticated', false);
+  perform set_config(
+    'request.jwt.claims',
+    json_build_object('sub', p_uid::text, 'role', 'authenticated')::text,
+    false);
+  execute 'set role authenticated';
+end; $$;
+
+-- Clears every request-context key t_as_api_user can set, not just `sub`. A leftover
+-- `request.jwt.claims` would make later blocks look like API callers to the 0014 guards and
+-- fail them for the wrong reason; nothing set it before t_as_api_user existed, so clearing it
+-- changes no existing check.
 create or replace function t_as_admin()
 returns void language plpgsql as $$
 begin
   execute 'reset role';
   perform set_config('request.jwt.claim.sub', '', false);
+  perform set_config('request.jwt.claim.role', '', false);
+  perform set_config('request.jwt.claims', '', false);
 end; $$;
 
 -- ---------------------------------------------------------------------------
@@ -3249,6 +3282,99 @@ begin
            and not has_sequence_privilege('service_role', s.oid, 'USAGE')));
   perform t_check('every sequence behind a table a role may INSERT into is usable',
                   v_sequences is null, v_sequences);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0015: choosing the restaurant is the organizer's decision alone
+--
+-- Every other write path in this schema had its refusal asserted — a non-participant cannot
+-- answer a negotiation, RLS hides other participants' constraints, PRIVATE never broadcasts —
+-- but the one IRREVERSIBLE group-level decision did not. fn_choose_restaurant closes the event
+-- and fires `event_decided`; the clients only hide the button behind `isOrganizer`, which is
+-- presentation, not a boundary, and any participant can POST to the RPC with their own token.
+--
+-- These run through t_as_api_user rather than t_as_user for the reason given at its definition:
+-- under t_as_user the 0014 guard treats the caller as a trusted direct session and cannot fire,
+-- so a test written that way would pass while asserting nothing.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00000000-0000-0000-0000-0000000c0001';
+  v_other_event uuid := '00000000-0000-0000-0000-0000000c0002';
+  v_org_pid uuid := '00000000-0000-0000-0000-0000000c00a1';
+  v_guest_pid uuid := '00000000-0000-0000-0000-0000000c00b1';
+  v_org_uid uuid := 'c0000000-0000-0000-0000-0000000000a1';
+  v_guest_uid uuid := 'c0000000-0000-0000-0000-0000000000b1';
+  v_raised boolean;
+  v_message text;
+begin
+  perform t_as_admin();
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA choose guard', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_org_pid, v_event, v_org_uid, 'Organizer', 'organizer', 'office'),
+         (v_guest_pid, v_event, v_guest_uid, 'Guest', 'participant', 'office');
+  update events set organizer_participant_id = v_org_pid where id = v_event;
+  insert into restaurants (place_id) values ('qa_choose_venue');
+  insert into restaurant_features (place_id, room_type)
+  values ('qa_choose_venue', 'open');
+
+  -- 1. A real participant of this event, who simply is not the organizer.
+  perform t_as_api_user(v_guest_uid);
+  v_raised := false;
+  begin
+    perform * from fn_choose_restaurant(v_event, 'qa_choose_venue');
+  exception when others then
+    v_raised := true; v_message := sqlerrm;
+  end;
+  perform t_check('a participant who is not the organizer cannot choose the restaurant',
+                  v_raised and v_message = 'only the organizer can choose the restaurant',
+                  coalesce(v_message, 'no exception raised'));
+
+  -- The refusal has to leave the event OPEN. An exception that still closed the event would
+  -- satisfy the check above and lose the group its decision anyway.
+  perform t_as_admin();
+  perform t_check('the refused choice leaves the event undecided and still collecting',
+                  (select chosen_place_id is null and chosen_at is null and status = 'collecting'
+                   from events where id = v_event));
+
+  -- 2. The organizer, naming a venue that does not exist.
+  perform t_as_api_user(v_org_uid);
+  v_raised := false;
+  begin
+    perform * from fn_choose_restaurant(v_event, 'qa_choose_no_such_venue');
+  exception when others then
+    v_raised := true; v_message := sqlerrm;
+  end;
+  perform t_check('an unknown restaurant is refused even for the organizer',
+                  v_raised and v_message = 'unknown restaurant',
+                  coalesce(v_message, 'no exception raised'));
+
+  -- 3. The organizer, naming a real venue: the decision is recorded and the event closes.
+  perform t_as_api_user(v_org_uid);
+  perform * from fn_choose_restaurant(v_event, 'qa_choose_venue');
+  perform t_as_admin();
+  perform t_check('the organizer can choose, and the decision closes the event',
+                  (select chosen_place_id = 'qa_choose_venue' and chosen_at is not null
+                          and status = 'closed'
+                   from events where id = v_event));
+
+  -- 4. An event that does not exist. Asserted from a direct session on purpose: to an API
+  -- caller there is no organizer of a nonexistent event, so the 0014 guard answers first and
+  -- 'event not found' is unreachable that way. This is the path a migration or the service
+  -- role would take, and it is the only way to reach the `if not found` branch at all.
+  perform t_as_admin();
+  v_raised := false;
+  begin
+    perform * from fn_choose_restaurant(v_other_event, 'qa_choose_venue');
+  exception when others then
+    v_raised := true; v_message := sqlerrm;
+  end;
+  perform t_check('choosing for an event that does not exist is refused',
+                  v_raised and v_message = 'event not found',
+                  coalesce(v_message, 'no exception raised'));
+
+  perform t_as_admin();
 end $$;
 
 \set QUIET off
