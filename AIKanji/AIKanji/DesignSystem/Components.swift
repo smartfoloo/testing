@@ -6,11 +6,11 @@ struct AppInputFieldStyle: ViewModifier {
             .padding(.horizontal, AppSpacing.md)
             .frame(minHeight: 48)
             .background(AppColors.card)
+            .clipShape(RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous)
                     .stroke(AppColors.border, lineWidth: 1)
             )
-            .clipShape(RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous))
     }
 }
 
@@ -95,14 +95,17 @@ struct StarterChip: View {
             Text(title)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 48)
+                .frame(maxHeight: .infinity)
+                .padding(.horizontal, AppSpacing.xs)
+                .background(tint)
+                .clipShape(Capsule())
+                .contentShape(Capsule())
         }
-            .font(AppTypography.caption.weight(.semibold))
-            .foregroundStyle(AppColors.ink)
-            .frame(maxWidth: .infinity)
-            .frame(minHeight: 48)
-            .padding(.horizontal, AppSpacing.xs)
-            .background(tint)
-            .clipShape(Capsule())
+        .buttonStyle(.plain)
+        .font(AppTypography.caption.weight(.semibold))
+        .foregroundStyle(AppColors.ink)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
