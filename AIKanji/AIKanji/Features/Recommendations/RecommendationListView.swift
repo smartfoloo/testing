@@ -64,6 +64,44 @@ private struct ObjectiveLegend: View {
     }
 }
 
+/// Recruit's Hot Pepper Gourmet Web Service guideline requires this credit wherever their data
+/// is used, so it lives at the foot of the shortlist — the one screen that prints the fields we
+/// merge from them (the yen band and the 個室 line on every card). It is not a feature: muted
+/// secondary caption, below the content, never above 「このお店に決める」.
+///
+/// One credit for the whole list, not one per card. The chosen card is the same
+/// `RecommendationCardView` with 「このお店に決まりました」 swapped in for the button, and it stays
+/// inside this list, so it is already covered — repeating the credit three or four times would
+/// be louder than the guideline asks and would compete with the decision itself. (The
+/// 「決まりました」 banner on EventHomeView and the organizer dashboard show only a name the group
+/// chose, which is the group's own decision rather than a Hot Pepper listing.)
+///
+/// Mirrors `ProviderAttribution` in web/src/features/Recommendations.tsx.
+private struct ProviderAttribution: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+            Text(AttributionCopy.scope)
+                .font(AppTypography.small)
+                .foregroundStyle(AppColors.ink.opacity(0.72))
+                .fixedSize(horizontal: false, vertical: true)
+            // An explicit Text label, because Link would otherwise tint its title with the
+            // accent colour and this is a footnote, not a call to action. The underline is
+            // what carries the "this is tappable" affordance instead.
+            Link(destination: AttributionCopy.url) {
+                Text(AttributionCopy.credit)
+                    .font(AppTypography.caption)
+                    .foregroundStyle(AppColors.ink.opacity(0.72))
+                    .underline()
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minHeight: 44, alignment: .leading)
+            }
+            .accessibilityIdentifier("provider-attribution-link")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("provider-attribution")
+    }
+}
+
 struct RecommendationListView: View {
     let runId: UUID
     let eventId: UUID
@@ -106,6 +144,11 @@ struct RecommendationListView: View {
                 }
                 if let errorMessage = viewModel.errorMessage {
                     InlineErrorView(message: errorMessage) { Task { await viewModel.load(runId: runId) } }
+                }
+                // Nothing sourced is on screen when the list is empty, so there is nothing
+                // to credit yet.
+                if !viewModel.scores.isEmpty {
+                    ProviderAttribution()
                 }
             }
             .padding(.horizontal, AppSpacing.lg)

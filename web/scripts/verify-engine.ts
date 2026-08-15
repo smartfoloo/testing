@@ -21,10 +21,18 @@
  * are asserted against real Postgres in AIKanji/supabase/tests/backend_tests.sql; if the two
  * suites ever disagree, the SQL is authoritative and this port is wrong.
  *
+ * Sections 21–22 cover 0022_accessibility_vocabulary_and_room_unknown.sql: the closed
+ * accessibility vocabulary both sides now speak, what happens to a need it cannot express, and
+ * the coverage count that keeps a zero-candidate result explainable (21); and the room step
+ * that stops a 個室 MUST from dead-ending on a Places-only candidate set, without ever
+ * admitting a venue known to be the wrong room type (22).
+ *
  * Run with `npm run verify:engine`.
  */
 
 import {
+  ACCESSIBILITY_VOCABULARY,
+  candidateBlockingTypes,
   candidateIsFeasible,
   countUnlockedIfRelaxed,
   proposeRelaxation,
@@ -704,13 +712,17 @@ console.log('15. accessibility burden treats unknown as unmet')
   // only way to observe how burden ORDERS venues is a requirement that does not exclude them.
   // fn_accessibility_burden counts MUST and WANT rows alike, which is exactly the point: a
   // WANT has nowhere else to be honoured at all.
-  addConstraint(db, eventId, p1, 'WANT', 'accessibility', { needs: ['step_free', 'wheelchair'] })
+  // Vocabulary members since 0022 — the venue-side CHECK refuses anything else, so a fixture
+  // with invented tags would no longer be reachable in Postgres.
+  addConstraint(db, eventId, p1, 'WANT', 'accessibility', {
+    needs: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
+  })
   addVenue(db, 'barrier_free', {
-    accessibility_tags: ['step_free', 'wheelchair'],
+    accessibility_tags: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
     travel_minutes_by_participant: travel,
   })
   addVenue(db, 'step_free_only', {
-    accessibility_tags: ['step_free'],
+    accessibility_tags: ['wheelchair_accessible_entrance'],
     travel_minutes_by_participant: travel,
   })
   addVenue(db, 'no_data', { travel_minutes_by_participant: travel })
@@ -727,14 +739,14 @@ console.log('15. accessibility burden treats unknown as unmet')
   assert('no data at all is full burden', row('no_data').accessibility_burden_score, 1)
   assert('and it is reported as missing data', row('no_data').score_breakdown?.accessibility, {
     burden: 1,
-    needs: ['step_free', 'wheelchair'],
-    unmet_needs: ['step_free', 'wheelchair'],
+    needs: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
+    unmet_needs: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
     venue_tags: [],
     data_present: false,
     requests: 1,
   })
   assert('the unmet need is named', row('step_free_only').score_breakdown?.accessibility.unmet_needs, [
-    'wheelchair',
+    'wheelchair_accessible_restroom',
   ])
   assert('accessibility orders the cards', rankingOf(db, run.run_id), [
     'barrier_free',
@@ -805,16 +817,19 @@ console.log('17. an accessibility MUST gates feasibility')
   const eventId = addEvent(db)
   const [p1] = addParticipants(db, eventId, 1)
   const travel = { [p1]: 20 }
-  addConstraint(db, eventId, p1, 'MUST', 'accessibility', { needs: ['step_free', 'wheelchair'] })
+  addConstraint(db, eventId, p1, 'MUST', 'accessibility', {
+    needs: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
+  })
   addVenue(db, 'barrier_free', {
-    accessibility_tags: ['step_free', 'wheelchair'],
+    accessibility_tags: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
     travel_minutes_by_participant: travel,
   })
   addVenue(db, 'step_free_only', {
-    accessibility_tags: ['step_free'],
+    accessibility_tags: ['wheelchair_accessible_entrance'],
     travel_minutes_by_participant: travel,
   })
-  // No accessibility_tags at all — the state every venue is in until somebody records data.
+  // No accessibility_tags at all — the state every venue was in before 0022 gave the column a
+  // writer, and the state every venue Places says nothing about is still in.
   addVenue(db, 'no_data', { travel_minutes_by_participant: travel })
 
   assert('every need met is feasible', candidateIsFeasible(db, eventId, 'barrier_free'), true)
@@ -845,7 +860,7 @@ console.log('17. an accessibility MUST gates feasibility')
   const [q1] = addParticipants(unreadable, unreadableEvent, 1)
   addConstraint(unreadable, unreadableEvent, q1, 'MUST', 'accessibility', { needs: [] })
   addVenue(unreadable, 'barrier_free', {
-    accessibility_tags: ['step_free', 'wheelchair'],
+    accessibility_tags: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
     travel_minutes_by_participant: { [q1]: 20 },
   })
   assert(
@@ -1137,6 +1152,256 @@ console.log('20. a second propose returns the same negotiation')
     'and it is the new step, not the rejected one',
     edited.negotiations.find((row) => row.id === secondAskId)?.proposed_value,
     { max_yen: 4700 },
+  )
+}
+
+/* 21. 0022 bug A: one closed accessibility vocabulary, and a zero that explains itself. */
+console.log('21. the accessibility vocabulary is closed, and its exclusions are legible')
+{
+  // The vocabulary is the four nullable booleans Places returns in `accessibilityOptions`,
+  // named after them. Asserted against a literal, exactly as backend_tests.sql asserts
+  // fn_accessibility_vocabulary(), so the two implementations cannot drift.
+  assert('the vocabulary is the four Places accessibilityOptions booleans', [...ACCESSIBILITY_VOCABULARY], [
+    'wheelchair_accessible_entrance',
+    'wheelchair_accessible_parking',
+    'wheelchair_accessible_restroom',
+    'wheelchair_accessible_seating',
+  ])
+
+  const db = emptyDb()
+  const eventId = addEvent(db)
+  const [p1] = addParticipants(db, eventId, 1)
+  const travel = { [p1]: 20 }
+  addConstraint(db, eventId, p1, 'MUST', 'budget', { max_yen: 4000 })
+  const needsId = addConstraint(db, eventId, p1, 'MUST', 'accessibility', {
+    needs: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
+  })
+  addVenue(db, 'confirmed', {
+    accessibility_tags: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
+    travel_minutes_by_participant: travel,
+  })
+  addVenue(db, 'partly_confirmed', {
+    accessibility_tags: ['wheelchair_accessible_entrance'],
+    travel_minutes_by_participant: travel,
+  })
+  addVenue(db, 'unverified', { travel_minutes_by_participant: travel })
+  // Over budget as well, so confirming its entrance would NOT put it on the shortlist.
+  addVenue(db, 'unverified_and_pricey', {
+    price_yen_estimate: 9000,
+    travel_minutes_by_participant: travel,
+  })
+
+  assert(
+    'an accessibility MUST is met when the recorded tags cover the needs',
+    candidateIsFeasible(db, eventId, 'confirmed'),
+    true,
+  )
+  assert(
+    'tags covering only part of the needs stay infeasible',
+    candidateIsFeasible(db, eventId, 'partly_confirmed'),
+    false,
+  )
+  assert(
+    'and no recorded tags at all stays infeasible',
+    candidateIsFeasible(db, eventId, 'unverified'),
+    false,
+  )
+
+  // The single MUST chain, now answerable: which types stand in the way?
+  assert('blocking types name accessibility alone', candidateBlockingTypes(db, eventId, 'unverified'), [
+    'accessibility',
+  ])
+  assert(
+    'and name both obstacles when there are two',
+    candidateBlockingTypes(db, eventId, 'unverified_and_pricey'),
+    ['accessibility', 'budget'],
+  )
+  assert('a feasible venue is blocked by nothing', candidateBlockingTypes(db, eventId, 'confirmed'), [])
+  assert('an unknown venue is not an accessibility exclusion', candidateBlockingTypes(db, eventId, 'nope'), [
+    'unknown_venue',
+  ])
+
+  const run = recompute(db, eventId)
+  assert('only the fully confirmed venue is feasible', run.feasible_count, 1)
+  // The whole point: 「N件は車椅子対応が確認できませんでした（お店に確認できます）」 rather than 「0件」.
+  // `unverified_and_pricey` is excluded from the count because a phone call cannot fix its price.
+  assert('the payload counts the venues only missing accessibility proof', run.accessibility_unverified_count, 2)
+  assert(
+    'the accessibility MUST is still never proposed for relaxation',
+    proposeRelaxation(db, eventId, nextId, nextTime),
+    null,
+  )
+
+  // What the boundary protects against: one unmatchable need excludes all of Tokyo, and there
+  // is no relaxation to escape through — which is why llm-assist filters `needs` server-side
+  // and keeps the wording in semantic_remainder instead of storing it.
+  db.constraints.find((row) => row.id === needsId)!.normalized_value = { needs: ['elevator'] }
+  const dead = recompute(db, eventId)
+  assert('an out-of-vocabulary need can never be matched by any venue', dead.feasible_count, 0)
+  assert('and every candidate is reported as accessibility-only', dead.accessibility_unverified_count, 3)
+  assert(
+    'and it is still not negotiable',
+    proposeRelaxation(db, eventId, nextId, nextTime),
+    null,
+  )
+
+  // So the parser never produces one. It emits vocabulary members, and an accessibility need
+  // the vocabulary cannot express becomes a non-gating note that keeps the participant's own
+  // words and asks for clarification — never {"needs": []}, which would be that same dead end.
+  const entrance = parseConstraintText('車椅子で入れる店がいい', 'MUST')
+  assert('「車椅子で入れる店」 is an accessibility MUST', entrance.normalized_type, 'accessibility')
+  assert('mapped onto the entrance boolean', entrance.normalized_value, {
+    needs: ['wheelchair_accessible_entrance'],
+  })
+  assert('and it still requires human confirmation', entrance.verification_requirement, 'required')
+  const restroom = parseConstraintText('車椅子対応のトイレがある店', 'MUST')
+  assert('a restroom request adds its own member', restroom.normalized_value, {
+    needs: ['wheelchair_accessible_entrance', 'wheelchair_accessible_restroom'],
+  })
+  const elevator = parseConstraintText('エレベーターがある店', 'MUST')
+  assert('an unexpressible need is not an accessibility MUST', elevator.normalized_type, 'other')
+  assert('it is not silently dropped either', elevator.semantic_remainder, 'エレベーターがある店')
+  assert('a human is asked about it', elevator.needs_clarification, true)
+  assert('and it keeps the private default', elevator.suggested_visibility, 'ANONYMOUS')
+
+  // Whatever the phrasing, the parser can only ever emit vocabulary members: anything else
+  // would be a MUST no venue tag could match.
+  const emitted = [
+    '車椅子で入れる店',
+    'バリアフリーのお店',
+    '段差がないところ',
+    '車椅子対応のトイレと車椅子席がある店',
+    '車椅子で使える駐車場がほしい',
+    'wheelchair accessible please',
+  ].flatMap((text) => {
+    const parsed = parseConstraintText(text, 'MUST')
+    const needs = parsed.normalized_value.needs
+    return Array.isArray(needs) ? needs.map(String) : []
+  })
+  assert('the parser only ever emits vocabulary members', emitted.length > 0, true)
+  assert(
+    'and never invents one outside it',
+    emitted.filter((need) => !(ACCESSIBILITY_VOCABULARY as readonly string[]).includes(need)),
+    [],
+  )
+}
+
+/* 22. 0022 bug B: a room MUST no longer dead-ends on a Places-only candidate set. */
+console.log('22. a room MUST is escapable, and consent does not admit the wrong room type')
+{
+  const db = emptyDb()
+  const eventId = addEvent(db)
+  const [p1] = addParticipants(db, eventId, 1)
+  const travel = { [p1]: 20 }
+  const roomId = addConstraint(db, eventId, p1, 'MUST', 'room', { room: 'private' })
+  // room_type is filled only from Hot Pepper, so a candidate Places found and Hot Pepper did
+  // not match has NULL — which is most of Tokyo, and which used to be infeasible before AND
+  // after the private → semi_private step, so no question was ever asked.
+  addVenue(db, 'unconfirmed_room', { room_type: null, travel_minutes_by_participant: travel })
+  addVenue(db, 'confirmed_semi', {
+    room_type: 'semi_private',
+    travel_minutes_by_participant: travel,
+  })
+  addVenue(db, 'known_open', { room_type: 'open', travel_minutes_by_participant: travel })
+
+  assert('a 個室 MUST leaves nothing feasible', recompute(db, eventId).feasible_count, 0)
+  assert(
+    'an unconfirmed room type is infeasible, never silently satisfied',
+    candidateIsFeasible(db, eventId, 'unconfirmed_room'),
+    false,
+  )
+  assert('and the room MUST is what blocks it', candidateBlockingTypes(db, eventId, 'unconfirmed_room'), [
+    'room',
+  ])
+
+  // This is the bug: before 0022 the step unlocked 0 and no proposal was ever offered.
+  assert('the room step unlocks the unconfirmed venue and the 半個室', countUnlockedIfRelaxed(db, eventId, roomId), 2)
+  const proposalId = proposeRelaxation(db, eventId, nextId, nextTime)
+  assert('a room MUST is escapable through a proposal', proposalId !== null, true)
+  const negotiation = db.negotiations.find((row) => row.id === proposalId)!
+  assert('the proposal targets the room MUST', negotiation.constraint_id, roomId)
+  assert('and widens the room type AND accepts an unconfirmed one, in one question', negotiation.proposed_value, {
+    room: 'semi_private',
+    accept_unknown: true,
+  })
+  assert('advertising exactly what the step delivers', negotiation.unlocked_count, 2)
+
+  // fn_respond_negotiation with p_accept = true.
+  db.constraints.find((row) => row.id === negotiation.constraint_id)!.normalized_value =
+    negotiation.proposed_value
+  negotiation.status = 'ACCEPTED'
+  assert(
+    'accepting admits the unconfirmed venue',
+    candidateIsFeasible(db, eventId, 'unconfirmed_room'),
+    true,
+  )
+  assert('and the confirmed 半個室', candidateIsFeasible(db, eventId, 'confirmed_semi'), true)
+  // The composition rule: consenting to 半個室 must not smuggle in a venue we KNOW is a
+  // counter-only 大衆酒場.
+  assert(
+    'but never a venue known to be the wrong room type',
+    candidateIsFeasible(db, eventId, 'known_open'),
+    false,
+  )
+  const accepted = recompute(db, eventId)
+  assert('so exactly two venues are feasible', accepted.feasible_count, 2)
+  assert('and accessibility coverage is 0 when nobody asked', accepted.accessibility_unverified_count, 0)
+
+  // The ladder terminates: the relaxed value is a fixed point, so the same question is not
+  // asked twice.
+  assert('a second room step unlocks nothing', countUnlockedIfRelaxed(db, eventId, roomId), 0)
+  assert(
+    'so no further room proposal is offered',
+    proposeRelaxation(db, eventId, nextId, nextTime),
+    null,
+  )
+
+  // An unreadable room preference fails closed (0021 does the same for smoking) and its step
+  // unlocks nothing, so nobody is asked a question the engine cannot phrase.
+  const malformed = emptyDb()
+  const malformedEvent = addEvent(malformed)
+  const [m1] = addParticipants(malformed, malformedEvent, 1)
+  addConstraint(malformed, malformedEvent, m1, 'MUST', 'room', { room: 'たたみ' })
+  addVenue(malformed, 'confirmed_semi', {
+    room_type: 'semi_private',
+    travel_minutes_by_participant: { [m1]: 20 },
+  })
+  addVenue(malformed, 'unconfirmed_room', {
+    room_type: null,
+    travel_minutes_by_participant: { [m1]: 20 },
+  })
+  assert('an unreadable room preference fails closed', recompute(malformed, malformedEvent).feasible_count, 0)
+  assert(
+    'and is not proposed, because the step would unlock nothing',
+    proposeRelaxation(malformed, malformedEvent, nextId, nextTime),
+    null,
+  )
+
+  // The demo invariant, one more time and specifically against the new step: the seeded venues
+  // all HAVE a room_type, so `accept_unknown` admits none of them and the three unlocked venues
+  // are still exactly 001/002/004.
+  const demo = fresh()
+  recompute(demo)
+  const demoProposal = proposeRelaxation(demo, DEMO_EVENT_ID, nextId, nextTime)
+  const demoNegotiation = demo.negotiations.find((row) => row.id === demoProposal)!
+  assert('the demo still asks Bob about his room MUST', demoNegotiation.participant_id, BOB)
+  assert('with the composed step', demoNegotiation.proposed_value, {
+    room: 'semi_private',
+    accept_unknown: true,
+  })
+  assert('unlocking exactly three venues', demoNegotiation.unlocked_count, 3)
+  demo.constraints.find((row) => row.id === demoNegotiation.constraint_id)!.normalized_value =
+    demoNegotiation.proposed_value
+  demoNegotiation.status = 'ACCEPTED'
+  const demoRun = recompute(demo)
+  assert('the 0-then-3 invariant survives the new room step', demoRun.feasible_count, 3)
+  assert(
+    'and it is still 001, 002 and 004 — never 003',
+    demo.scores
+      .filter((score) => score.run_id === demoRun.run_id)
+      .map((score) => score.restaurant_place_id)
+      .sort(),
+    ['demo_place_001', 'demo_place_002', 'demo_place_004'],
   )
 }
 

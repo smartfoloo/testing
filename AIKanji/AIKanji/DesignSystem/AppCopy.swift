@@ -138,6 +138,15 @@ enum AppCopy {
         return networkError
     }
 
+    /// Mirrors `smokingLabel` in web/src/design/copy.ts.
+    static func smoking(_ value: String) -> String? {
+        switch value {
+        case "non_smoking": return "禁煙"
+        case "smoking_ok": return "喫煙可"
+        default: return nil
+        }
+    }
+
     static func room(_ value: String) -> String? {
         switch value {
         case "private": return "完全個室"
@@ -339,6 +348,14 @@ enum AppCopy {
 
     private static func accessibilityNeedLabel(_ need: String) -> String {
         switch need {
+        // 0022's controlled vocabulary, named 1:1 after the Google Places
+        // accessibilityOptions booleans it is recorded from.
+        case "wheelchair_accessible_entrance": return "車椅子で入れる入口"
+        case "wheelchair_accessible_restroom": return "車椅子で使えるトイレ"
+        case "wheelchair_accessible_seating": return "車椅子で座れる席"
+        case "wheelchair_accessible_parking": return "車椅子で使える駐車場"
+        // Pre-0022 wording, kept so a constraint stored before the backfill still reads in
+        // Japanese rather than showing a raw tag.
         case "wheelchair": return "車椅子対応"
         case "step_free": return "段差なし"
         case "elevator": return "エレベーター"
@@ -371,6 +388,31 @@ enum ScoreCopy {
     static let weightedTotal = "重み付け合計"
     static let weightedTotalNote = "この6項目に、この会の重みをかけて足した値です（0〜1）。"
     static let detailAccessibilityLabel = "スコアの内訳"
+}
+
+/// Recruit's Hot Pepper Gourmet Web Service usage guideline
+/// (https://webservice.recruit.co.jp/doc/hotpepper/guideline.html) makes a visible credit
+/// mandatory for any site or app that uses the data: either the supplied banner or the text
+/// 「Powered by ホットペッパーグルメ Webサービス」, linked to Hot Pepper Gourmet. So `credit` is
+/// their required wording verbatim — it is not ours to reword or shorten.
+///
+/// `scope` exists because only part of a listing comes from them: `restaurant-search`
+/// discovers venues through Google Places (name, location, rating) and merges Hot Pepper's
+/// 個室 availability and yen budget band onto the match. Printing the credit alone would claim
+/// the whole shortlist as theirs, so the sentence above it says which two fields are actually
+/// sourced there.
+///
+/// Google's Maps/Places terms carry their own, different attribution requirements for Places
+/// content; those are NOT discharged here. See README.md.
+///
+/// Mirrors `AttributionCopy` in web/src/design/copy.ts.
+enum AttributionCopy {
+    static let scope = "個室の有無と予算の目安は、ホットペッパーグルメ Webサービスの情報です。お店の場所や口コミ評価など、ほかの情報は別の提供元から取得しています。"
+    /// Recruit's mandated credit wording. Do not translate, abbreviate or hide it.
+    static let credit = "Powered by ホットペッパーグルメ Webサービス"
+    /// The credit has to be a real link, so a malformed literal must fail loudly here rather
+    /// than degrade into an unlinked label that would not satisfy the guideline.
+    static let url = URL(string: "https://www.hotpepper.jp/")!
 }
 
 /// `travel_reference` is a category, not a place, so the participant also picks a real place

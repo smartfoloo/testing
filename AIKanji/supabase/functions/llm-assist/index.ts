@@ -4,6 +4,12 @@
 //
 // The LLM key never leaves the server: set it with `supabase secrets set LLM_API_KEY=...`.
 // The client only ever calls this function.
+//
+// Nothing the model says about a *category the engine gates on* is taken on trust: the
+// response shape is validated fail-closed, `sensitivity` / `verification_requirement` are
+// derived server-side, and accessibility `needs` are filtered to the closed vocabulary of
+// migration 0022 (ACCESSIBILITY_NEEDS below). An unmatchable need would otherwise make a
+// never-relaxable MUST unsatisfiable by every venue in Tokyo.
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
 
@@ -36,6 +42,39 @@ const NORMALIZED_TYPES = [
 ] as const;
 
 const SENSITIVE_TYPES = ["allergy", "dietary", "accessibility"] as const;
+
+/// The CLOSED accessibility vocabulary. It is exactly the four nullable booleans the Google
+/// Places API (New) returns in `accessibilityOptions` — wheelchairAccessibleEntrance /
+/// Parking / Restroom / Seating — named after them, so the venue side maps onto it 1:1 with no
+/// inference (functions/restaurant-search records a member if and only if the matching boolean
+/// came back true).
+///
+/// It is defined once in migration 0022 (fn_accessibility_vocabulary, plus the CHECK on
+/// restaurant_features.accessibility_tags) and mirrored here and in web/src/backend/engine.ts.
+/// Feasibility is exact array containment (fn_candidate_blocking_types), so a need outside this
+/// list can never be matched by any venue — and because an accessibility MUST is deliberately
+/// never relaxable, storing one would mean zero candidates forever. That is why the prompt
+/// states the list AND the validator enforces it: the model is not trusted with the vocabulary
+/// any more than it is trusted with `sensitivity`.
+const ACCESSIBILITY_NEEDS = [
+  "wheelchair_accessible_entrance",
+  "wheelchair_accessible_parking",
+  "wheelchair_accessible_restroom",
+  "wheelchair_accessible_seating",
+] as const;
+
+/// The two values the pre-0022 prompt used as its open-ended examples, so they are the ones
+/// already in the wild (and the ones a model that saw the old spec will still emit). Both are
+/// about GETTING IN, which is precisely what wheelchairAccessibleEntrance certifies, so they
+/// map onto it and onto nothing more — aliasing them never invents a restroom or a seating
+/// requirement nobody stated. Migration 0022 applies the identical map when it canonicalises
+/// rows written before the vocabulary existed.
+/// A Map rather than an object literal so a need called "constructor" or "__proto__" resolves
+/// to nothing instead of to something inherited from Object.prototype.
+const ACCESSIBILITY_ALIASES = new Map<string, string>([
+  ["step_free", "wheelchair_accessible_entrance"],
+  ["wheelchair", "wheelchair_accessible_entrance"],
+]);
 
 type NormalizedType = (typeof NORMALIZED_TYPES)[number];
 type Visibility = "PUBLIC" | "ANONYMOUS";
@@ -129,9 +168,23 @@ normalized_value shape by type:
   smoking      {"preference": "non_smoking"|"smoking_ok"}
   room         {"room": "private"|"semi_private"|"open"}
   travel_time  {"max_minutes": number}
-  accessibility{"needs": string[]}         e.g. ["step_free","wheelchair"]
+  accessibility{"needs": string[]}         CLOSED LIST, see below
   atmosphere   {"tags": string[]}          e.g. ["quiet","lively"]
   other        {}
+
+accessibility "needs" is a CLOSED list. Use only these values, exactly as written, and never
+invent another one:
+${ACCESSIBILITY_NEEDS.map((need) => `  ${need}`).join("\n")}
+They are the only four things a venue's accessibility can be verified against, so a value
+outside the list can never be checked and is worse than useless. Pick every member the writer
+clearly needs and nothing more: 「車椅子で入れる」/「段差がない」 is
+wheelchair_accessible_entrance, 「車椅子対応のトイレ」 adds
+wheelchair_accessible_restroom, 「車椅子席」 adds wheelchair_accessible_seating,
+「車椅子で使える駐車場」 adds wheelchair_accessible_parking.
+An accessibility need this list CANNOT express — an elevator, a wide aisle, braille, a guide
+dog, sign language — goes in semantic_remainder in the writer's own words, and normalized_type
+stays accessibility if any member above still applies. Never approximate it with a member that
+means something else.
 
 semantic_remainder: the part of the writer's own wording that normalized_value does not
 express — copy their words, in their language, and nothing else. Use null when the shape
@@ -139,6 +192,8 @@ already covers the whole text. Never invent words that are not in the text, neve
 and never put the whole text there just because you are unsure.
   "個室で、日本酒が充実してるところ" as room -> "日本酒が充実してる"
   "budget under 4000 yen" as budget -> null
+  "車椅子で入れて、エレベーターがあるところ" as accessibility ->
+    {"needs":["wheelchair_accessible_entrance"]}, semantic_remainder "エレベーターがある"
 
 Set needs_clarification true when the text is empty, ambiguous, or you cannot fill the shape.
 Suggest ANONYMOUS for allergy, dietary and accessibility; PUBLIC otherwise.
@@ -219,6 +274,85 @@ function applyDefaultVisibility(result: ModelParse): ModelParse {
     return { ...result, suggested_visibility: "ANONYMOUS" };
   }
   return result;
+}
+
+/// The accessibility vocabulary, enforced on the model's answer rather than trusted.
+///
+/// The prompt states the closed list, but a prompt is a request and this is a safety category,
+/// so `needs` is filtered here the same way a hallucinated extra key is rejected in validate().
+/// Three outcomes, and NONE of them silently drops a stated requirement:
+///
+///   1. every need is a vocabulary member (after aliasing) -> untouched.
+///   2. some are, some are not -> the members are kept and gate the search, the rest are
+///      removed from `needs`, the writer's OWN WORDING is preserved in semantic_remainder
+///      (falling back to their whole text when the model offered no remainder), and
+///      needs_clarification is forced true so the human is asked before this is saved. Keeping
+///      an unmatched member instead would be worse than dropping it: feasibility is exact array
+///      containment and an accessibility MUST is never relaxable, so ONE unknown value means
+///      zero candidates forever with no way out — the bug 0022 exists to remove.
+///   3. NOTHING is expressible (「エレベーターがある店」) -> the row becomes an `other` note with
+///      the same remainder and clarification flag, deliberately NOT an accessibility MUST with
+///      an empty `needs`, because that shape fails closed for every venue and cannot be
+///      negotiated. A note the group's 幹事 can act on is honest about the engine being unable
+///      to verify the requirement; an unsatisfiable MUST would pretend to enforce it while
+///      quietly excluding all of Tokyo. The ANONYMOUS default is kept regardless: it is still
+///      disability information, and the participant still owns the final visibility choice
+///      (which is why this runs AFTER applyDefaultVisibility).
+///
+/// `sensitivity` and `verification_requirement` are derived afterwards from whatever type
+/// survives, so they always match what 0018's trigger would compute for the stored row.
+function applyAccessibilityVocabulary(
+  result: ModelParse,
+  rawText: string,
+): ModelParse {
+  if (result.normalized_type !== "accessibility") return result;
+
+  const stated = Array.isArray(result.normalized_value.needs)
+    ? result.normalized_value.needs
+    : [];
+  const canonical: string[] = [];
+  let dropped = stated.length === 0;
+  for (const need of stated) {
+    const mapped = typeof need === "string"
+      ? ACCESSIBILITY_ALIASES.get(need) ?? need
+      : null;
+    if (
+      mapped !== null &&
+      (ACCESSIBILITY_NEEDS as readonly string[]).includes(mapped)
+    ) {
+      if (!canonical.includes(mapped)) canonical.push(mapped);
+      // An alias is a rename, but 'wheelchair' -> entrance is still narrower than what the
+      // participant may have meant, so it counts as something a human should confirm.
+      if (mapped !== need) dropped = true;
+    } else {
+      dropped = true;
+    }
+  }
+  // Sorted so the stored value matches fn_accessibility_canonical_tags' output.
+  canonical.sort();
+  if (!dropped) {
+    return {
+      ...result,
+      normalized_value: { ...result.normalized_value, needs: canonical },
+    };
+  }
+
+  const remainder = result.semantic_remainder ?? (rawText.trim() || null);
+  if (canonical.length === 0) {
+    return {
+      ...result,
+      normalized_type: "other",
+      normalized_value: {},
+      semantic_remainder: remainder,
+      needs_clarification: true,
+    };
+  }
+  return {
+    ...result,
+    normalized_value: { ...result.normalized_value, needs: canonical },
+    semantic_remainder: remainder,
+    needs_clarification: true,
+  };
 }
 
 /// The two server-owned fields, assigned from normalized_type (and kind) rather than from the
@@ -522,9 +656,18 @@ Deno.serve(async (req) => {
       await callModel(raw_text, kind, language),
       raw_text,
     );
+    // Order matters: the ANONYMOUS default is chosen while the type is still `accessibility`,
+    // so a need the vocabulary cannot express keeps that default even when it degrades to a
+    // note; the server-owned metadata is then derived from whatever type survived.
     return json(
       validated
-        ? applyServerMetadata(applyDefaultVisibility(validated), kind)
+        ? applyServerMetadata(
+          applyAccessibilityVocabulary(
+            applyDefaultVisibility(validated),
+            raw_text,
+          ),
+          kind,
+        )
         : FALLBACK,
     );
   } catch (error) {

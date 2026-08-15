@@ -330,6 +330,10 @@ begin
   v_result := fn_recompute_feasibility(v_event_id);
   perform t_check('seeded cache keeps exactly three feasible venues after the relaxation',
                   (v_result->>'feasible_count')::int = 3, v_result::text);
+  -- 0022's new key is 0 here: the five personas state no accessibility MUST, so no venue is
+  -- excluded for unverified accessibility and the demo payload is unchanged in meaning.
+  perform t_check('and the demo reports no accessibility-only exclusions',
+                  (v_result->>'accessibility_unverified_count')::int = 0, v_result::text);
 
   select array_agg(r.place_id order by r.place_id) into v_places
     from restaurants r
@@ -379,12 +383,15 @@ begin
     ('qa0021_access_full'), ('qa0021_access_partial'), ('qa0021_access_none'),
     ('qa0021_smoke_non'), ('qa0021_smoke_ok'), ('qa0021_smoke_unknown');
 
+  -- Tags are vocabulary members since 0022 (fn_accessibility_vocabulary); the venue-side CHECK
+  -- refuses anything else, which is what makes 'needs' and 'tags' the same language.
   insert into restaurant_features
     (place_id, price_yen_estimate, room_type, dietary_tags, accessibility_tags, smoking_policy)
   values
     ('qa0021_access_full', 3000, 'open', array['qa0021_access'],
-     array['step_free','wheelchair'], null),
-    ('qa0021_access_partial', 3000, 'open', array['qa0021_access'], array['step_free'], null),
+     array['wheelchair_accessible_entrance','wheelchair_accessible_restroom'], null),
+    ('qa0021_access_partial', 3000, 'open', array['qa0021_access'],
+     array['wheelchair_accessible_entrance'], null),
     -- No accessibility data at all: the state every venue is in until somebody records it.
     ('qa0021_access_none', 3000, 'open', array['qa0021_access'], '{}', null),
     ('qa0021_smoke_non', 3000, 'open', array['qa0021_smoke'], '{}', 'non_smoking'),
@@ -397,8 +404,10 @@ begin
           'dietary', '{"tags":["qa0021_access"]}', 'ANONYMOUS');
   insert into participant_constraints (event_id, participant_id, kind, raw_text,
                                        normalized_type, normalized_value, visibility)
-  values (v_access_event, v_access_pid, 'MUST', '車椅子で入れる店',
-          'accessibility', '{"needs":["step_free","wheelchair"]}', 'ANONYMOUS')
+  values (v_access_event, v_access_pid, 'MUST', '車椅子で入れて、トイレも使える店',
+          'accessibility',
+          '{"needs":["wheelchair_accessible_entrance","wheelchair_accessible_restroom"]}',
+          'ANONYMOUS')
   returning id into v_access_need_id;
 
   perform t_check('an accessibility MUST is met only when every need is met',
@@ -676,6 +685,347 @@ begin
                   (select proposed_value from negotiations where id = v_again)
                     = '{"max_minutes":18}'::jsonb,
                   (select proposed_value::text from negotiations where id = v_again));
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0022 (A): the accessibility vocabulary, enforced on both sides, plus the coverage count
+-- that stops a zero-candidate result from being silent.
+--
+-- Nothing had ever written restaurant_features.accessibility_tags (0016 added the column,
+-- 0017's writer deliberately skips it), 0021 made an empty tag list fail closed, and
+-- accessibility is never relaxable — so 「車椅子で入れる店」 as a MUST meant zero candidates and
+-- no proposal, forever. And `needs` was an open string array against a containment test, so the
+-- two vocabularies would rarely have met even with data.
+--
+-- Every scratch venue below carries a unique dietary tag its event requires, so these venues
+-- can never be feasible for the demo event and vice versa; the 0-then-3 invariant is
+-- re-asserted at the end regardless.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00220000-0000-0000-0000-00000000a000';
+  v_pid uuid := '00220000-0000-0000-0000-00000000a001';
+  v_needs_id uuid;
+  v_result jsonb;
+  v_written int;
+  v_places text[];
+  v_raised boolean;
+begin
+  perform t_as_admin();
+
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA accessibility vocabulary', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_pid, v_event, gen_random_uuid(), 'Wheelchair user', 'organizer', 'station');
+  update events set organizer_participant_id = v_pid where id = v_event;
+
+  -- The vocabulary is exactly the four nullable booleans Google Places (New) returns in
+  -- `accessibilityOptions`, named after them so the provider maps onto it 1:1.
+  perform t_check('the vocabulary is the four Places accessibilityOptions booleans',
+                  fn_accessibility_vocabulary() = array[
+                    'wheelchair_accessible_entrance','wheelchair_accessible_parking',
+                    'wheelchair_accessible_restroom','wheelchair_accessible_seating'],
+                  fn_accessibility_vocabulary()::text);
+
+  -- Canonicalisation is the only place a value is translated, and it never invents a member:
+  -- the two examples the old open-ended prompt gave were both about GETTING IN.
+  perform t_check('the legacy step_free / wheelchair values map onto the entrance boolean',
+                  fn_accessibility_canonical_tags(array['wheelchair','step_free'])
+                    = array['wheelchair_accessible_entrance'],
+                  fn_accessibility_canonical_tags(array['wheelchair','step_free'])::text);
+  perform t_check('a tag outside the vocabulary is dropped rather than stored',
+                  fn_accessibility_canonical_tags(array['elevator']) = '{}'::text[],
+                  fn_accessibility_canonical_tags(array['elevator'])::text);
+  perform t_check('canonical tags are deduped and sorted',
+                  fn_accessibility_canonical_tags(array['wheelchair_accessible_seating',
+                    'wheelchair_accessible_entrance','wheelchair_accessible_seating'])
+                    = array['wheelchair_accessible_entrance','wheelchair_accessible_seating']);
+  perform t_check('and the same rule applies to a constraint value',
+                  fn_accessibility_canonical_needs(
+                    '{"needs":["step_free","elevator"]}')
+                    = array['wheelchair_accessible_entrance']
+                  and fn_accessibility_canonical_needs('{"needs":["elevator"]}') = '{}'::text[]
+                  and fn_accessibility_canonical_needs('{}') = '{}'::text[]
+                  and fn_accessibility_canonical_needs('{"needs":"wheelchair"}') = '{}'::text[]);
+
+  insert into restaurants (place_id) values
+    ('qa0022_access_full'), ('qa0022_access_partial'), ('qa0022_access_none'),
+    ('qa0022_access_and_budget');
+  insert into restaurant_features
+    (place_id, price_yen_estimate, room_type, dietary_tags, accessibility_tags)
+  values
+    ('qa0022_access_full', 3000, 'open', array['qa0022_access'],
+     array['wheelchair_accessible_entrance','wheelchair_accessible_restroom']),
+    ('qa0022_access_partial', 3000, 'open', array['qa0022_access'],
+     array['wheelchair_accessible_entrance']),
+    -- No data at all: the state every venue was in before this migration.
+    ('qa0022_access_none', 3000, 'open', array['qa0022_access'], '{}'),
+    -- Also over budget, so it is NOT one phone call away from being a candidate.
+    ('qa0022_access_and_budget', 9000, 'open', array['qa0022_access'], '{}');
+
+  -- The venue side is constrained, so 'needs' and 'tags' cannot drift into different languages.
+  v_raised := false;
+  begin
+    update restaurant_features set accessibility_tags = array['step_free']
+     where place_id = 'qa0022_access_none';
+  exception when check_violation then
+    v_raised := true;
+  end;
+  perform t_check('the venue side refuses a tag outside the vocabulary', v_raised);
+
+  -- …and the CHECK cannot drift from fn_accessibility_vocabulary, because every member the
+  -- function lists is inserted here.
+  v_raised := false;
+  begin
+    update restaurant_features set accessibility_tags = fn_accessibility_vocabulary()
+     where place_id = 'qa0022_access_none';
+  exception when check_violation then
+    v_raised := true;
+  end;
+  perform t_check('and accepts every member fn_accessibility_vocabulary lists', not v_raised);
+  update restaurant_features set accessibility_tags = '{}'
+   where place_id = 'qa0022_access_none';
+
+  -- The provider write path. 0017's fn_record_provider_candidates is frozen and promises never
+  -- to touch this column, so anything recorded here came from 0022's second, additive writer.
+  v_written := fn_record_provider_accessibility(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0022_access_none',
+      'accessibility_tags', jsonb_build_array('wheelchair_accessible_entrance')),
+    -- No `accessibility_tags` key at all: Places returned no accessibilityOptions object.
+    jsonb_build_object('place_id', 'qa0022_access_full')));
+  perform t_check('the provider write path records a confirmed boolean as its member',
+                  v_written = 1
+                  and (select accessibility_tags from restaurant_features
+                        where place_id = 'qa0022_access_none')
+                      = array['wheelchair_accessible_entrance'],
+                  v_written::text);
+  perform t_check('an absent accessibilityOptions object changes nothing',
+                  (select accessibility_tags from restaurant_features
+                    where place_id = 'qa0022_access_full')
+                  = array['wheelchair_accessible_entrance','wheelchair_accessible_restroom']);
+  -- A present-but-empty answer is Places saying "nothing confirmed". It must be able to retract
+  -- a stale tag: a renovation that removes the ramp cannot be invisible.
+  perform fn_record_provider_accessibility(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0022_access_none',
+      'accessibility_tags', '[]'::jsonb)));
+  perform t_check('an empty answer retracts a tag instead of preserving it',
+                  (select accessibility_tags from restaurant_features
+                    where place_id = 'qa0022_access_none') = '{}'::text[]);
+  -- A stale deployment sending the old vocabulary is canonicalised, never a check violation
+  -- that would fail the whole search.
+  perform fn_record_provider_accessibility(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0022_access_none',
+      'accessibility_tags', jsonb_build_array('step_free', 'elevator'))));
+  perform t_check('a legacy or unknown provider tag is canonicalised on the way in',
+                  (select accessibility_tags from restaurant_features
+                    where place_id = 'qa0022_access_none')
+                  = array['wheelchair_accessible_entrance'],
+                  (select accessibility_tags::text from restaurant_features
+                    where place_id = 'qa0022_access_none'));
+  update restaurant_features set accessibility_tags = '{}'
+   where place_id = 'qa0022_access_none';
+
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'QA pool gate',
+          'dietary', '{"tags":["qa0022_access"]}', 'ANONYMOUS'),
+         (v_event, v_pid, 'MUST', '4000円まで', 'budget', '{"max_yen":4000}', 'PUBLIC');
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', '車椅子で入れて、車椅子対応のトイレがある店',
+          'accessibility',
+          '{"needs":["wheelchair_accessible_entrance","wheelchair_accessible_restroom"]}',
+          'ANONYMOUS')
+  returning id into v_needs_id;
+
+  perform t_check('an accessibility MUST is MET when the recorded tags cover the needs',
+                  fn_candidate_is_feasible(v_event, 'qa0022_access_full'));
+  perform t_check('recorded tags that cover only part of the needs stay infeasible',
+                  not fn_candidate_is_feasible(v_event, 'qa0022_access_partial'));
+  perform t_check('and no recorded tags at all is infeasible, never silently satisfied',
+                  not fn_candidate_is_feasible(v_event, 'qa0022_access_none'));
+
+  -- The single MUST chain, now answerable: which types stand in the way?
+  perform t_check('the blocking types name accessibility as the only obstacle',
+                  fn_candidate_blocking_types(v_event, 'qa0022_access_none')
+                    = array['accessibility'],
+                  fn_candidate_blocking_types(v_event, 'qa0022_access_none')::text);
+  perform t_check('and name both obstacles when there are two',
+                  fn_candidate_blocking_types(v_event, 'qa0022_access_and_budget')
+                    = array['accessibility','budget'],
+                  fn_candidate_blocking_types(v_event, 'qa0022_access_and_budget')::text);
+  perform t_check('a venue with no feature row is reported as unknown, not as accessibility',
+                  fn_candidate_blocking_types(v_event, 'no_such_place')
+                    = array['unknown_venue']);
+  perform t_check('and feasibility is exactly "nothing blocks it"',
+                  fn_candidate_blocking_types(v_event, 'qa0022_access_full') = '{}'::text[]
+                  and fn_candidate_is_feasible(v_event, 'qa0022_access_full'));
+
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('only the venue whose tags cover every need is feasible',
+                  (v_result->>'feasible_count')::int = 1, v_result::text);
+  -- The reason is in data the client can already read: 「N件は車椅子対応が確認できませんでした
+  -- （お店に確認できます）」 instead of 「0件」. The over-budget venue is deliberately NOT counted:
+  -- a phone call about its entrance would not put it on the shortlist.
+  perform t_check('the payload reports how many venues are only missing accessibility proof',
+                  (v_result->>'accessibility_unverified_count')::int = 2, v_result::text);
+  perform t_check('and every pre-0022 key is still there with its old meaning',
+                  v_result ? 'run_id' and v_result ? 'feasible_count'
+                  and (v_result->>'run_id')::uuid is not null, v_result::text);
+  perform t_check('an accessibility MUST is still never proposed for relaxation',
+                  fn_propose_relaxation(v_event) is null);
+
+  -- WHY llm-assist filters `needs` server-side instead of trusting the model: one value the
+  -- vocabulary cannot express excludes every venue in Tokyo, and accessibility is never
+  -- relaxable, so there is no way back out. The boundary drops it and keeps the participant's
+  -- own wording in semantic_remainder instead.
+  update participant_constraints set normalized_value = '{"needs":["elevator"]}'
+   where id = v_needs_id;
+  select count(*) into v_written from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event, r.place_id);
+  perform t_check('an out-of-vocabulary need can never be matched by any venue',
+                  v_written = 0 and not fn_candidate_is_feasible(v_event, 'qa0022_access_full'),
+                  v_written::text);
+  perform t_check('and cannot be negotiated either, which is why it must never be stored',
+                  fn_propose_relaxation(v_event) is null);
+  perform t_check('so the canonical form drops it, leaving the wording to semantic_remainder',
+                  fn_accessibility_canonical_needs('{"needs":["elevator"]}') = '{}'::text[]);
+  update participant_constraints
+     set normalized_value =
+           '{"needs":["wheelchair_accessible_entrance","wheelchair_accessible_restroom"]}'
+   where id = v_needs_id;
+
+  select array_agg(r.place_id order by r.place_id) into v_places
+    from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event, r.place_id);
+  perform t_check('and the accessible venue is feasible again afterwards',
+                  v_places = array['qa0022_access_full'], v_places::text);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0022 (B): a `room` MUST no longer dead-ends on a Places-only candidate set.
+--
+-- room_type is populated only from Hot Pepper's private_room field; Google Places has no
+-- private-room field at all, so a candidate discovered through Places and not matched in Hot
+-- Pepper has room_type NULL — `distinct from` 'private' AND from the 'semi_private' 0021
+-- relaxed it to, so fn_count_unlocked_if_relaxed returned 0 and no question was ever asked.
+-- 個室 is the centrepiece of the PRD's demo, so that silence is unacceptable.
+--
+-- The step now widens the room type AND accepts an unconfirmed one, in ONE question: see
+-- fn_relaxed_value for why neither two-rung ordering is reachable.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00220000-0000-0000-0000-00000000b000';
+  v_pid uuid := '00220000-0000-0000-0000-00000000b001';
+  v_uid uuid := '88888888-8888-8888-8888-888888888888';
+  v_room_id uuid;
+  v_neg_id uuid;
+  v_neg negotiations%rowtype;
+  v_result jsonb;
+  v_places text[];
+  v_baseline int;
+begin
+  perform t_as_admin();
+
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA private room', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_pid, v_event, v_uid, 'Bob', 'organizer', 'office');
+  update events set organizer_participant_id = v_pid where id = v_event;
+
+  insert into restaurants (place_id) values
+    ('qa0022_room_unknown'), ('qa0022_room_semi'), ('qa0022_room_open');
+  insert into restaurant_features (place_id, price_yen_estimate, room_type, dietary_tags)
+  values
+    -- Discovered through Places, no Hot Pepper match: room_type NULL. This is what the real
+    -- pipeline produces for most of Tokyo.
+    ('qa0022_room_unknown', 3000, null, array['qa0022_room']),
+    ('qa0022_room_semi', 3000, 'semi_private', array['qa0022_room']),
+    ('qa0022_room_open', 3000, 'open', array['qa0022_room']);
+
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'QA pool gate',
+          'dietary', '{"tags":["qa0022_room"]}', 'ANONYMOUS');
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', '個室がいい', 'room', '{"room":"private"}', 'PUBLIC')
+  returning id into v_room_id;
+
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('a 個室 MUST leaves nothing feasible when no venue confirms one',
+                  (v_result->>'feasible_count')::int = 0, v_result::text);
+  perform t_check('an unconfirmed room type is infeasible, never silently satisfied',
+                  not fn_candidate_is_feasible(v_event, 'qa0022_room_unknown'));
+  perform t_check('the coverage count is 0 when nobody asked about accessibility',
+                  (v_result->>'accessibility_unverified_count')::int = 0, v_result::text);
+  perform t_check('and the room MUST is what blocks the unconfirmed venue',
+                  fn_candidate_blocking_types(v_event, 'qa0022_room_unknown') = array['room']);
+
+  -- This is the bug: before 0022 this was 0, so no proposal was ever offered.
+  perform t_check('the room step unlocks the unconfirmed venue and the confirmed 半個室',
+                  fn_count_unlocked_if_relaxed(v_event, v_room_id) = 2,
+                  fn_count_unlocked_if_relaxed(v_event, v_room_id)::text);
+  v_neg_id := fn_propose_relaxation(v_event);
+  perform t_check('a room MUST on an unconfirmed venue is escapable through a proposal',
+                  v_neg_id is not null);
+  select * into v_neg from negotiations where id = v_neg_id;
+  perform t_check('the proposal targets the room MUST', v_neg.constraint_id = v_room_id);
+  perform t_check('and widens the room type AND accepts an unconfirmed one, in one question',
+                  v_neg.proposed_value
+                    = '{"room":"semi_private","accept_unknown":true}'::jsonb,
+                  v_neg.proposed_value::text);
+  perform t_check('fn_propose_relaxation advertises exactly what fn_relaxed_value delivers',
+                  v_neg.proposed_value = fn_relaxed_value('room', '{"room":"private"}')
+                  and v_neg.unlocked_count = 2, v_neg.unlocked_count::text);
+
+  perform t_as_user(v_uid);
+  v_result := fn_respond_negotiation(v_neg_id, true);
+  perform t_check('accepting admits the unconfirmed venue and the confirmed 半個室',
+                  (v_result->>'feasible_count')::int = 2, v_result::text);
+  perform t_as_admin();
+  -- The composition rule: consenting to 半個室 must not smuggle in a venue we KNOW is a
+  -- counter-only 大衆酒場.
+  perform t_check('a venue known to be the wrong room type still fails after the consent',
+                  not fn_candidate_is_feasible(v_event, 'qa0022_room_open'));
+  select array_agg(r.place_id order by r.place_id) into v_places
+    from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event, r.place_id);
+  perform t_check('so exactly the 半個室 and the unconfirmed venue are admitted',
+                  v_places = array['qa0022_room_semi','qa0022_room_unknown'], v_places::text);
+
+  -- The ladder terminates: the relaxed value is a fixed point, so nobody is asked the same
+  -- question a second time.
+  perform t_check('the relaxed room value is a fixed point',
+                  fn_relaxed_value('room', v_neg.proposed_value) = v_neg.proposed_value,
+                  fn_relaxed_value('room', v_neg.proposed_value)::text);
+  perform t_check('so a second room step unlocks nothing and is never proposed',
+                  fn_count_unlocked_if_relaxed(v_event, v_room_id) = 0
+                  and fn_propose_relaxation(v_event) is null);
+
+  -- An unreadable room preference fails closed (0021 does the same for smoking) and its step
+  -- unlocks nothing, so nobody is asked a question the engine cannot phrase.
+  update participant_constraints set normalized_value = '{"room":"たたみ"}' where id = v_room_id;
+  select count(*) into v_baseline from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event, r.place_id);
+  perform t_check('an unreadable room preference fails closed', v_baseline = 0,
+                  v_baseline::text);
+  perform t_check('and its step unlocks nothing, so it is never proposed',
+                  fn_count_unlocked_if_relaxed(v_event, v_room_id) = 0
+                  and fn_relaxed_value('room', '{"room":"たたみ"}')
+                      = '{"room":"たたみ","accept_unknown":true}'::jsonb);
+  update participant_constraints set normalized_value = '{"room":"semi_private"}'
+   where id = v_room_id;
+  -- A 半個室 MUST gets the accept_unknown concession only: there is nothing wider to widen to,
+  -- and it still never admits a venue known to be `open`.
+  perform t_check('a semi_private MUST is relaxed by accepting unknowns alone',
+                  fn_relaxed_value('room', '{"room":"semi_private"}')
+                    = '{"room":"semi_private","accept_unknown":true}'::jsonb);
 end $$;
 
 -- ---------------------------------------------------------------------------

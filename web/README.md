@@ -99,6 +99,53 @@ shell is precached; Supabase REST/RPC/auth responses deliberately are **not**, b
 they are per-session and authorization-dependent. Verify with `npm run build && npm run
 preview` — service workers do not run in dev.
 
+## Provider attribution — a licence obligation, not decoration
+
+Venue attributes come from two providers, and one of them requires a credit.
+
+`AIKanji/supabase/functions/restaurant-search/index.ts` discovers candidates through the
+**Google Places** API (`displayName`, location, `rating`/`userRatingCount`, `priceLevel`) and
+then calls the **Hot Pepper Gourmet Web Service**
+(`https://webservice.recruit.co.jp/hotpepper/gourmet/v1/`), merging that shop's
+`private_room` into `room_type` and its `budget.average` into `price_yen_estimate` on the
+matched candidate. Both of those merged fields are printed on every recommendation card.
+
+Recruit's usage guideline (<https://webservice.recruit.co.jp/doc/hotpepper/guideline.html>)
+makes a visible credit **mandatory** for any site or app that uses the data: either their
+supplied banner image or the text 「Powered by ホットペッパーグルメ Webサービス」, linked to Hot
+Pepper Gourmet. We use the text link — no third-party image asset to host or keep in sync.
+
+| | |
+| --- | --- |
+| Rendered by | `ProviderAttribution` in `src/features/Recommendations.tsx` (iOS: `RecommendationListView.swift`) |
+| Wording | `AttributionCopy` in `src/design/copy.ts` (iOS: `AppCopy.swift`) — same strings on both clients |
+| Where | Foot of the recommendation shortlist, below the last card. One credit per list, not per card |
+| `data-testid` | `provider-attribution`, `provider-attribution-link` (iOS `accessibilityIdentifier`s match) |
+| Link | `https://www.hotpepper.jp/`, `target="_blank"` + `rel="noopener noreferrer"` (iOS: `Link`) |
+
+Rules for anyone touching it:
+
+1. **Do not delete it, and do not make it unreadable.** It looks like a footnote on purpose,
+   but a credit nobody can read does not discharge the obligation. It is styled with the
+   secondary-note tokens (`text-small`/`text-caption` at `text-ink/72`), which measure 5.4:1
+   in light mode and 8.0:1 in dark — both clear WCAG AA. The link is a 44px tap target.
+2. **Do not reword 「Powered by ホットペッパーグルメ Webサービス」.** That string is Recruit's,
+   quoted verbatim.
+3. **Keep the scope sentence above it.** Hot Pepper supplies only 個室 and the yen band; the
+   sentence says so, because the bare credit would claim the whole shortlist — including
+   Places-sourced names, locations and ratings — as theirs.
+4. It is hidden only when the shortlist is empty, since then no sourced attribute is on screen.
+
+### Not covered: Google Maps/Places attribution
+
+Google's Maps Platform terms impose their **own, separate** attribution requirements on
+Places content (broadly: display "Powered by Google" / the Google logo where Places data or
+Maps imagery appears, and preserve the `attributions`/third-party notices a Place returns).
+Those obligations are **not** discharged by the Hot Pepper credit and are **not implemented**
+here. Nothing was guessed at: the exact placement and asset rules need to be read off the
+current Maps Platform policy before anything ships. Tracked in `AIKanji/README.md`'s
+follow-up punch list.
+
 ## Deliberate deviations
 
 1. **Mock-mode footnote on the welcome screen.** The only UI not in the iOS app: without

@@ -177,6 +177,13 @@ export interface PendingNegotiation {
 export interface FeasibilityResult {
   run_id: string | null
   feasible_count: number
+  /**
+   * Candidates whose ONLY unmet MUSTs are accessibility ones (0022) — the venues a single
+   * phone call away. Accessibility is deliberately never relaxable, so without this the
+   * group would just see 「0件」 with no way to understand or act on it. Optional: a run
+   * recorded before 0022 does not carry it.
+   */
+  accessibility_unverified_count?: number | null
 }
 
 export type RecommendationLabel =

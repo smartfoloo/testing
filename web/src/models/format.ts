@@ -98,10 +98,23 @@ export function negotiationQuestion(negotiation: PendingNegotiation): string {
   const constraint = negotiation.participant_constraints
   switch (constraint.normalized_type) {
     case 'room': {
+      // 0022 made the room step composite: it widens 個室 → 半個室 AND accepts venues whose
+      // room type no provider could confirm. Consent has to describe BOTH concessions —
+      // asking someone to agree to something the question did not mention is exactly the
+      // failure this negotiation flow exists to prevent. The two parts are shown separately
+      // so a widening with nothing to confirm still reads as one plain change.
       const proposedRaw = text(negotiation.proposed_value, 'room')
       const currentRaw = text(constraint.normalized_value, 'room')
       const proposed = (proposedRaw ? roomLabel(proposedRaw) : null) ?? '別の席'
       const current = (currentRaw ? roomLabel(currentRaw) : null) ?? '今の条件'
+      const widened = proposedRaw !== null && currentRaw !== null && proposedRaw !== currentRaw
+      const acceptsUnknown = negotiation.proposed_value.accept_unknown === true
+      if (widened && acceptsUnknown) {
+        return `${current}を${proposed}に変更し、席のタイプが確認できていないお店も候補に含めてよいですか？`
+      }
+      if (acceptsUnknown) {
+        return `${current}かどうか確認できていないお店も、候補に含めてよいですか？`
+      }
       return `${current}を${proposed}に変更しても大丈夫ですか？`
     }
     case 'travel_time': {
