@@ -46,7 +46,7 @@ struct NegotiationConsentView: View {
             try await onResponse(accept)
             dismiss()
         } catch {
-            errorMessage = AppCopy.networkError
+            errorMessage = AppCopy.errorMessage(for: error)
         }
         isSubmitting = false
     }
@@ -71,7 +71,7 @@ struct NegotiationWatcher: ViewModifier {
             }
             .sheet(item: $pending) { negotiation in
                 NegotiationConsentView(negotiation: negotiation) { accept in
-                    try await service.respond(negotiationId: negotiation.id, accept: accept)
+                    _ = try await service.respond(negotiationId: negotiation.id, accept: accept)
                     pending = nil
                 }
             }

@@ -71,9 +71,12 @@ final class OrganizerDashboardViewModel: ObservableObject {
 
 struct OrganizerDashboardView: View {
     let eventId: UUID
+    let isOrganizer: Bool
     @Binding var decision: EventDecision?
+    @Binding var chosenRestaurantName: String?
     @StateObject private var viewModel = OrganizerDashboardViewModel()
     @State private var openRunId: UUID?
+    private let eventService = EventService()
 
     var body: some View {
         ScrollView {
@@ -109,7 +112,10 @@ struct OrganizerDashboardView: View {
                 }
                 if decision?.chosenPlaceId != nil {
                     AppCard {
-                        Label(AppCopy.chosen, systemImage: "checkmark.seal.fill")
+                        Label(
+                            chosenRestaurantName.map { "\(AppCopy.chosen)：\($0)" } ?? AppCopy.chosen,
+                            systemImage: "checkmark.seal.fill"
+                        )
                             .foregroundStyle(AppColors.accent)
                     }
                 }
@@ -128,7 +134,23 @@ struct OrganizerDashboardView: View {
         }
         .background(AppColors.background)
         .navigationDestination(item: $openRunId) { runId in
-            RecommendationListView(runId: runId, eventId: eventId, onChosen: { decision = $0 })
+            RecommendationListView(
+                runId: runId,
+                eventId: eventId,
+                isOrganizer: isOrganizer,
+                onChosen: { result in
+                    decision = result
+                    Task {
+                        if let placeId = result.chosenPlaceId {
+                            do {
+                                chosenRestaurantName = try await eventService.restaurantName(placeId: placeId)
+                            } catch {
+                                viewModel.errorMessage = AppCopy.errorMessage(for: error)
+                            }
+                        }
+                    }
+                }
+            )
         }
         .task { await viewModel.load(eventId: eventId) }
         .task { await viewModel.listenForRuns(eventId: eventId) }

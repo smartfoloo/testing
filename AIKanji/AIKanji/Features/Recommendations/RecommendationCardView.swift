@@ -7,6 +7,7 @@ struct RecommendationCardView: View {
     let isExplaining: Bool
     let isOrganizer: Bool
     let isChosen: Bool
+    let isChoosing: Bool
     let onChoose: () -> Void
 
     var body: some View {
@@ -23,7 +24,7 @@ struct RecommendationCardView: View {
                 HStack(alignment: .top) {
                     Text(title).font(AppTypography.title)
                     Spacer()
-                    Text(score.label?.badge ?? "おすすめ")
+                    Text(score.label?.badge ?? AppCopy.recommendationBadge(nil))
                         .font(AppTypography.small.weight(.bold))
                         .foregroundStyle(AppColors.ink)
                         .padding(.horizontal, AppSpacing.sm)
@@ -50,8 +51,9 @@ struct RecommendationCardView: View {
                     .font(AppTypography.caption.weight(.semibold))
                     .foregroundStyle(AppColors.accent)
                 if isOrganizer && !isChosen {
-                    PrimaryButton(title: "このお店に決める", systemImage: "checkmark") { onChoose() }
+                    PrimaryButton(title: "このお店に決める", systemImage: "checkmark", isLoading: isChoosing) { onChoose() }
                         .accessibilityIdentifier("choose-restaurant")
+                        .disabled(isChoosing)
                 } else if isChosen {
                     Text(AppCopy.chosen)
                         .font(AppTypography.body.weight(.bold))

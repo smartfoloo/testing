@@ -51,6 +51,15 @@ struct ConstraintEntryView: View {
         }
         .background(AppColors.background)
         .task {
+            do {
+                let saved = try await service.ownConstraints(participantId: participantId)
+                for constraint in saved {
+                    drafts[constraint.kind] = constraint.rawText
+                }
+                savedCount = saved.count
+            } catch {
+                errorMessage = AppCopy.errorMessage(for: error)
+            }
             isLoading = false
         }
         .sheet(item: $pending) { item in
@@ -60,7 +69,7 @@ struct ConstraintEntryView: View {
                     set: { pending = $0 }
                 )
             ) { confirmed in
-                Task { await save(confirmed) }
+                try await save(confirmed)
             }
         }
     }
@@ -133,36 +142,32 @@ struct ConstraintEntryView: View {
                 visibility: result.suggestedVisibility,
                 needsClarification: result.needsClarification
             )
-        } catch {
-            errorMessage = AppCopy.networkError
-        }
+        } catch { errorMessage = AppCopy.errorMessage(for: error) }
         isParsing = false
     }
 
-    private func save(_ constraint: PendingConstraint) async {
-        do {
-            try await service.insertConstraint(
-                eventId: eventId,
-                participantId: participantId,
-                kind: constraint.kind,
-                rawText: constraint.rawText,
-                normalizedType: constraint.normalizedType,
-                normalizedValue: constraint.normalizedValue,
-                visibility: constraint.visibility
-            )
-            drafts[constraint.kind] = ""
-            savedCount += 1
-            pending = nil
-        } catch {
-            errorMessage = AppCopy.networkError
-        }
+    private func save(_ constraint: PendingConstraint) async throws {
+        try await service.insertConstraint(
+            eventId: eventId,
+            participantId: participantId,
+            kind: constraint.kind,
+            rawText: constraint.rawText,
+            normalizedType: constraint.normalizedType,
+            normalizedValue: constraint.normalizedValue,
+            visibility: constraint.visibility
+        )
+        drafts[constraint.kind] = ""
+        savedCount += 1
+        pending = nil
     }
 }
 
 struct ConstraintConfirmSheet: View {
     @Binding var pending: ConstraintEntryView.PendingConstraint
-    let onConfirm: (ConstraintEntryView.PendingConstraint) -> Void
+    let onConfirm: (ConstraintEntryView.PendingConstraint) async throws -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var isSaving = false
+    @State private var errorMessage: String?
 
     var body: some View {
         BottomSheetScaffold(title: "こう解釈しました") {
@@ -176,6 +181,9 @@ struct ConstraintConfirmSheet: View {
                     Text("近い分類を選んでください。")
                         .font(AppTypography.caption)
                         .foregroundStyle(AppColors.accent)
+                }
+                if let errorMessage {
+                    InlineErrorView(message: errorMessage) { self.errorMessage = nil }
                 }
                 Picker("分類", selection: $pending.normalizedType) {
                     ForEach(NormalizedType.allCases) { Text($0.label).tag($0) }
@@ -191,11 +199,25 @@ struct ConstraintConfirmSheet: View {
                 }
                 HStack {
                     Button(AppCopy.cancel) { dismiss() }.frame(maxWidth: .infinity).frame(minHeight: 48)
-                    Button(AppCopy.save) { onConfirm(pending) }
+                    Button(isSaving ? AppCopy.loading : AppCopy.save) {
+                        Task {
+                            guard !isSaving else { return }
+                            isSaving = true
+                            errorMessage = nil
+                            do {
+                                try await onConfirm(pending)
+                                dismiss()
+                            } catch {
+                                errorMessage = AppCopy.errorMessage(for: error)
+                            }
+                            isSaving = false
+                        }
+                    }
                         .frame(maxWidth: .infinity)
                         .frame(minHeight: 48)
                         .buttonStyle(.borderedProminent).tint(AppColors.accent)
                         .accessibilityIdentifier("save-constraint")
+                        .disabled(isSaving)
                 }
             }
         }

@@ -43,6 +43,7 @@ final class RecommendationListViewModel: ObservableObject {
 struct RecommendationListView: View {
     let runId: UUID
     let eventId: UUID
+    let isOrganizer: Bool
     var onChosen: (EventDecision) -> Void
     @StateObject private var viewModel = RecommendationListViewModel()
     @State private var decision: EventDecision?
@@ -64,8 +65,9 @@ struct RecommendationListView: View {
                         feature: viewModel.features[score.restaurantPlaceId],
                         explanation: viewModel.explanations[score.restaurantPlaceId],
                         isExplaining: viewModel.explainingPlaceIds.contains(score.restaurantPlaceId),
-                        isOrganizer: true,
+                        isOrganizer: isOrganizer,
                         isChosen: decision?.chosenPlaceId == score.restaurantPlaceId,
+                        isChoosing: isChoosing,
                         onChoose: { Task { await choose(score: score) } }
                     )
                     .task { await viewModel.explain(score: score, runId: runId) }
@@ -101,7 +103,7 @@ struct RecommendationListView: View {
             let result = try await eventService.chooseRestaurant(eventId: eventId, placeId: score.restaurantPlaceId)
             decision = result
             onChosen(result)
-        } catch { choiceError = AppCopy.networkError }
+        } catch { choiceError = AppCopy.errorMessage(for: error) }
         isChoosing = false
     }
 }

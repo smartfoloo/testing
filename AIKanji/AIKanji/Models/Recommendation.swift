@@ -8,7 +8,7 @@ enum RecommendationLabel: String, Codable {
     case crowdPleaser = "crowd_pleaser"
 
     var badge: String {
-        AppCopy.recommendation(self)
+        AppCopy.recommendationBadge(self)
     }
 }
 

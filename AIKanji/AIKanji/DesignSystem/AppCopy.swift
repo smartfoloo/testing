@@ -26,6 +26,8 @@ enum AppCopy {
     static let loading = "読み込み中…"
     static let writingSummary = "お店の特徴をまとめています…"
     static let fallbackExplanation = "条件を満たす候補ですが、詳しい説明を取得できませんでした。"
+    static let permissionError = "この操作を行う権限がありません。"
+    static let invalidRequestError = "この操作は完了できませんでした。内容を確認して、もう一度お試しください。"
 
     static func objective(_ objective: EventObjective) -> String {
         switch objective {
@@ -73,11 +75,39 @@ enum AppCopy {
         switch label {
         case .fairest: return "全員の必須条件を満たしています"
         case .bestAccess: return "移動の負担が少ない候補です"
-        case .bestValue: return "みんなの希望に最も近いお店です"
+        case .bestValue: return "予算とのバランスが良い候補です"
         case .bestExperience: return "体験を重視した候補です"
-        case .crowdPleaser: return "バランスの良い候補です"
+        case .crowdPleaser: return "みんなの希望に最も近いお店です"
         case nil: return "条件に合う候補です"
         }
+    }
+
+    static func recommendationBadge(_ label: RecommendationLabel?) -> String {
+        switch label {
+        case .fairest: return "最も公平"
+        case .bestAccess: return "アクセス良好"
+        case .bestValue: return "コスパ重視"
+        case .bestExperience: return "体験重視"
+        case .crowdPleaser: return "みんなに好評"
+        case nil: return "おすすめ"
+        }
+    }
+
+    static func errorMessage(for error: Error) -> String {
+        let description = error.localizedDescription.lowercased()
+        if description.contains("only the organizer")
+            || description.contains("not permitted")
+            || description.contains("permission")
+        {
+            return permissionError
+        }
+        if description.contains("unknown restaurant")
+            || description.contains("invalid")
+            || description.contains("must")
+        {
+            return invalidRequestError
+        }
+        return networkError
     }
 
     static func room(_ value: String) -> String? {

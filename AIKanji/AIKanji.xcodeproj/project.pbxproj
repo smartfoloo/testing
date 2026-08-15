@@ -66,11 +66,11 @@
 		40928E30CA5AFAD0BBB4F036 /* Recommendation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recommendation.swift; sourceTree = "<group>"; };
 		545C0AD7677F4411450DFA21 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		59DEEA6CE1E89741470F9BCE /* Participant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Participant.swift; sourceTree = "<group>"; };
-		5DDA7F248891D5917368D030 /* AIKanjiDomainTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AIKanjiDomainTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5DDA7F248891D5917368D030 /* AIKanjiDomainTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AIKanjiDomainTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		608251830D7E44B3892C2947 /* ProviderDegradationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderDegradationTests.swift; sourceTree = "<group>"; };
 		63FA58E451E43858E9C5B5B5 /* Constraint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constraint.swift; sourceTree = "<group>"; };
 		67BA558498D2912C16908EFE /* RecommendationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationService.swift; sourceTree = "<group>"; };
-		6A73C9E04251522A3407CB69 /* AIKanji.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AIKanji.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6A73C9E04251522A3407CB69 /* AIKanji.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AIKanji.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		78C17AFA9C8CA326D156FFF4 /* RecommendationCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationCardView.swift; sourceTree = "<group>"; };
 		7C29450AE609DAE351070450 /* EventService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventService.swift; sourceTree = "<group>"; };
 		857DCC152D77EC3F86D35F42 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
@@ -87,7 +87,7 @@
 		D097771D0F1FB3364D6E4CE1 /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
 		D439F6D3946509F667A2895A /* NegotiationConsentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NegotiationConsentView.swift; sourceTree = "<group>"; };
 		DB8E591D1B0661BB5344DF21 /* AppCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCopy.swift; sourceTree = "<group>"; };
-		E03C7854D33184CFAFE3AB7A /* AIKanjiUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AIKanjiUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E03C7854D33184CFAFE3AB7A /* AIKanjiUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AIKanjiUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F2C43528B8E5D430665110E4 /* FeasibilityEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeasibilityEngineTests.swift; sourceTree = "<group>"; };
 		F6DCADF0A7B688A6FDBB1259 /* Event.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Event.swift; sourceTree = "<group>"; };
 		FAC72E9F534CA77C8A71438E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -517,6 +517,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 24V8J2LNCX;
 				INFOPLIST_FILE = AIKanji/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -534,6 +535,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 24V8J2LNCX;
 				INFOPLIST_FILE = AIKanji/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

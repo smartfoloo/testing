@@ -8,6 +8,7 @@ struct EventHomeView: View {
     @State private var role: ParticipantRole?
     @State private var selectedTab: HomeTab = .requirements
     @State private var decision: EventDecision?
+    @State private var chosenRestaurantName: String?
     @State private var decisionError: String?
 
     var body: some View {
@@ -19,7 +20,12 @@ struct EventHomeView: View {
                 case .group:
                     GroupActivityFeedView(eventId: eventId)
                 case .organizer:
-                    OrganizerDashboardView(eventId: eventId, decision: $decision)
+                    OrganizerDashboardView(
+                        eventId: eventId,
+                        isOrganizer: role == .organizer,
+                        decision: $decision,
+                        chosenRestaurantName: $chosenRestaurantName
+                    )
                 }
             }
             .frame(maxHeight: .infinity)
@@ -31,7 +37,7 @@ struct EventHomeView: View {
         .navigationBarTitleDisplayMode(.inline)
         .overlay(alignment: .top) {
             if decision?.chosenPlaceId != nil {
-                Text(AppCopy.chosen)
+                Text(chosenRestaurantName.map { "\(AppCopy.chosen)：\($0)" } ?? AppCopy.chosen)
                     .font(AppTypography.caption.weight(.bold))
                     .foregroundStyle(AppColors.ink)
                     .padding(.horizontal, AppSpacing.md)
@@ -45,8 +51,11 @@ struct EventHomeView: View {
             do {
                 role = try await eventService.role(participantId: participantId)
                 decision = try await eventService.decision(eventId: eventId)
+                if let chosenPlaceId = decision?.chosenPlaceId {
+                    chosenRestaurantName = try await eventService.restaurantName(placeId: chosenPlaceId)
+                }
             } catch {
-                decisionError = AppCopy.networkError
+                decisionError = AppCopy.errorMessage(for: error)
             }
         }
         .negotiationWatcher(participantId: participantId)

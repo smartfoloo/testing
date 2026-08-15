@@ -7,13 +7,19 @@ struct LoadingStateView: View {
             RoundedRectangle(cornerRadius: 8).fill(AppColors.ink.opacity(0.08)).frame(height: 18)
             RoundedRectangle(cornerRadius: 8).fill(AppColors.ink.opacity(0.06)).frame(height: 14)
             RoundedRectangle(cornerRadius: 8).fill(AppColors.ink.opacity(0.06)).frame(height: 14)
-            Text(title).font(AppTypography.caption).foregroundStyle(AppColors.ink.opacity(0.72))
         }
         .redacted(reason: .placeholder)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.md)
         .background(AppColors.card)
         .clipShape(RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous))
+        .overlay(alignment: .bottomLeading) {
+            Text(title)
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.ink.opacity(0.72))
+                .padding(.horizontal, AppSpacing.md)
+                .padding(.bottom, AppSpacing.md)
+        }
         .accessibilityLabel(title)
     }
 }

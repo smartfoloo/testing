@@ -64,6 +64,28 @@ struct ConstraintService {
             .execute()
     }
 
+    struct SavedConstraint: Decodable, Identifiable {
+        let id: UUID
+        let kind: ConstraintKind
+        let rawText: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case kind
+            case rawText = "raw_text"
+        }
+    }
+
+    func ownConstraints(participantId: UUID) async throws -> [SavedConstraint] {
+        try await client
+            .from("participant_constraints")
+            .select("id, kind, raw_text")
+            .eq("participant_id", value: participantId)
+            .order("created_at", ascending: true)
+            .execute()
+            .value
+    }
+
     // MARK: - Feed
 
     private struct FeedParams: Encodable {
