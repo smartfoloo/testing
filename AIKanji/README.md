@@ -50,6 +50,19 @@ trigger builds a sanitized payload (name stripped for ANONYMOUS, PRIVATE rows ne
 `realtime.send`s it to the private topic `event-{event_id}`; `fn_get_sanitized_feed` serves the
 same shape for history.
 
+## Automated backend tests
+
+```
+supabase/tests/run.sh
+```
+
+Boots a throwaway `supabase/postgres` container, applies every migration plus `seed.sql`, and
+runs `supabase/tests/backend_tests.sql`, which impersonates end users through
+`request.jwt.claim.sub` and asserts the create/join flow, the RLS boundary, the sanitized feed
+and broadcast payloads, and the feasibility/negotiation engine. `harness.sql` supplies local
+stand-ins for `realtime.messages` / `realtime.send`, which the hosted Realtime service owns.
+Requires Docker; no Xcode or macOS needed.
+
 ## Verifying the acceptance criteria
 
 - **Anonymous session persists:** launch, then relaunch — `auth.session` is restored by the SDK's
