@@ -237,11 +237,6 @@ export const SCORE_DIMENSIONS: ScoreDimension[] = [
 export type ObjectiveWeights = Record<ScoreDimension, number>
 
 /**
- * Which quality signal was actually available for a venue. `rating_bayesian_shrunk` is
- * the real signal; `atmosphere_tag_proxy` is the legacy tag-richness stand-in used when
- * the provider gave us no rating, and it is deliberately capped below any real rating.
- */
-/**
  * How the quality dimension was arrived at (0028 widened this; `rating_bayesian_shrunk` was
  * 0016's single rated method and is now `google_only`).
  *
