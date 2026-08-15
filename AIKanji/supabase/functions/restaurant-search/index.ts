@@ -66,13 +66,16 @@
 //   * TABELOG'S TERMS OF USE FORBID REPRODUCING ITS CONTENT WITHOUT PRIOR WRITTEN
 //     CONSENT, and bar commercial use. We do not have that consent. This code
 //     exists for a NON-COMMERCIAL HACKATHON DEMO and for nothing else.
-//   * IT IS FEATURE-FLAGGED OFF BY DEFAULT. Unless the secret
-//     TABELOG_ENRICHMENT_ENABLED is exactly the string "true", not one request is
-//     made to tabelog.com, nothing is parsed and none of the three
-//     restaurant_features.tabelog_* columns (migration 0027) is ever written. The
-//     flag is not a tuning knob: it exists so this cannot reach a shipped product
-//     by accident, and turning it on is a deliberate act by somebody who has read
-//     this paragraph.
+//   * IT IS ON BY DEFAULT, AND THAT IS A DELIBERATE PROJECT DECISION. Set the
+//     secret TABELOG_ENRICHMENT_ENABLED to exactly "false" to turn it off; any
+//     other value, including unset, leaves it ON. It was off by default until the
+//     owner decided that a demo which collects this data should use it.
+//     WHAT THAT MEANS FOR YOU: a fresh clone that starts the stack begins scraping
+//     tabelog.com on the first search that reaches the enrichment step, without
+//     anybody choosing it. If this repository ever becomes something shipped,
+//     public, or run by people who have not read this header, flip the default in
+//     the constant below back to opt-in FIRST — it is one operator, `!==` to
+//     `===`, and the whole rest of this section is written to make that safe.
 //   * THE LEGITIMATE ROUTE IS A PARTNER AGREEMENT WITH KAKAKU.COM. If a product
 //     ever wants this data, that is the change to make — not a bigger scraper.
 //   * NO REVIEW TEXT IS EVER TAKEN OR STORED. Review text is the content those
@@ -101,15 +104,24 @@ const GOOGLE_ROUTES_API_KEY = Deno.env.get("GOOGLE_ROUTES_API_KEY") ??
   GOOGLE_PLACES_API_KEY;
 const HOTPEPPER_API_KEY = Deno.env.get("HOTPEPPER_API_KEY") ?? "";
 /**
- * The Tabelog scraper's off switch, and the whole reason this feature can exist in the
- * repository at all. Compared against the exact string "true": an unset, misspelt, empty,
- * "1", "TRUE" or "yes" value all leave it OFF, because the failure mode that matters is
- * somebody enabling a scraper they did not mean to enable, never the reverse. Read once at
- * module load — the edge runtime only sees what config.toml's [edge_runtime.secrets]
- * declares, so flipping it is a config change plus a stack restart, not a request header.
+ * The Tabelog scraper's switch. ON unless the value is exactly "false".
+ *
+ * It was `=== "true"` — opt-in — until the project owner decided that a demo which goes to the
+ * trouble of collecting this data should be using it, which is a fair reading of a hackathon
+ * build. The comparison is kept exact in the same way, just inverted: only the literal "false"
+ * disables it, so a misspelt, empty, "0" or "no" value does NOT silently disable a feature
+ * somebody is relying on, exactly as a stray value previously could not silently enable one.
+ *
+ * The single line below is the entire opt-in/opt-out decision. Changing `!==` back to `===`
+ * restores default-off, and nothing else in this file needs to move: every limit, the
+ * robots.txt guard and the review refusals apply identically either way.
+ *
+ * Read once at module load — the edge runtime only sees what config.toml's
+ * [edge_runtime.secrets] declares, so changing it is a config change plus a stack restart,
+ * never a request header.
  */
 const TABELOG_ENRICHMENT_ENABLED =
-  Deno.env.get("TABELOG_ENRICHMENT_ENABLED") === "true";
+  Deno.env.get("TABELOG_ENRICHMENT_ENABLED") !== "false";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",

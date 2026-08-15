@@ -12,7 +12,10 @@
 --   * TABELOG'S TERMS OF USE PROHIBIT REPRODUCING ITS CONTENT WITHOUT PRIOR WRITTEN CONSENT
 --     and bar commercial use. We do not have that consent. This exists for a NON-COMMERCIAL
 --     HACKATHON DEMO and for nothing else.
---   * THE WRITE PATH IS STILL FEATURE-FLAGGED OFF BY DEFAULT (TABELOG_ENRICHMENT_ENABLED).
+--   * THE WRITE PATH IS FEATURE-FLAGGED (TABELOG_ENRICHMENT_ENABLED), and the flag now
+--     DEFAULTS TO ON: only the exact string "false" disables it. That default was flipped
+--     deliberately — a demo that collects this data should use it — and it means a live search
+--     fills these columns without anybody opting in.
 --   * NO REVIEW TEXT IS TAKEN, EVER. There is still no column for it, no page fetched that
 --     carries only reviews, and the cache row is still an extracted-scalar object.
 --   * THE LEGITIMATE ROUTE IS A PARTNER AGREEMENT WITH KAKAKU.COM.
