@@ -285,10 +285,17 @@ export function OrganizerDashboard({
 
       if (result.feasible_count === 0) {
         const negotiationId = await backend.proposeRelaxation(eventId)
+        // Accessibility MUSTs are never negotiable, by design — consenting to an
+        // unverified step-free entrance risks not getting in. So when they are the only
+        // thing blocking a venue there is no proposal to make, and a bare 「0件」 would
+        // strand the person who needs it most. Name the count and the way forward.
+        const unverified = result.accessibility_unverified_count ?? 0
         setStatusMessage(
-          negotiationId === null
-            ? '今の条件では、まだ候補が見つかりません。みんなで相談してみましょう。'
-            : '条件に合うお店がありません。参加者に条件の変更をお願いしました。',
+          unverified > 0
+            ? `${unverified}件のお店は、車椅子で使えるかどうかが確認できませんでした。お店に直接確認すると、候補にできるかもしれません。`
+            : negotiationId === null
+              ? '今の条件では、まだ候補が見つかりません。みんなで相談してみましょう。'
+              : '条件に合うお店がありません。参加者に条件の変更をお願いしました。',
         )
         try {
           setOpenNegotiations(await backend.pendingNegotiationCount(eventId))

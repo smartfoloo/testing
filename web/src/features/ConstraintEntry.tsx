@@ -60,6 +60,12 @@ interface PendingConstraint {
   normalizedValue: NormalizedValue
   visibility: ConstraintVisibility
   needsClarification: boolean
+  /**
+   * The participant's own wording the taxonomy could not express. Carried through so it
+   * reaches the row: when an accessibility need falls outside the controlled vocabulary
+   * (0022), this is the only place their actual requirement survives.
+   */
+  semanticRemainder: string | null
 }
 
 const EXAMPLES: Record<ConstraintKind, Array<[string, string]>> = {
@@ -136,6 +142,7 @@ export function ConstraintEntry({ eventId, participantId }: ConstraintEntryProps
         normalizedValue: result.normalized_value,
         visibility: result.suggested_visibility,
         needsClarification: result.needs_clarification,
+        semanticRemainder: result.semantic_remainder,
       })
     } catch (error) {
       setErrorMessage(toMessage(error))
@@ -152,6 +159,7 @@ export function ConstraintEntry({ eventId, participantId }: ConstraintEntryProps
       normalizedType: constraint.normalizedType,
       normalizedValue: constraint.normalizedValue,
       visibility: constraint.visibility,
+      semanticRemainder: constraint.semanticRemainder,
     })
     setDrafts((current) => ({ ...current, [constraint.kind]: '' }))
     setSavedCount((count) => count + 1)

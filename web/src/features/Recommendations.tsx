@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useBackend } from '../backend'
 import {
   AppCopy,
+  AttributionCopy,
   ScoreCopy,
   errorMessage as toMessage,
   objectiveEmphasisText,
@@ -32,6 +33,41 @@ function ObjectiveLegend({ breakdown }: { breakdown: ScoreBreakdown }) {
         {objectiveEmphasisText(breakdown)}
       </p>
       <p className="text-small text-ink/72">{ScoreCopy.legendNote}</p>
+    </div>
+  )
+}
+
+/**
+ * Recruit's Hot Pepper Gourmet Web Service guideline requires this credit wherever their
+ * data is used, so it lives at the foot of the shortlist — the one screen that prints the
+ * fields we merge from them (the yen band and the 個室 line on every card). It is not a
+ * feature: muted secondary caption, below the content, never above 「このお店に決める」.
+ *
+ * One credit for the whole list, not one per card. The chosen card is the same
+ * `RecommendationCard` with 「このお店に決まりました」 swapped in for the button, and it stays
+ * inside this list, so it is already covered — repeating the credit three or four times
+ * would be louder than the guideline asks and would compete with the decision itself.
+ * (The 「決まりました」 banner on EventHome and the organizer dashboard show only a name the
+ * group chose, which is the group's own decision rather than a Hot Pepper listing.)
+ *
+ * Not rendered when the list is empty: with no venue attributes on screen there is nothing
+ * sourced to credit.
+ */
+function ProviderAttribution() {
+  return (
+    <div data-testid="provider-attribution" className="flex flex-col gap-xxs">
+      <p className="text-small text-ink/72">{AttributionCopy.scope}</p>
+      <p>
+        <a
+          href={AttributionCopy.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-testid="provider-attribution-link"
+          className="inline-flex min-h-[44px] items-center text-caption text-ink/72 underline underline-offset-2"
+        >
+          {AttributionCopy.credit}
+        </a>
+      </p>
     </div>
   )
 }
@@ -161,6 +197,8 @@ export function Recommendations({
 
       {choiceError && <InlineErrorView message={choiceError} onRetry={() => setChoiceError(null)} />}
       {errorMessage && <InlineErrorView message={errorMessage} onRetry={() => void load()} />}
+
+      {scores.length > 0 && <ProviderAttribution />}
     </div>
   )
 }

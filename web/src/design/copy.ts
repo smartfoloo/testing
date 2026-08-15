@@ -536,6 +536,18 @@ export function isScoreDimensionUnknown(
 
 function accessibilityNeedLabel(need: string): string {
   switch (need) {
+    // The controlled vocabulary from 0022, named 1:1 after the Google Places
+    // accessibilityOptions booleans it is recorded from.
+    case 'wheelchair_accessible_entrance':
+      return '車椅子で入れる入口'
+    case 'wheelchair_accessible_restroom':
+      return '車椅子で使えるトイレ'
+    case 'wheelchair_accessible_seating':
+      return '車椅子で座れる席'
+    case 'wheelchair_accessible_parking':
+      return '車椅子で使える駐車場'
+    // Pre-0022 wording, kept so a constraint stored before the backfill still reads in
+    // Japanese rather than showing a raw tag.
     case 'wheelchair':
       return '車椅子対応'
     case 'step_free':
@@ -619,3 +631,33 @@ export function scoreDataGapNote(breakdown: ScoreBreakdown): string | null {
   if (missing.length === 0) return null
   return `未取得：${missing.join('・')}。データがないだけで、低い評価という意味ではありません。`
 }
+
+/* -------------------------------------------------------------------------- */
+/* Provider attribution (licence obligation, not a feature)                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Recruit's Hot Pepper Gourmet Web Service usage guideline
+ * (https://webservice.recruit.co.jp/doc/hotpepper/guideline.html) makes a visible credit
+ * mandatory for any site or app that uses the data: either the supplied banner or the text
+ * 「Powered by ホットペッパーグルメ Webサービス」, linked to Hot Pepper Gourmet. So `credit`
+ * is their required wording verbatim — it is not ours to reword or shorten.
+ *
+ * `scope` exists because only part of a listing comes from them: `restaurant-search`
+ * discovers venues through Google Places (name, location, rating) and merges Hot Pepper's
+ * 個室 availability and yen budget band onto the match. Printing the credit alone would
+ * claim the whole shortlist as theirs, so the sentence above it says which two fields are
+ * actually sourced there.
+ *
+ * Google's Maps/Places terms carry their own, different attribution requirements for
+ * Places content; those are NOT discharged here. See web/README.md.
+ *
+ * Mirrors `AttributionCopy` in AIKanji/AIKanji/DesignSystem/AppCopy.swift.
+ */
+export const AttributionCopy = {
+  scope:
+    '個室の有無と予算の目安は、ホットペッパーグルメ Webサービスの情報です。お店の場所や口コミ評価など、ほかの情報は別の提供元から取得しています。',
+  /** Recruit's mandated credit wording. Do not translate, abbreviate or hide it. */
+  credit: 'Powered by ホットペッパーグルメ Webサービス',
+  href: 'https://www.hotpepper.jp/',
+} as const

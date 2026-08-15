@@ -25,7 +25,12 @@
 //     an error (422, naming the participants it could not place);
 //   * raw provider payloads land in restaurant_source_records and provider
 //     failures land in provider_incidents instead of vanishing into a `return
-//     []`.
+//     []`;
+//   * `accessibilityOptions` is requested and recorded (migration 0022). Nothing
+//     had ever written restaurant_features.accessibility_tags, so an accessibility
+//     MUST — which fails closed on an empty tag list, and is never relaxable —
+//     could not be met by any venue in Tokyo. Only Places' four confirmed
+//     booleans become tags; an absent or null boolean stays UNKNOWN.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
@@ -103,6 +108,14 @@ interface Candidate {
   atmosphere_tags: string[];
   rating: number | null;
   user_rating_count: number | null;
+  /**
+   * The accessibility vocabulary members Places CONFIRMED, or null when it returned no
+   * `accessibilityOptions` object at all. The distinction is load-bearing: null means "we
+   * learned nothing this run" and leaves whatever is recorded alone, while an empty array is
+   * Places' current answer ("nothing confirmed") and is allowed to retract a stale tag. See
+   * fn_record_provider_accessibility in migration 0022.
+   */
+  accessibility_tags: string[] | null;
   location: LatLng | null;
 }
 
@@ -228,8 +241,17 @@ async function searchRestaurants(
           // a pricier Places tier — accepted deliberately because the scoring
           // engine needs a quality signal it is not allowed to invent, and they
           // are two fields on a call we already make once per meeting zone.
+          // `places.accessibilityOptions` is a **Pro**-tier field, while
+          // `places.rating`, `places.userRatingCount` and `places.priceLevel`
+          // above are **Enterprise** — and Places bills the whole call at the
+          // highest tier any requested field belongs to, so adding it costs
+          // nothing extra on this request. It is the only structured
+          // accessibility data any provider of ours has, and without it an
+          // accessibility MUST cannot be met by any venue at all (migration
+          // 0022): accessibility_tags had no writer, and an empty tag list
+          // fails closed by design.
           "X-Goog-FieldMask":
-            "places.id,places.displayName,places.priceLevel,places.primaryType,places.location,places.rating,places.userRatingCount",
+            "places.id,places.displayName,places.priceLevel,places.primaryType,places.location,places.rating,places.userRatingCount,places.accessibilityOptions",
         },
         body: JSON.stringify({
           textQuery: query,
@@ -284,6 +306,7 @@ async function searchRestaurants(
         atmosphere_tags: [],
         rating: placesRating(p.rating),
         user_rating_count: placesRatingCount(p.userRatingCount),
+        accessibility_tags: placesAccessibilityTags(p.accessibilityOptions),
         location: (p.location as { latitude?: number; longitude?: number })
             ?.latitude != null
           ? {
@@ -294,6 +317,48 @@ async function searchRestaurants(
       } satisfies Candidate,
       raw: p,
     }));
+}
+
+// The four nullable booleans Google Places API (New) returns inside
+// `accessibilityOptions`, and the vocabulary member each one maps onto. The
+// mapping is 1:1 and involves no inference whatsoever: a tag is recorded if and
+// only if its boolean came back exactly `true`.
+//
+// These four strings ARE the accessibility vocabulary: migration 0022 defines
+// them once (fn_accessibility_vocabulary) and constrains
+// restaurant_features.accessibility_tags to them, llm-assist states them in its
+// prompt and enforces them on the model's answer, and web/src/backend/engine.ts
+// mirrors them. Nothing else may ever be recorded, because nothing else can be
+// matched.
+const ACCESSIBILITY_TAG_BY_PLACES_FIELD: Record<string, string> = {
+  wheelchairAccessibleEntrance: "wheelchair_accessible_entrance",
+  wheelchairAccessibleParking: "wheelchair_accessible_parking",
+  wheelchairAccessibleRestroom: "wheelchair_accessible_restroom",
+  wheelchairAccessibleSeating: "wheelchair_accessible_seating",
+};
+
+// ASSUMPTIONS ABOUT THE RESPONSE SHAPE (no key is available here to observe it,
+// so the parsing is deliberately defensive):
+//   * `accessibilityOptions` is OMITTED ENTIRELY for most venues — proto3 JSON
+//     omits an unset message — and may also be omitted when the field mask was
+//     rejected or the SKU downgraded. Absent, or present as anything other than
+//     an object, therefore yields null: "we learned nothing this run", which the
+//     write path reads as "change nothing".
+//   * each member is a NULLABLE boolean, so `false` and `null` are both
+//     UNKNOWN-or-worse and neither ever becomes a tag. Only `true` does, and the
+//     comparison is strict so a stringly-typed "true" is not trusted either.
+//   * an object with nothing confirmed yields [] — Places' current answer,
+//     honestly recorded as "unconfirmed" rather than as a downgrade.
+// Sorted so the recorded array matches fn_accessibility_canonical_tags' output.
+function placesAccessibilityTags(value: unknown): string[] | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const options = value as Record<string, unknown>;
+  return Object.entries(ACCESSIBILITY_TAG_BY_PLACES_FIELD)
+    .filter(([field]) => options[field] === true)
+    .map(([, tag]) => tag)
+    .sort();
 }
 
 // `restaurant_features` constrains rating to 0..5 and the review count to >= 0
@@ -890,27 +955,46 @@ Deno.serve(async (req: Request) => {
   // 7. Normalized upsert. Additive by construction (see 0017): an empty
   // dietary/allergy/room/cuisine value never overwrites a populated one, and the
   // legacy travel JSONB is merged rather than replaced.
+  //
+  // accessibility_tags travels in the SAME payload but is written by a SECOND rpc:
+  // 0017's fn_record_provider_candidates promises never to touch that column and
+  // is a shipped migration, so 0022 adds fn_record_provider_accessibility beside
+  // it rather than rewriting it. The key is included ONLY when Places actually
+  // returned an accessibilityOptions object — an absent key means "nothing
+  // learned, change nothing", a present one (even empty) is the current answer and
+  // may retract a stale tag. fn_record_provider_candidates ignores the key.
   if (fetchedCandidates.length > 0) {
+    const candidatePayload = fetchedCandidates.map((c) => ({
+      place_id: c.place_id,
+      name: c.name,
+      hotpepper_id: c.hotpepper_id,
+      price_yen_estimate: c.price_yen_estimate,
+      room_type: c.room_type,
+      cuisine_tags: c.cuisine_tags,
+      dietary_tags: c.dietary_tags,
+      allergy_safe_tags: c.allergy_safe_tags,
+      atmosphere_tags: c.atmosphere_tags,
+      rating: c.rating,
+      user_rating_count: c.user_rating_count,
+      ...(c.accessibility_tags === null
+        ? {}
+        : { accessibility_tags: c.accessibility_tags }),
+    }));
     const { error: recordErr } = await supabase.rpc(
       "fn_record_provider_candidates",
-      {
-        p_event_id: eventId,
-        p_candidates: fetchedCandidates.map((c) => ({
-          place_id: c.place_id,
-          name: c.name,
-          hotpepper_id: c.hotpepper_id,
-          price_yen_estimate: c.price_yen_estimate,
-          room_type: c.room_type,
-          cuisine_tags: c.cuisine_tags,
-          dietary_tags: c.dietary_tags,
-          allergy_safe_tags: c.allergy_safe_tags,
-          atmosphere_tags: c.atmosphere_tags,
-          rating: c.rating,
-          user_rating_count: c.user_rating_count,
-        })),
-      },
+      { p_event_id: eventId, p_candidates: candidatePayload },
     );
     if (recordErr) return json({ error: recordErr.message }, 500);
+
+    // Reported rather than swallowed: losing this write would leave every venue
+    // looking UNVERIFIED, which silently excludes them from an accessibility MUST
+    // (0022 fails closed on purpose). That is a wrong shortlist, not a degraded
+    // one, so it is surfaced exactly like the candidate write above.
+    const { error: accessErr } = await supabase.rpc(
+      "fn_record_provider_accessibility",
+      { p_event_id: eventId, p_candidates: candidatePayload },
+    );
+    if (accessErr) return json({ error: accessErr.message }, 500);
   }
 
   // The zones this run actually searched (PRD §15), and the freshness signal for

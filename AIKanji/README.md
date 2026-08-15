@@ -60,6 +60,41 @@ trigger builds a sanitized payload (name stripped for ANONYMOUS, PRIVATE rows ne
 `realtime.send`s it to the private topic `event-{event_id}`; `fn_get_sanitized_feed` serves the
 same shape for history.
 
+## Provider attribution — a licence obligation, not decoration
+
+`supabase/functions/restaurant-search/index.ts` uses two providers. It discovers candidates
+through the **Google Places** API (`displayName`, location, `rating`/`userRatingCount`,
+`priceLevel`), then calls the **Hot Pepper Gourmet Web Service**
+(`https://webservice.recruit.co.jp/hotpepper/gourmet/v1/`) and merges the matched shop's
+`private_room` into `room_type` and its `budget.average` into `price_yen_estimate`. Both of
+those merged fields are printed on every recommendation card.
+
+Recruit's usage guideline (<https://webservice.recruit.co.jp/doc/hotpepper/guideline.html>)
+makes a visible credit **mandatory** for any site or app that uses the data: either their
+supplied banner image or the text 「Powered by ホットペッパーグルメ Webサービス」, linked to Hot
+Pepper Gourmet. We use the text link, so there is no third-party image asset in the catalog.
+
+- Rendered by `ProviderAttribution` in
+  `AIKanji/Features/Recommendations/RecommendationListView.swift`, at the foot of the
+  shortlist — one credit for the whole list, not one per card. The chosen card is the same
+  `RecommendationCardView` inside that same list, so it is already covered.
+- Wording lives in `AttributionCopy` (`AIKanji/DesignSystem/AppCopy.swift`), mirrored 1:1 by
+  `AttributionCopy` in `web/src/design/copy.ts`. Both clients say the same thing.
+- `accessibilityIdentifier`s `provider-attribution` and `provider-attribution-link` mirror the
+  web `data-testid`s.
+- It is a real `Link` to `https://www.hotpepper.jp/`, minimum 44pt tall, in the muted
+  secondary-note style (`AppTypography.small`/`.caption` at `AppColors.ink.opacity(0.72)`).
+
+Do not delete it and do not make it unreadable — a credit nobody can read does not discharge
+the obligation. Do not reword 「Powered by ホットペッパーグルメ Webサービス」; that string is
+Recruit's, quoted verbatim. Keep the `scope` sentence above it, because Hot Pepper supplies
+only 個室 and the yen band and the bare credit would claim the Places-sourced name, location
+and rating as theirs too.
+
+**Not covered:** Google's Maps Platform terms carry their own, separate attribution
+requirements for Places content, which the Hot Pepper credit does not satisfy. See the punch
+list below and `web/README.md`.
+
 ## Automated backend tests
 
 ```
@@ -99,4 +134,13 @@ Requires Docker; no Xcode or macOS needed.
   global `restaurant_features` pool.
 - **B4:** add a needs-confirmation evidence tier for live provider data whose dietary/allergy
   attributes are not verified.
+- **B5 — Google Maps/Places attribution.** The Hot Pepper credit above is done; Google's is
+  not. Maps Platform terms impose their own requirements on Places content (broadly: show
+  "Powered by Google" / the Google logo wherever Places data or Maps imagery is displayed, and
+  surface the per-place `attributions` and third-party notices the API returns). Neither
+  `X-Goog-FieldMask` in `restaurant-search` nor `place-search` asks for `attributions` today,
+  so we do not even hold the data — and adding a field to a mask can move the call to a
+  pricier SKU, per the billing note at the top of both functions. Placement, logo assets and
+  that billing consequence have to be read off the current policy rather than guessed at, so
+  this is deliberately unimplemented, not overlooked.
 - Add read-through caching based on `last_fetched_at` before making provider calls.

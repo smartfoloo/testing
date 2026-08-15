@@ -3,7 +3,8 @@
  *
  * It reproduces, in order of importance:
  *  - the deterministic engine (see engine.ts, ported from 0009_review_function_replacements.sql,
- *    0016_scoring_and_objective.sql and 0021_must_coverage_and_proposal_integrity.sql);
+ *    0016_scoring_and_objective.sql, 0021_must_coverage_and_proposal_integrity.sql and
+ *    0022_accessibility_vocabulary_and_room_unknown.sql);
  *  - the authorization guards the security definer RPCs raise ('not a participant of this
  *    event', 'only the organizer can choose the restaurant', 'negotiation already resolved');
  *  - the sanitized broadcast contract from 0004 — PRIVATE rows are never emitted and
@@ -14,10 +15,13 @@
  * exactly the normalized_value shapes the real SYSTEM_PROMPT specifies, because the
  * engine reads those keys: budget {max_yen}, cuisine {include,exclude}, dietary {tags},
  * allergy {allergens}, smoking {preference}, room {room}, travel_time {max_minutes},
- * accessibility {needs}, atmosphere {tags}, other {}.
+ * accessibility {needs}, atmosphere {tags}, other {}. Accessibility `needs` are drawn from
+ * the closed ACCESSIBILITY_VOCABULARY (0022) here too, and a need the vocabulary cannot
+ * express is kept as text rather than dropped — exactly what llm-assist does server-side.
  */
 
 import {
+  ACCESSIBILITY_VOCABULARY,
   candidateIsFeasible,
   countUnlockedIfRelaxed,
   proposeRelaxation as engineProposeRelaxation,
@@ -67,6 +71,12 @@ import type {
  * 0021's `smoking_policy` deliberately does NOT need a bump: it is optional and an absent
  * value means "unconfirmed", which is exactly what a v2 snapshot (and seed.sql) implies, so
  * an existing snapshot keeps evaluating identically instead of throwing the user's event away.
+ *
+ * 0022 does not bump it either, for the same reason and one more: the only thing a v2 snapshot
+ * can hold that 0022 invalidates is an accessibility MUST written against the old open-ended
+ * `needs` vocabulary, and `canonicalizeAccessibilityNeeds` below migrates exactly those rows on
+ * load — mirroring the one-shot backfill in the migration — instead of discarding the event
+ * somebody is in the middle of planning.
  */
 const STORAGE_KEY = 'matomeshi.mock.db.v2'
 const USER_KEY = 'matomeshi.mock.user.v1'
@@ -142,7 +152,9 @@ export function createSeedDb(): Db {
     // Exactly as seed.sql leaves them: no accessibility tags and no smoking policy. Both
     // MUST types are fail-closed since 0021, so claiming either here would be inventing
     // venue facts — and the five personas state neither requirement, so the 0-then-3
-    // invariant is untouched.
+    // invariant is untouched. `room_type` is set for all four, which is why the 0022 room step
+    // still unlocks exactly 001/002/004: `accept_unknown` only admits venues whose room_type
+    // is UNKNOWN, and none of these are.
     accessibility_tags: [],
     smoking_policy: null,
   })
@@ -234,6 +246,51 @@ function verificationFor(kind: ConstraintKind, type: NormalizedType): Verificati
   return 'none'
 }
 
+/**
+ * Mirrors 0022's one-shot backfill (and `fn_accessibility_canonical_tags`) for a snapshot this
+ * browser wrote before the vocabulary existed. A stored `{"needs":["step_free","wheelchair"]}`
+ * MUST can no longer be met by any venue tag and is never relaxable, so leaving it alone would
+ * dead-end that event exactly as bug A did.
+ *
+ *  - `step_free` / `wheelchair` were the two values the old prompt suggested and both are about
+ *    getting IN, so they map onto `wheelchair_accessible_entrance` and nothing more;
+ *  - anything else is dropped from `needs` and kept as text in `semantic_remainder`;
+ *  - a row where nothing survives becomes an `other` note rather than an unsatisfiable MUST,
+ *    and keeps its sensitivity, which is a floor a caller may raise but never lower.
+ */
+function canonicalizeAccessibilityNeeds(db: Db): void {
+  for (const constraint of db.constraints) {
+    if (constraint.normalized_type !== 'accessibility') continue
+    const raw = constraint.normalized_value.needs
+    const stated = Array.isArray(raw) ? raw.filter((need) => typeof need === 'string') : []
+    const canonical = [
+      ...new Set(
+        stated.map((need) =>
+          need === 'step_free' || need === 'wheelchair'
+            ? 'wheelchair_accessible_entrance'
+            : need,
+        ),
+      ),
+    ]
+      .filter((need) => (ACCESSIBILITY_VOCABULARY as readonly string[]).includes(need))
+      .sort()
+    if (canonical.length === stated.length && canonical.every((need, i) => need === stated[i])) {
+      continue
+    }
+    // Keeping the participant's own wording is the point: a need the taxonomy cannot express
+    // must not disappear just because the engine cannot check it.
+    constraint.semantic_remainder =
+      constraint.semantic_remainder ?? (constraint.raw_text.trim() || null)
+    if (canonical.length === 0) {
+      constraint.normalized_type = 'other'
+      constraint.normalized_value = {}
+      constraint.verification_requirement = verificationFor(constraint.kind, 'other')
+    } else {
+      constraint.normalized_value = { needs: canonical }
+    }
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Deterministic parser (replaces the llm-assist Edge Function)                */
 /* -------------------------------------------------------------------------- */
@@ -283,11 +340,29 @@ const ALLERGEN_WORDS: Array<[RegExp, string]> = [
   [/そば|蕎麦|buckwheat/i, 'buckwheat'],
 ]
 
+/**
+ * Accessibility words map onto the closed ACCESSIBILITY_VOCABULARY (0022) — the four booleans
+ * Google Places can confirm — and onto nothing else. 「車椅子で入れる」 and 「バリアフリー」 are
+ * about getting IN, which is what wheelchair_accessible_entrance certifies; a restroom, a seat
+ * and parking each have their own member. Nothing here invents a member the venue side could
+ * never record.
+ */
 const ACCESSIBILITY_WORDS: Array<[RegExp, string]> = [
-  [/車椅子|車いす|wheelchair/i, 'wheelchair'],
-  [/段差|バリアフリー|step.?free|スロープ/i, 'step_free'],
-  [/エレベータ|elevator/i, 'elevator'],
+  [/(車椅子|車いす|多目的|多機能|バリアフリー)[^。、]{0,6}(トイレ|お手洗|化粧室)|accessible\s*(rest)?room|toilet/i, 'wheelchair_accessible_restroom'],
+  [/(車椅子|車いす)[^。、]{0,6}(席|座席|テーブル|スペース)|accessible\s*seat/i, 'wheelchair_accessible_seating'],
+  [/駐車|パーキング|parking/i, 'wheelchair_accessible_parking'],
+  [/車椅子|車いす|wheelchair|段差|バリアフリー|step.?free|スロープ|ramp|入口|入り口|entrance/i, 'wheelchair_accessible_entrance'],
 ]
+
+/**
+ * Accessibility wording the vocabulary cannot express. Google Places has no field for any of
+ * it, so gating on it would exclude every venue forever (bug A). Matching here routes the text
+ * to the `other` fallback with the participant's own words kept in semantic_remainder and
+ * needs_clarification set — the same decision llm-assist makes server-side. Silently dropping
+ * it would quietly weaken a safety requirement; silently gating on it would be a dead end.
+ */
+const ACCESSIBILITY_BEYOND_VOCABULARY =
+  /エレベータ|エスカレータ|elevator|escalator|点字|braille|補助犬|盲導犬|介助犬|guide\s*dog|手話|sign\s*language|オストメイト/i
 
 function collect(text: string, words: Array<[RegExp, string]>): string[] {
   const found = words.filter(([pattern]) => pattern.test(text)).map(([, tag]) => tag)
@@ -359,10 +434,17 @@ const RULES: Rule[] = [
   },
   {
     type: 'accessibility',
-    match: /車椅子|車いす|段差|バリアフリー|スロープ|エレベータ|wheelchair|step.?free|accessib/i,
+    match:
+      /車椅子|車いす|段差|バリアフリー|スロープ|エレベータ|多目的トイレ|wheelchair|step.?free|accessib/i,
     build: (text) => {
-      const needs = collect(text, ACCESSIBILITY_WORDS)
-      return needs.length > 0 ? { needs } : { needs: ['step_free'] }
+      // Sorted so the value matches what fn_accessibility_canonical_tags stores. A facility
+      // word also implies the entrance: a restroom the participant cannot reach is not a
+      // usable restroom, so the precondition is kept rather than assumed away.
+      const needs = collect(text, ACCESSIBILITY_WORDS).sort()
+      // Nothing the vocabulary can express (「エレベーターがある店」): return null so the rule
+      // falls through to the `other` note below. Emitting {"needs": []} instead would be a MUST
+      // that fails closed for every venue and cannot be relaxed — bug A exactly.
+      return needs.length > 0 ? { needs } : null
     },
   },
   {
@@ -427,7 +509,20 @@ export function parseConstraintText(rawText: string, kind: ConstraintKind = 'WAN
   }
 
   // Nothing matched: keep the wording so P1 semantic matching has something to embed.
-  return { ...fallback, normalized_value: { note: text }, semantic_remainder: text }
+  //
+  // An accessibility request the vocabulary cannot express (「エレベーターがある店」) lands here
+  // too, and that is the whole point — llm-assist makes the same call server-side. It is
+  // recorded as a non-gating note with needs_clarification set, because the alternative is a
+  // MUST that no venue can ever satisfy and that is never relaxable. The ANONYMOUS default is
+  // kept for it: the requirement is still disability information even when the taxonomy fails,
+  // and the participant still owns the final visibility choice.
+  const beyondVocabulary = ACCESSIBILITY_BEYOND_VOCABULARY.test(text)
+  return {
+    ...fallback,
+    normalized_value: { note: text },
+    semantic_remainder: text,
+    suggested_visibility: beyondVocabulary ? 'ANONYMOUS' : fallback.suggested_visibility,
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -455,7 +550,12 @@ export class MockBackend implements Backend {
       // Drop snapshots from superseded schema versions rather than leaving them orphaned.
       localStorage.removeItem('matomeshi.mock.db.v1')
       const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) return JSON.parse(raw) as Db
+      if (raw) {
+        const stored = JSON.parse(raw) as Db
+        // The only 0022 migration a stored snapshot needs; a no-op for every other row.
+        canonicalizeAccessibilityNeeds(stored)
+        return stored
+      }
     } catch {
       // Corrupt or unavailable storage falls back to a fresh fixture.
     }

@@ -1,8 +1,9 @@
 /**
  * TypeScript port of the deterministic feasibility / scoring / relaxation engine
  * defined in AIKanji/supabase/migrations/0009_review_function_replacements.sql,
- * 0016_scoring_and_objective.sql and 0021_must_coverage_and_proposal_integrity.sql
- * (which together supersede 0005_feasibility.sql).
+ * 0016_scoring_and_objective.sql, 0021_must_coverage_and_proposal_integrity.sql and
+ * 0022_accessibility_vocabulary_and_room_unknown.sql (which together supersede
+ * 0005_feasibility.sql).
  *
  * This exists so the mock backend behaves the same as the real Postgres one: the LLM
  * never decides feasibility or which MUST gets relaxed, it is all deterministic here too.
@@ -13,9 +14,17 @@
  *    `if/elsif` chain and were SILENTLY MET, so 「車椅子で入れる店」 was ignored as a hard
  *    requirement. Only the non-gating types (cuisine, atmosphere, other — they are scored,
  *    not filtered) still pass by default;
+ *  - `candidateBlockingTypes` is the single implementation of that chain and
+ *    `candidateIsFeasible` is a wrapper over it (`fn_candidate_blocking_types`, 0022), so the
+ *    gate and the explanation of a zero-candidate result cannot drift apart;
  *  - absent venue data is never satisfaction (PRD §11 "unknown ≠ supported"): dietary,
  *    allergy, accessibility and smoking all fail closed on a venue we know nothing about,
- *    and on a MUST whose own normalized_value cannot be read;
+ *    and on a MUST whose own normalized_value cannot be read. Since 0022 an unreadable
+ *    `room` value does too, and a venue whose room_type is unknown is admissible only after
+ *    the participant has accepted `accept_unknown`;
+ *  - accessibility needs and recorded venue tags share ONE closed vocabulary
+ *    (`ACCESSIBILITY_VOCABULARY`, 0022): four members mapped 1:1 from the four booleans
+ *    Google Places' `accessibilityOptions` can return;
  *  - `(value->>'key')::int` on a missing key yields SQL NULL, and `x > NULL` is NULL,
  *    which `if` treats as false — so the MUST passes. `nullableInt` + `exceeds` model that;
  *    since 0021 SQL reads those keys through fn_jsonb_int, which also yields NULL for a
@@ -138,7 +147,11 @@ export interface FeatureRow {
    */
   rating?: number | null
   user_rating_count?: number | null
-  /** `restaurant_features.accessibility_tags` (0016). Absent = no data, never "supported". */
+  /**
+   * `restaurant_features.accessibility_tags` (0016), constrained since 0022 to
+   * `ACCESSIBILITY_VOCABULARY`. Absent or empty = no data, never "supported": only positives
+   * are ever recorded, so a missing member means UNCONFIRMED and never confirmed-absent.
+   */
   accessibility_tags?: string[]
   /**
    * `restaurant_features.smoking_policy` (0021), the venue attribute a smoking MUST is
@@ -324,22 +337,79 @@ export function travelMinutesFor(
 }
 
 /* -------------------------------------------------------------------------- */
-/* fn_candidate_is_feasible                                                    */
+/* Accessibility vocabulary — fn_accessibility_vocabulary (0022)               */
 /* -------------------------------------------------------------------------- */
 
-export function candidateIsFeasible(
+/**
+ * The closed accessibility vocabulary, ported from `fn_accessibility_vocabulary()` (0022) and
+ * kept in the same (sorted) order as the SQL array.
+ *
+ * It is exactly the four nullable booleans Google Places (New) returns in
+ * `accessibilityOptions` — wheelchairAccessibleParking / Entrance / Restroom / Seating — named
+ * after them, so provider data maps onto it 1:1 with no inference: `restaurant-search` records
+ * a member if and only if the matching boolean came back `true`, and an absent or null boolean
+ * stays UNKNOWN (never `false`, never a tag).
+ *
+ * The same four strings are stated in the `llm-assist` prompt AND validated server-side there,
+ * and `restaurant_features_accessibility_vocabulary` (0022) constrains the venue side in the
+ * database. Feasibility itself stays a plain containment test: normalization belongs at the
+ * boundaries, never inside the deterministic engine.
+ */
+export const ACCESSIBILITY_VOCABULARY = [
+  'wheelchair_accessible_entrance',
+  'wheelchair_accessible_parking',
+  'wheelchair_accessible_restroom',
+  'wheelchair_accessible_seating',
+] as const
+
+/** `room_type` / `{"room": …}` domain — `restaurant_features.room_type`'s CHECK (0001). */
+const ROOM_TYPES = ['private', 'semi_private', 'open']
+
+/**
+ * Ports `fn_accessibility_needs_met` (0022): the accessibility predicate, in one place, so the
+ * gate and the coverage count below cannot disagree.
+ *
+ * Unchanged from 0021: `needs` must be a non-empty array, the venue must have tags recorded,
+ * and those tags must CONTAIN every need. No tags recorded means UNKNOWN, and unknown is not
+ * step-free.
+ */
+function accessibilityNeedsMet(venueTags: string[], value: NormalizedValue): boolean {
+  const needs = stringArray(value, 'needs')
+  return (
+    needs !== null && needs.length > 0 && venueTags.length > 0 && contains(venueTags, needs)
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* fn_candidate_blocking_types / fn_candidate_is_feasible                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Which MUST *types* stand between this event and this venue — `[]` meaning feasible. Ports
+ * `fn_candidate_blocking_types` (0022), deduped and sorted exactly as the SQL returns it.
+ *
+ * It exists so that "0 candidates" can be explained rather than merely reported (a wheelchair
+ * user must never be shown a silent empty result), and `candidateIsFeasible` is a wrapper over
+ * it so there is one implementation of the MUST chain.
+ *
+ * `'unknown_venue'` is deliberately not a normalized_type: a place with no feature row was
+ * infeasible before too, and this way no caller mistakes it for an accessibility-only
+ * exclusion.
+ */
+export function candidateBlockingTypes(
   db: Db,
   eventId: string,
   placeId: string,
   overrideConstraintId?: string,
   overrideValue?: NormalizedValue,
-): boolean {
+): string[] {
   const candidate = db.features.find((feature) => feature.place_id === placeId)
-  if (!candidate) return false
+  if (!candidate) return ['unknown_venue']
 
   const musts = db.constraints.filter(
     (constraint) => constraint.event_id === eventId && constraint.kind === 'MUST',
   )
+  const blocked = new Set<string>()
 
   for (const must of musts) {
     const value =
@@ -350,11 +420,25 @@ export function candidateIsFeasible(
         candidate.price_yen_estimate === null ||
         exceeds(candidate.price_yen_estimate, nullableInt(value, 'max_yen'))
       ) {
-        return false
+        blocked.add('budget')
       }
     } else if (must.normalized_type === 'room') {
-      const wanted = typeof value.room === 'string' ? value.room : null
-      if (candidate.room_type !== wanted) return false
+      // {"room": "private"|"semi_private"|"open"}, plus "accept_unknown": true once the
+      // participant has accepted the relaxation step (see relaxedValue). Same three-part rule
+      // as smoking since 0022: an unreadable preference is not a satisfied one, a venue whose
+      // room_type is UNCONFIRMED (every Places-only candidate — Places has no private-room
+      // field) passes only with the flag, and a venue KNOWN to be another room type always
+      // fails, so consenting to 半個室 never admits a counter-only 大衆酒場.
+      const wanted = nullableText(value, 'room')
+      const roomType = candidate.room_type
+      if (
+        wanted === null ||
+        !ROOM_TYPES.includes(wanted) ||
+        (roomType === null && !flag(value, 'accept_unknown')) ||
+        (roomType !== null && roomType !== wanted)
+      ) {
+        blocked.add('room')
+      }
     } else if (must.normalized_type === 'dietary') {
       const tags = stringArray(value, 'tags')
       if (
@@ -363,7 +447,7 @@ export function candidateIsFeasible(
         candidate.dietary_tags.length === 0 ||
         !contains(candidate.dietary_tags, tags)
       ) {
-        return false
+        blocked.add('dietary')
       }
     } else if (must.normalized_type === 'allergy') {
       const allergens = stringArray(value, 'allergens')
@@ -376,22 +460,16 @@ export function candidateIsFeasible(
           allergens.map((allergen) => `${allergen}_free`),
         )
       ) {
-        return false
+        blocked.add('allergy')
       }
     } else if (must.normalized_type === 'accessibility') {
-      // {"needs": string[]} against restaurant_features.accessibility_tags (0016). Same
-      // shape as dietary/allergy, and the same rule: a venue with no tags recorded is
-      // UNKNOWN, and unknown is not step-free. Before 0021 this MUST had no branch at all,
-      // so 「車椅子で入れる店」 was silently satisfied while also being un-negotiable.
-      const needs = stringArray(value, 'needs')
-      const venueTags = candidate.accessibility_tags ?? []
-      if (
-        needs === null ||
-        needs.length === 0 ||
-        venueTags.length === 0 ||
-        !contains(venueTags, needs)
-      ) {
-        return false
+      // {"needs": string[]} drawn from ACCESSIBILITY_VOCABULARY, against
+      // restaurant_features.accessibility_tags. A venue with no tags recorded is UNKNOWN, and
+      // unknown is not step-free. Before 0021 this MUST had no branch at all, so
+      // 「車椅子で入れる店」 was silently satisfied while also being un-negotiable; it is still
+      // never relaxable, so the only way a venue passes is recorded provider data.
+      if (!accessibilityNeedsMet(candidate.accessibility_tags ?? [], value)) {
+        blocked.add('accessibility')
       }
     } else if (must.normalized_type === 'smoking') {
       // {"preference": "non_smoking"|"smoking_ok"}, plus "accept_unknown": true once the
@@ -406,17 +484,29 @@ export function candidateIsFeasible(
         (policy === null && !flag(value, 'accept_unknown')) ||
         (policy !== null && policy !== preference)
       ) {
-        return false
+        blocked.add('smoking')
       }
     } else if (must.normalized_type === 'travel_time') {
       // coalesce(fn_travel_minutes(...), 9999): an unknown travel time fails a travel MUST
       // rather than passing it, and the lookup is event-scoped (0016).
       const minutes = travelMinutesFor(db, eventId, placeId, must.participant_id) ?? 9999
-      if (exceeds(minutes, nullableInt(value, 'max_minutes'))) return false
+      if (exceeds(minutes, nullableInt(value, 'max_minutes'))) blocked.add('travel_time')
     }
   }
 
-  return true
+  return [...blocked].sort()
+}
+
+export function candidateIsFeasible(
+  db: Db,
+  eventId: string,
+  placeId: string,
+  overrideConstraintId?: string,
+  overrideValue?: NormalizedValue,
+): boolean {
+  return (
+    candidateBlockingTypes(db, eventId, placeId, overrideConstraintId, overrideValue).length === 0
+  )
 }
 
 /* -------------------------------------------------------------------------- */
@@ -842,17 +932,36 @@ function assignHonestLabels(db: Db, runId: string): void {
 /* fn_recompute_feasibility                                                    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Ports `fn_recompute_feasibility` (0022, itself 0018's definition).
+ *
+ * `accessibility_unverified_count` is the one key 0022 adds, and no existing key changed
+ * meaning — the web and Swift clients decode this payload. It counts the candidates whose ONLY
+ * unmet MUSTs are accessibility ones: the venues that would be on the shortlist if their
+ * accessibility could be confirmed. That is the honest number behind 「N件は車椅子対応が確認
+ * できませんでした（お店に確認できます）」, and it is why a wheelchair user is never shown a bare
+ * 「0件」. It deliberately excludes venues that also break another MUST — a phone call would not
+ * make those available — and it is 0 for every event that stated no accessibility MUST.
+ */
 export function recomputeFeasibility(
   db: Db,
   eventId: string,
   newId: () => string,
   now: () => string,
-): { run_id: string; feasible_count: number } {
-  const feasibleCount = db.restaurants
+): { run_id: string; feasible_count: number; accessibility_unverified_count: number } {
+  let feasibleCount = 0
+  let accessibilityUnverifiedCount = 0
+  const candidates = db.restaurants
     .slice()
     .sort((a, b) => a.place_id.localeCompare(b.place_id))
     .filter((restaurant) => db.features.some((feature) => feature.place_id === restaurant.place_id))
-    .filter((restaurant) => candidateIsFeasible(db, eventId, restaurant.place_id)).length
+  for (const restaurant of candidates) {
+    const blocked = candidateBlockingTypes(db, eventId, restaurant.place_id)
+    if (blocked.length === 0) feasibleCount += 1
+    else if (blocked.length === 1 && blocked[0] === 'accessibility') {
+      accessibilityUnverifiedCount += 1
+    }
+  }
 
   const runId = newId()
   db.runs.push({
@@ -869,7 +978,11 @@ export function recomputeFeasibility(
 
   if (feasibleCount > 0) scoreFeasibleCandidates(db, runId, eventId, newId)
 
-  return { run_id: runId, feasible_count: feasibleCount }
+  return {
+    run_id: runId,
+    feasible_count: feasibleCount,
+    accessibility_unverified_count: accessibilityUnverifiedCount,
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -878,10 +991,11 @@ export function recomputeFeasibility(
 
 /**
  * The single relaxation step the engine is willing to propose, per constraint type. Ports
- * `fn_relaxed_value` (0021), which is also what `fn_propose_relaxation` compares a REJECTED
- * proposal against — so "what would we offer" and "what did we offer" cannot drift.
+ * `fn_relaxed_value` (0022, itself 0021's), which is also what `proposeRelaxation` compares a
+ * REJECTED proposal against — so "what would we offer" and "what did we offer" cannot drift.
  *
- *   room         private → semi_private (a divider instead of a door)
+ *   room         private → semi_private (a divider instead of a door) AND accept an
+ *                UNCONFIRMED venue
  *   travel_time  +10 minutes
  *   budget       +500 yen
  *   smoking      keep the preference, accept an UNCONFIRMED venue
@@ -896,15 +1010,36 @@ export function recomputeFeasibility(
  * never trades away what was asked for: a venue known to be 喫煙可 still fails a
  * non_smoking MUST afterwards. accessibility deliberately has NO step — it stays on
  * NEVER_RELAXED, because accepting an unverified step-free entrance is accepting the risk of
- * not getting in; there the escape hatch is human verification, not a negotiation.
+ * not getting in; there the escape hatch is human verification and the coverage count in
+ * `recomputeFeasibility`, not a negotiation.
+ *
+ * WHY THE TWO ROOM CONCESSIONS ARE ONE STEP (0022). `room_type` is filled only from Hot
+ * Pepper, so every Places-only candidate has it NULL and a 個室 MUST used to be infeasible
+ * before AND after the private → semi_private step — 0 unlocked, no proposal, dead end. Both
+ * two-rung orderings were considered and each is unreachable in one of the two worlds this
+ * engine serves: widening first unlocks nothing when every room_type is NULL (so the second
+ * rung is never reached, because `proposeRelaxation` returns null on a step that unlocks 0),
+ * and accepting unknown first unlocks nothing on the seeded demo where every venue HAS a
+ * room_type (so Bob is never asked and the 0-then-3 invariant dies). This function is a pure
+ * function of (type, value) by design and cannot look at the candidate pool to pick a rung, so
+ * the two concessions are composed into one reachable question, which also asks the
+ * participant once rather than twice. It still never trades away what was asked: the room type
+ * is checked whenever the venue HAS one, so an accepted step admits confirmed 半個室 and
+ * unconfirmed venues, never a venue known to be `open`.
  *
  * A type with no step returns its value unchanged, so countUnlockedIfRelaxed measures a
- * no-op and reports 0 unlocked.
+ * no-op and reports 0 unlocked. Relaxing an already-relaxed room value is likewise a no-op,
+ * so the ladder terminates instead of being re-asked forever.
  */
 export function relaxedValue(constraint: ConstraintRow): NormalizedValue {
   switch (constraint.normalized_type) {
-    case 'room':
-      return { room: 'semi_private' }
+    case 'room': {
+      // `(value->>'room')` is carried over verbatim for anything that is not 'private', so an
+      // unreadable room stays unreadable (null): the relaxed value is then still infeasible
+      // and never gets proposed, exactly as with an unreadable smoking preference.
+      const current = nullableText(constraint.normalized_value, 'room')
+      return { room: current === 'private' ? 'semi_private' : current, accept_unknown: true }
+    }
     case 'travel_time': {
       const current = nullableInt(constraint.normalized_value, 'max_minutes')
       return { max_minutes: (current ?? 0) + 10 }
