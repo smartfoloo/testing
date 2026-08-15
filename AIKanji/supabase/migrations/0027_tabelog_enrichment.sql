@@ -10,10 +10,12 @@
 --   * TABELOG'S TERMS OF USE PROHIBIT REPRODUCING ITS CONTENT WITHOUT PRIOR WRITTEN CONSENT and
 --     bar commercial use. We do not have that consent. This exists for a NON-COMMERCIAL
 --     HACKATHON DEMO and for nothing else.
---   * THE WRITE PATH IS FEATURE-FLAGGED OFF BY DEFAULT. The Edge Function makes not one request
---     to tabelog.com unless the secret TABELOG_ENRICHMENT_ENABLED is exactly the string "true".
---     The flag exists so this cannot reach a shipped product by accident: enabling it is a
---     deliberate act by somebody who has read this paragraph.
+--   * THE WRITE PATH IS FEATURE-FLAGGED, AND SINCE 0028's DEMO DECISION THE FLAG DEFAULTS TO
+--     ON. The Edge Function makes no request to tabelog.com when the secret
+--     TABELOG_ENRICHMENT_ENABLED is exactly the string "false"; any other value, including
+--     unset, enables it. These columns therefore fill in by default on a live search — which
+--     is what the owner wanted for the demo, and is worth knowing before this repository is
+--     run anywhere that is not one.
 --   * THE LEGITIMATE ROUTE IS A PARTNER AGREEMENT WITH KAKAKU.COM. If this feature is ever
 --     wanted in a product, that is the change to make — not a wider scraper.
 --   * NO REVIEW TEXT IS TAKEN, EVER. Review text is the content Tabelog's terms protect most
