@@ -70,13 +70,13 @@ struct CreateEventView: View {
         isSubmitting = true
         errorMessage = nil
         do {
-            let event = try await service.createEvent(name: name.trimmed, objective: objective)
-            let participantId = try await service.joinEvent(
-                inviteCode: event.inviteCode,
+            let event = try await service.createEvent(
+                name: name.trimmed,
                 displayName: displayName.trimmed,
-                travelReference: travelReference
+                travelReference: travelReference,
+                objective: objective
             )
-            created = (event.eventId, participantId)
+            created = (event.eventId, event.participantId)
             inviteCode = event.inviteCode
         } catch {
             errorMessage = error.localizedDescription

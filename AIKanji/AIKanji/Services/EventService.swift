@@ -11,6 +11,9 @@ struct EventService {
     private struct CreateEventParams: Encodable {
         let p_name: String
         let p_objective: String
+        let p_display_name: String
+        let p_travel_reference: String
+        let p_travel_reference_place_id: String?
     }
 
     private struct JoinEventParams: Encodable {
@@ -20,9 +23,22 @@ struct EventService {
         let p_travel_reference_place_id: String?
     }
 
-    func createEvent(name: String, objective: EventObjective = .balanced) async throws -> CreatedEvent {
+    /// Creates the event and its organizer participant in a single transaction.
+    func createEvent(
+        name: String,
+        displayName: String,
+        travelReference: TravelReference,
+        travelReferencePlaceId: String? = nil,
+        objective: EventObjective = .balanced
+    ) async throws -> CreatedEvent {
         try await client
-            .rpc("fn_create_event", params: CreateEventParams(p_name: name, p_objective: objective.rawValue))
+            .rpc("fn_create_event", params: CreateEventParams(
+                p_name: name,
+                p_objective: objective.rawValue,
+                p_display_name: displayName,
+                p_travel_reference: travelReference.rawValue,
+                p_travel_reference_place_id: travelReferencePlaceId
+            ))
             .execute()
             .value
     }

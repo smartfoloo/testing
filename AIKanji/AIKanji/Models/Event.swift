@@ -33,9 +33,11 @@ struct Event: Codable, Identifiable, Hashable {
 struct CreatedEvent: Codable, Hashable {
     let eventId: UUID
     let inviteCode: String
+    let participantId: UUID
 
     enum CodingKeys: String, CodingKey {
         case eventId = "event_id"
         case inviteCode = "invite_code"
+        case participantId = "participant_id"
     }
 }
