@@ -28,10 +28,7 @@ struct RecommendationCardView: View {
             if let explanation {
                 Text(explanation).font(.body)
             } else {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Writing a summary…").font(.footnote).foregroundStyle(.secondary)
-                }
+                Text(RecommendationListViewModel.fallbackExplanation).font(.body)
             }
 
             HStack(spacing: 12) {
@@ -45,7 +42,7 @@ struct RecommendationCardView: View {
     }
 
     private var title: String {
-        feature?.cuisineTags.first?.capitalized ?? score.restaurantPlaceId
+        feature?.name ?? feature?.cuisineTags.first?.capitalized ?? score.restaurantPlaceId
     }
 
     private var details: [String] {

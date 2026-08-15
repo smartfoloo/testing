@@ -20,7 +20,7 @@ struct RecommendationService {
     func features(placeIds: [String]) async throws -> [RestaurantFeature] {
         try await client
             .from("restaurant_features")
-            .select("place_id, price_yen_estimate, room_type, cuisine_tags, atmosphere_tags")
+            .select("place_id, name, price_yen_estimate, room_type, cuisine_tags, atmosphere_tags")
             .in("place_id", values: placeIds)
             .execute()
             .value

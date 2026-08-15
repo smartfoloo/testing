@@ -56,6 +56,7 @@ struct RecommendationScore: Codable, Identifiable, Hashable {
 
 struct RestaurantFeature: Codable, Identifiable, Hashable {
     let placeId: String
+    let name: String?
     let priceYenEstimate: Int?
     let roomType: String?
     let cuisineTags: [String]
@@ -74,6 +75,7 @@ struct RestaurantFeature: Codable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case placeId = "place_id"
+        case name
         case priceYenEstimate = "price_yen_estimate"
         case roomType = "room_type"
         case cuisineTags = "cuisine_tags"

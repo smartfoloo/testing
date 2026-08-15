@@ -13,15 +13,15 @@ insert into participants (id, event_id, auth_user_id, display_name, role, travel
 
 insert into participant_constraints (event_id, participant_id, kind, raw_text, normalized_type, normalized_value, visibility) values
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','MUST','budget under 4000 yen','budget','{"max_yen":4000}','PUBLIC'),
-('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','WANT','yakitori','cuisine','{"cuisine":"yakitori"}','PUBLIC'),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000a1','WANT','yakitori','cuisine','{"include":["yakitori"],"exclude":[]}','PUBLIC'),
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000b1','MUST','private room','room','{"room":"private"}','PUBLIC'),
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000b1','WANT','good sake selection','other','{"note":"good sake"}','PUBLIC'),
-('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000c1','MUST','vegetarian options','dietary','{"diet":"vegetarian"}','ANONYMOUS'),
-('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000c1','WANT','quiet atmosphere','atmosphere','{"atmosphere":"quiet"}','PUBLIC'),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000c1','MUST','vegetarian options','dietary','{"tags":["vegetarian"]}','ANONYMOUS'),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000c1','WANT','quiet atmosphere','atmosphere','{"tags":["quiet"]}','PUBLIC'),
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','MUST','within 35 min travel','travel_time','{"max_minutes":35}','PUBLIC'),
-('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','WANT','casual','atmosphere','{"atmosphere":"casual"}','PUBLIC'),
-('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000e1','MUST','shellfish allergy','allergy','{"allergen":"shellfish"}','ANONYMOUS'),
-('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000e1','WANT','traditional japanese atmosphere','atmosphere','{"atmosphere":"traditional_japanese"}','PUBLIC');
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','WANT','casual','atmosphere','{"tags":["casual"]}','PUBLIC'),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000e1','MUST','shellfish allergy','allergy','{"allergens":["shellfish"]}','ANONYMOUS'),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000e1','WANT','traditional japanese atmosphere','atmosphere','{"tags":["traditional_japanese"]}','PUBLIC');
 
 insert into restaurants (place_id) values
 ('demo_place_001'), ('demo_place_002'), ('demo_place_003'), ('demo_place_004');

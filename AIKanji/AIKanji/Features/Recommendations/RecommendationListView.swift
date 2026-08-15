@@ -23,8 +23,12 @@ final class RecommendationListViewModel: ObservableObject {
         do {
             let scores = try await service.scores(runId: runId)
             self.scores = scores
-            for score in scores where score.explanation?.isEmpty == false {
-                explanations[score.restaurantPlaceId] = score.explanation
+            for score in scores {
+                if let explanation = score.explanation?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !explanation.isEmpty {
+                    explanations[score.restaurantPlaceId] = explanation
+                }
             }
             let loaded = try await service.features(
                 placeIds: scores.map(\.restaurantPlaceId)
@@ -41,10 +45,13 @@ final class RecommendationListViewModel: ObservableObject {
     func explain(score: RecommendationScore, runId: UUID) async {
         guard explanations[score.restaurantPlaceId] == nil else { return }
         do {
-            explanations[score.restaurantPlaceId] = try await service.explanation(
+            let explanation = try await service.explanation(
                 runId: runId,
                 restaurantPlaceId: score.restaurantPlaceId
             )
+            explanations[score.restaurantPlaceId] = explanation
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty ? Self.fallbackExplanation : explanation
         } catch {
             explanations[score.restaurantPlaceId] = Self.fallbackExplanation
         }

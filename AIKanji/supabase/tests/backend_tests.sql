@@ -53,7 +53,7 @@ declare
   v_raised boolean := false;
 begin
   perform t_as_user(v_alice);
-  v_created := fn_create_event('QA 飲み会', 'balanced');
+  v_created := fn_create_event('QA 飲み会', 'Alice', 'office', null, 'balanced');
   v_event_id := (v_created->>'event_id')::uuid;
   v_code := v_created->>'invite_code';
   perform t_check('fn_create_event returns an event id',
@@ -62,14 +62,17 @@ begin
                   v_code ~ '^[0-9a-z]{6}$', v_code);
 
   v_alice_pid := fn_join_event(v_code, 'Alice', 'office');
+  perform t_check('re-joining is idempotent for the creator',
+                  v_alice_pid = (v_created->>'participant_id')::uuid,
+                  v_alice_pid::text);
   perform t_as_user(v_bob);
   v_bob_pid := fn_join_event(v_code, 'Bob', 'station');
 
   perform t_as_admin();
   select role into v_role from participants where id = v_alice_pid;
-  perform t_check('first joiner becomes organizer', v_role = 'organizer', v_role);
+  perform t_check('creator is the organizer', v_role = 'organizer', v_role);
   select role into v_role from participants where id = v_bob_pid;
-  perform t_check('second joiner becomes participant', v_role = 'participant', v_role);
+  perform t_check('joiner becomes participant', v_role = 'participant', v_role);
   select organizer_participant_id into v_organizer from events where id = v_event_id;
   perform t_check('event points at the organizer participant',
                   v_organizer = v_alice_pid, v_organizer::text);
@@ -96,7 +99,7 @@ begin
   insert into participant_constraints (event_id, participant_id, kind, raw_text,
                                        normalized_type, normalized_value, visibility)
   values (v_event_id, v_bob_pid, 'MUST', 'vegetarian options',
-          'dietary', '{"diet":"vegetarian"}', 'ANONYMOUS');
+          'dietary', '{"tags":["vegetarian"]}', 'ANONYMOUS');
   insert into participant_constraints (event_id, participant_id, kind, raw_text,
                                        normalized_type, normalized_value, visibility)
   values (v_event_id, v_bob_pid, 'MUST', 'not sharing this one',

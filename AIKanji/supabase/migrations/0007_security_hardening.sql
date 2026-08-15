@@ -152,6 +152,16 @@ begin
   );
 end; $$;
 
+-- Compatibility for the existing domain safety test's scratch event. New app
+-- callers use the full organizer-aware signature above.
+create function public.fn_create_event(p_name text)
+returns jsonb
+language sql security definer
+set search_path = ''
+as $$
+  select public.fn_create_event(p_name, 'Organizer', 'office', null, 'balanced');
+$$;
+
 -- Joining is idempotent and rejects closed events. The organizer is created by
 -- fn_create_event, so the first-joiner promotion is gone.
 create or replace function fn_join_event(
@@ -258,3 +268,59 @@ end; $$;
 create trigger trg_touch_participant_constraints
   before update on participant_constraints
   for each row execute function fn_touch_updated_at();
+
+-- Feasibility and negotiation were introduced after the original hardening
+-- migration. Re-pin their search paths and apply the same caller protections.
+-- These definitions intentionally run after 0006 so they cannot be clobbered by
+-- an older create-or-replace statement.
+alter table public.restaurant_features
+  add column if not exists name text;
+
+-- The feed must reflect a participant constraint rewritten by negotiation.
+create or replace function public.fn_broadcast_constraint_change()
+returns trigger
+security definer
+language plpgsql
+set search_path = ''
+as $$
+declare
+  payload jsonb;
+begin
+  if new.visibility not in ('PUBLIC','ANONYMOUS') then
+    return new;
+  end if;
+
+  payload := jsonb_build_object(
+    'id', new.id,
+    'kind', new.kind,
+    'normalized_type', new.normalized_type,
+    'normalized_value', new.normalized_value,
+    'visibility', new.visibility,
+    'display_name', case when new.visibility = 'PUBLIC'
+      then (select display_name from public.participants
+            where id = new.participant_id)
+      else null end,
+    'created_at', new.created_at
+  );
+
+  perform realtime.send(
+    payload,
+    case when tg_op = 'UPDATE' then 'constraint_updated' else 'constraint_added' end,
+    'event-' || new.event_id::text,
+    true
+  );
+  return new;
+end; $$;
+
+drop trigger if exists trg_broadcast_constraint
+  on public.participant_constraints;
+create trigger trg_broadcast_constraint
+  after insert or update on public.participant_constraints
+  for each row execute function public.fn_broadcast_constraint_change();
+
+-- These functions are implementation details called by the guarded public
+-- RPCs. Client roles must not be able to use them as cross-event oracles.
+revoke execute on function public.fn_candidate_is_feasible(uuid, text, uuid, jsonb)
+  from public, anon, authenticated;
+revoke execute on function public.fn_count_unlocked_if_relaxed(uuid, uuid)
+  from public, anon, authenticated;

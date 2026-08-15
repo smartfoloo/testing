@@ -4,6 +4,44 @@ import XCTest
 
 /// Provider-degradation evidence for the hosted Edge Functions.
 final class ProviderDegradationTests: XCTestCase {
+    private enum JSONValue: Codable, Equatable {
+        case string(String)
+        case number(Double)
+        case bool(Bool)
+        case object([String: JSONValue])
+        case array([JSONValue])
+        case null
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if container.decodeNil() {
+                self = .null
+            } else if let value = try? container.decode(Bool.self) {
+                self = .bool(value)
+            } else if let value = try? container.decode(Double.self) {
+                self = .number(value)
+            } else if let value = try? container.decode(String.self) {
+                self = .string(value)
+            } else if let value = try? container.decode([String: JSONValue].self) {
+                self = .object(value)
+            } else {
+                self = .array(try container.decode([JSONValue].self))
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            switch self {
+            case .string(let value): try container.encode(value)
+            case .number(let value): try container.encode(value)
+            case .bool(let value): try container.encode(value)
+            case .object(let value): try container.encode(value)
+            case .array(let value): try container.encode(value)
+            case .null: try container.encodeNil()
+            }
+        }
+    }
+
     private struct ExplainRequest: Encodable {
         let mode = "explain"
         let run_id: UUID
@@ -13,6 +51,43 @@ final class ProviderDegradationTests: XCTestCase {
 
     private struct ExplainResponse: Decodable {
         let explanation: String
+    }
+
+    private struct ParseRequest: Encodable {
+        let mode = "parse"
+        let raw_text: String
+        let kind: String
+        let language = "en"
+    }
+
+    private struct ParseResponse: Decodable {
+        let normalized_type: String
+        let normalized_value: [String: JSONValue]
+        let suggested_visibility: String
+        let confidence: Double
+        let needs_clarification: Bool
+    }
+
+    private struct ScratchEvent: Decodable {
+        let eventId: UUID
+        let participantId: UUID
+        let inviteCode: String
+
+        enum CodingKeys: String, CodingKey {
+            case eventId = "event_id"
+            case participantId = "participant_id"
+            case inviteCode = "invite_code"
+        }
+    }
+
+    private struct ConstraintInsert: Encodable {
+        let event_id: UUID
+        let participant_id: UUID
+        let kind: String
+        let raw_text: String
+        let normalized_type: String
+        let normalized_value: [String: JSONValue]
+        let visibility: String
     }
 
     private struct RespondParams: Encodable {
@@ -72,7 +147,9 @@ final class ProviderDegradationTests: XCTestCase {
             )
         }
 
-        XCTAssertFalse(response.explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertTrue(response.explanation.contains("around ¥3800"))
+        XCTAssertTrue(response.explanation.contains("semi private seating"))
+        XCTAssertTrue(response.explanation.contains("20 min at worst to get there"))
     }
 
     func test02_explainIgnoresClientSuppliedGrounding() async throws {
@@ -119,6 +196,52 @@ final class ProviderDegradationTests: XCTestCase {
         } catch {
             XCTFail("restaurant-search returned an unexpected error: \(error)")
         }
+    }
+
+    func test04_parseInsertAndRecomputeContract() async throws {
+        let client = try await DemoFixture.client(as: .alice)
+        let created: ScratchEvent = try await client
+            .rpc("fn_create_event", params: ["p_name": "parse contract scratch"])
+            .execute()
+            .value
+        addTeardownBlock {
+            try? await DemoFixture.deleteEvent(created.eventId)
+        }
+        let parsed: ParseResponse = try await withTimeout(seconds: 20) {
+            try await client.functions.invoke(
+                "llm-assist",
+                options: FunctionInvokeOptions(
+                    body: ParseRequest(
+                        raw_text: "I want a quiet atmosphere",
+                        kind: "WANT"
+                    )
+                )
+            )
+        }
+
+        XCTAssertFalse(parsed.normalized_type.isEmpty)
+        XCTAssertGreaterThanOrEqual(parsed.confidence, 0)
+        XCTAssertLessThanOrEqual(parsed.confidence, 1)
+        try await client
+            .from("participant_constraints")
+            .insert(ConstraintInsert(
+                event_id: created.eventId,
+                participant_id: created.participantId,
+                kind: "WANT",
+                raw_text: "I want a quiet atmosphere",
+                normalized_type: parsed.normalized_type,
+                normalized_value: parsed.normalized_value,
+                visibility: parsed.suggested_visibility
+            ))
+            .execute()
+
+        let result: FeasibilityResult = try await client
+            .rpc("fn_recompute_feasibility", params: [
+                "p_event_id": created.eventId.uuidString
+            ])
+            .execute()
+            .value
+        XCTAssertEqual(result.feasibleCount, 4)
     }
 
     private func prepareRecommendationRun() async throws -> (SupabaseClient, UUID, String) {
