@@ -22,6 +22,7 @@
 		48E436302B854ADCA9E1D1F0 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06038749E18E51FCB95854F8 /* WelcomeView.swift */; };
 		5B9CEE1DB887076807DAF49B /* AIKanjiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2F2CAF055921EC6CC7092E7 /* AIKanjiApp.swift */; };
 		5C3812BB00C48D3D9FC7E6D8 /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 857DCC152D77EC3F86D35F42 /* Components.swift */; };
+		600D734A7F885BA89D92E16B /* LoginSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5214E97A89C75B50E3351D1 /* LoginSheet.swift */; };
 		74EF1B36BC30D6EA87047E39 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = D6F29F0CFDD5884298193D7F /* Supabase */; };
 		7C148DB66702B46F58A72C9E /* FeasibilityEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2C43528B8E5D430665110E4 /* FeasibilityEngineTests.swift */; };
 		7F257AC9EA0F2B4FE1856A9B /* ConstraintEntryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A78B8F40468229EED48E09C8 /* ConstraintEntryView.swift */; };
@@ -66,11 +67,11 @@
 		40928E30CA5AFAD0BBB4F036 /* Recommendation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recommendation.swift; sourceTree = "<group>"; };
 		545C0AD7677F4411450DFA21 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		59DEEA6CE1E89741470F9BCE /* Participant.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Participant.swift; sourceTree = "<group>"; };
-		5DDA7F248891D5917368D030 /* AIKanjiDomainTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AIKanjiDomainTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5DDA7F248891D5917368D030 /* AIKanjiDomainTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AIKanjiDomainTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		608251830D7E44B3892C2947 /* ProviderDegradationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderDegradationTests.swift; sourceTree = "<group>"; };
 		63FA58E451E43858E9C5B5B5 /* Constraint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constraint.swift; sourceTree = "<group>"; };
 		67BA558498D2912C16908EFE /* RecommendationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationService.swift; sourceTree = "<group>"; };
-		6A73C9E04251522A3407CB69 /* AIKanji.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AIKanji.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6A73C9E04251522A3407CB69 /* AIKanji.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AIKanji.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		78C17AFA9C8CA326D156FFF4 /* RecommendationCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecommendationCardView.swift; sourceTree = "<group>"; };
 		7C29450AE609DAE351070450 /* EventService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventService.swift; sourceTree = "<group>"; };
 		857DCC152D77EC3F86D35F42 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
@@ -83,11 +84,12 @@
 		B0AD690D8624CF9FA6B904DD /* NegotiationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NegotiationService.swift; sourceTree = "<group>"; };
 		B2F2CAF055921EC6CC7092E7 /* AIKanjiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIKanjiApp.swift; sourceTree = "<group>"; };
 		B3F1151085B9A53E6FB321A9 /* ConstraintService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConstraintService.swift; sourceTree = "<group>"; };
+		C5214E97A89C75B50E3351D1 /* LoginSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginSheet.swift; sourceTree = "<group>"; };
 		CF2BFE2E08F517FC2EE691C1 /* DemoFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoFixture.swift; sourceTree = "<group>"; };
 		D097771D0F1FB3364D6E4CE1 /* Config.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Config.xcconfig; sourceTree = "<group>"; };
 		D439F6D3946509F667A2895A /* NegotiationConsentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NegotiationConsentView.swift; sourceTree = "<group>"; };
 		DB8E591D1B0661BB5344DF21 /* AppCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCopy.swift; sourceTree = "<group>"; };
-		E03C7854D33184CFAFE3AB7A /* AIKanjiUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AIKanjiUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E03C7854D33184CFAFE3AB7A /* AIKanjiUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AIKanjiUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F2C43528B8E5D430665110E4 /* FeasibilityEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeasibilityEngineTests.swift; sourceTree = "<group>"; };
 		F6DCADF0A7B688A6FDBB1259 /* Event.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Event.swift; sourceTree = "<group>"; };
 		FAC72E9F534CA77C8A71438E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -201,6 +203,7 @@
 				3C97401E850C0F14E20AE547 /* CreateEventView.swift */,
 				AAD9B6CCE54781088CE7EA78 /* EventHomeView.swift */,
 				9AC3627848BC30A86B36293A /* JoinEventView.swift */,
+				C5214E97A89C75B50E3351D1 /* LoginSheet.swift */,
 				06038749E18E51FCB95854F8 /* WelcomeView.swift */,
 			);
 			path = Onboarding;
@@ -425,6 +428,7 @@
 				DBA93C18C61993DC9636B1AB /* GroupActivityFeedView.swift in Sources */,
 				2E5BFD6A699D953EB826810D /* JSONValue.swift in Sources */,
 				391B079F32D6AB8D31B4ECE3 /* JoinEventView.swift in Sources */,
+				600D734A7F885BA89D92E16B /* LoginSheet.swift in Sources */,
 				13397E73EE9C59B30D61F72C /* Negotiation.swift in Sources */,
 				166976D96EAAC1FB848FA0C5 /* NegotiationConsentView.swift in Sources */,
 				08DECD8526807BFD2408B590 /* NegotiationService.swift in Sources */,
@@ -517,7 +521,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = 24V8J2LNCX;
 				INFOPLIST_FILE = AIKanji/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -535,7 +538,6 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = 24V8J2LNCX;
 				INFOPLIST_FILE = AIKanji/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

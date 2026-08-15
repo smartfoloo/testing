@@ -1,5 +1,25 @@
 import SwiftUI
 
+struct AppInputFieldStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, AppSpacing.md)
+            .frame(minHeight: 48)
+            .background(AppColors.card)
+            .clipShape(RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous)
+                    .stroke(AppColors.border, lineWidth: 1)
+            )
+    }
+}
+
+extension View {
+    func appInputFieldStyle() -> some View {
+        modifier(AppInputFieldStyle())
+    }
+}
+
 struct PrimaryButton: View {
     let title: String
     var systemImage: String?
@@ -71,13 +91,21 @@ struct StarterChip: View {
     var action: () -> Void
 
     var body: some View {
-        Button(title, action: action)
-            .font(AppTypography.caption.weight(.semibold))
-            .foregroundStyle(AppColors.ink)
-            .padding(.horizontal, AppSpacing.sm)
-            .frame(minHeight: 44)
-            .background(tint)
-            .clipShape(Capsule())
+        Button(action: action) {
+            Text(title)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 48)
+                .frame(maxHeight: .infinity)
+                .padding(.horizontal, AppSpacing.xs)
+                .background(tint)
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .font(AppTypography.caption.weight(.semibold))
+        .foregroundStyle(AppColors.ink)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

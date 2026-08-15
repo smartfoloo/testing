@@ -90,7 +90,10 @@ struct ConstraintEntryView: View {
     private func requirementSection(_ kind: ConstraintKind) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
             Text(kind.title).font(AppTypography.section)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110))], spacing: AppSpacing.xs) {
+            LazyVGrid(
+                columns: [GridItem(.flexible()), GridItem(.flexible())],
+                spacing: AppSpacing.xs
+            ) {
                 ForEach(Self.examples[kind] ?? [], id: \.0) { example in
                     StarterChip(title: example.0, tint: kind == .must ? AppColors.accentSoft : AppColors.yellow) {
                         drafts[kind] = example.1

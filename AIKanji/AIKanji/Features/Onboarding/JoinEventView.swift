@@ -31,7 +31,7 @@ struct JoinEventView: View {
                     TextField("6桁のコード", text: $inviteCode)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .textFieldStyle(.roundedBorder)
+                        .appInputFieldStyle()
                         .font(.system(.body, design: .monospaced))
                         .accessibilityIdentifier("invite-code")
                         .onChange(of: inviteCode) { _, value in inviteCode = String(value.lowercased().prefix(6)) }
@@ -50,7 +50,7 @@ struct JoinEventView: View {
                 VStack(alignment: .leading, spacing: AppSpacing.xs) {
                     Text("あなたの名前").font(AppTypography.section)
                     TextField("例：佐藤", text: $displayName)
-                        .textFieldStyle(.roundedBorder)
+                        .appInputFieldStyle()
                         .accessibilityIdentifier("join-display-name")
                 }
                 TravelReferenceField(
