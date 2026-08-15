@@ -1,0 +1,172 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens ported 1:1 from the iOS app.
+ *
+ * Colours come from AIKanji/AIKanji/Assets.xcassets/App*.colorset — each Contents.json
+ * stores sRGB components as 0–1 floats plus a `luminosity: dark` variant. They are
+ * converted to hex here and the dark variant is applied via `.dark`, which
+ * ThemeProvider toggles from prefers-color-scheme.
+ *
+ * Spacing / radius / typography come from DesignSystem/AppColors.swift
+ * (AppSpacing, AppRadius, AppTypography).
+ */
+
+@theme {
+  /* AppColors — light appearance */
+  --color-background: #f3f7f6;
+  --color-card: #ffffff;
+  --color-ink: #17332d;
+  --color-accent: #f26b4a;
+  --color-accent-soft: #fce6da;
+  --color-yellow: #f4c95d;
+  --color-purple: #7563a8;
+  --color-green-soft: #dce8e4;
+  --color-border: rgb(23 51 45 / 0.18);
+
+  /* AppSpacing */
+  --spacing-xxs: 4px;
+  --spacing-xs: 8px;
+  --spacing-sm: 12px;
+  --spacing-md: 16px;
+  --spacing-lg: 20px;
+  --spacing-xl: 28px;
+  --spacing-xxl: 36px;
+
+  /* AppRadius */
+  --radius-field: 10px;
+  --radius-card: 18px;
+  --radius-sheet: 26px;
+  --radius-pill: 999px;
+
+  /* AppTypography — SwiftUI text styles at their default iOS sizes */
+  --text-display: 34px;
+  --text-display--line-height: 1.16;
+  --text-display--font-weight: 800;
+  --text-title: 22px;
+  --text-title--line-height: 1.28;
+  --text-title--font-weight: 700;
+  --text-section: 17px;
+  --text-section--line-height: 1.35;
+  --text-section--font-weight: 700;
+  --text-body: 17px;
+  --text-body--line-height: 1.5;
+  --text-caption: 13px;
+  --text-caption--line-height: 1.45;
+  --text-small: 12px;
+  --text-small--line-height: 1.4;
+
+  /* SF Pro on Apple platforms, with the Japanese faces iOS actually falls back to */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN',
+    'Noto Sans JP', 'Yu Gothic UI', Meiryo, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+}
+
+/* AppColors — dark appearance (the `luminosity: dark` entries in each colorset) */
+.dark {
+  --color-background: #17251b;
+  --color-card: #1f2e25;
+  --color-ink: #ebf2ed;
+  --color-accent: #ff8566;
+  --color-accent-soft: #4d383d;
+  --color-yellow: #ffcc80;
+  --color-purple: #a68fc2;
+  --color-green-soft: #2b4538;
+  --color-border: rgb(235 242 237 / 0.36);
+}
+
+@layer base {
+  html {
+    /* Honour the OS text-size setting the way SwiftUI Dynamic Type does */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-background);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    /* Stop the whole page rubber-banding so only scroll containers bounce */
+    overscroll-behavior-y: none;
+  }
+
+  /* iOS Safari highlights every tapped element blue by default */
+  button,
+  a,
+  [role='button'] {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button {
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  input,
+  textarea,
+  select {
+    font: inherit;
+    color: inherit;
+    /* < 16px triggers Safari's focus zoom on iPhone */
+    font-size: max(16px, var(--text-body));
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@utility safe-b {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@utility safe-t {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* AppCard / TabPillBar: .shadow(color: AppColors.ink.opacity(0.08), radius: 10, y: 3) */
+@utility card-shadow {
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+
+/* Sheet presentation, standing in for SwiftUI's .sheet slide-up transition */
+@keyframes matomeshi-sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+/* SwiftUI's .redacted(reason: .placeholder) shimmer used by LoadingStateView */
+@keyframes matomeshi-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@utility skeleton {
+  animation: matomeshi-pulse 1.4s ease-in-out infinite;
+}
