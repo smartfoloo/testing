@@ -23,8 +23,16 @@ enum Supa {
     static let client = SupabaseClient(supabaseURL: SupabaseConfig.url, supabaseKey: SupabaseConfig.anonKey)
 
     /// Signs in anonymously when no session has been persisted by the SDK's storage layer.
+    /// UI tests pass `-AIKanjiResetSession` to act as a brand-new person on each launch.
     static func ensureSession() async throws {
-        if (try? await client.auth.session) != nil { return }
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-AIKanjiResetSession") {
+            try? await client.auth.signOut()
+        }
+#endif
+        if (try? await client.auth.session) != nil {
+            return
+        }
         _ = try await client.auth.signInAnonymously()
     }
 }

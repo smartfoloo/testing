@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
-   LastUpgradeVersion = "1500"
+   LastUpgradeVersion = "1430"
    version = "1.7">
    <BuildAction
       parallelizeBuildables = "YES"
-      buildImplicitDependencies = "YES">
+      buildImplicitDependencies = "YES"
+      runPostActionsOnFailure = "NO">
       <BuildActionEntries>
          <BuildActionEntry
             buildForTesting = "YES"
@@ -14,9 +15,37 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "A10005000000000000000001"
+               BlueprintIdentifier = "5062E6C17E91697E8DEFE558"
                BuildableName = "AIKanji.app"
                BlueprintName = "AIKanji"
+               ReferencedContainer = "container:AIKanji.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "4794C2E5ECC8FD9CD9D7F33D"
+               BuildableName = "AIKanjiDomainTests.xctest"
+               BlueprintName = "AIKanjiDomainTests"
+               ReferencedContainer = "container:AIKanji.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "562B6386060190370E9FE2DA"
+               BuildableName = "AIKanjiUITests.xctest"
+               BlueprintName = "AIKanjiUITests"
                ReferencedContainer = "container:AIKanji.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -26,9 +55,43 @@
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
-      shouldUseLaunchSchemeArgsEnv = "YES">
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      onlyGenerateCoverageForSpecifiedTargets = "NO">
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "5062E6C17E91697E8DEFE558"
+            BuildableName = "AIKanji.app"
+            BlueprintName = "AIKanji"
+            ReferencedContainer = "container:AIKanji.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "4794C2E5ECC8FD9CD9D7F33D"
+               BuildableName = "AIKanjiDomainTests.xctest"
+               BlueprintName = "AIKanjiDomainTests"
+               ReferencedContainer = "container:AIKanji.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "562B6386060190370E9FE2DA"
+               BuildableName = "AIKanjiUITests.xctest"
+               BlueprintName = "AIKanjiUITests"
+               ReferencedContainer = "container:AIKanji.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
@@ -44,12 +107,14 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "A10005000000000000000001"
+            BlueprintIdentifier = "5062E6C17E91697E8DEFE558"
             BuildableName = "AIKanji.app"
             BlueprintName = "AIKanji"
             ReferencedContainer = "container:AIKanji.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
+      <CommandLineArguments>
+      </CommandLineArguments>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
@@ -61,7 +126,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "A10005000000000000000001"
+            BlueprintIdentifier = "5062E6C17E91697E8DEFE558"
             BuildableName = "AIKanji.app"
             BlueprintName = "AIKanji"
             ReferencedContainer = "container:AIKanji.xcodeproj">
@@ -73,6 +138,6 @@
    </AnalyzeAction>
    <ArchiveAction
       buildConfiguration = "Release"
-      revealPathInArchive = "NO">
+      revealArchiveInOrganizer = "YES">
    </ArchiveAction>
 </Scheme>

@@ -18,6 +18,16 @@ targets:
       - AIKanji
     info:
       path: AIKanji/Info.plist
+      properties:
+        LSRequiresIPhoneOS: true
+        NSCameraUsageDescription: Scanning an event QR code needs the camera.
+        SUPABASE_URL: $(SUPABASE_URL)
+        SUPABASE_ANON_KEY: $(SUPABASE_ANON_KEY)
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
     dependencies:
       - package: Supabase
         product: Supabase
@@ -25,4 +35,45 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aikanji.AIKanji
         INFOPLIST_FILE: AIKanji/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
         SWIFT_VERSION: "5.9"
+  AIKanjiDomainTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests/AIKanjiDomainTests
+    dependencies:
+      - package: Supabase
+        product: Supabase
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aikanji.AIKanjiDomainTests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: true
+  AIKanjiUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - Tests/AIKanjiUITests
+    dependencies:
+      - target: AIKanji
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aikanji.AIKanjiUITests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: true
+        TEST_TARGET_NAME: AIKanji
+schemes:
+  AIKanji:
+    build:
+      targets:
+        AIKanji: all
+        AIKanjiDomainTests: [test]
+        AIKanjiUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - AIKanjiDomainTests
+        - AIKanjiUITests

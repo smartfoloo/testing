@@ -20,6 +20,7 @@ struct CreateEventView: View {
                     Text(inviteCode)
                         .font(.system(.largeTitle, design: .monospaced))
                         .textSelection(.enabled)
+                        .accessibilityIdentifier("inviteCode")
                     if let image = Self.qrImage(for: inviteCode) {
                         Image(uiImage: image)
                             .interpolation(.none)
@@ -27,6 +28,7 @@ struct CreateEventView: View {
                             .scaledToFit()
                             .frame(maxWidth: 220)
                             .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("inviteQRCode")
                     }
                     if let created {
                         NavigationLink("Continue") {
