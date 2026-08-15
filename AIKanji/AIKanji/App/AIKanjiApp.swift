@@ -14,8 +14,8 @@ struct AIKanjiApp: App {
                         authError = error.localizedDescription
                     }
                 }
-                .alert("Sign-in failed", isPresented: .constant(authError != nil)) {
-                    Button("OK") { authError = nil }
+                .alert("ログインに失敗しました", isPresented: .constant(authError != nil)) {
+                    Button("閉じる") { authError = nil }
                 } message: {
                     Text(authError ?? "")
                 }

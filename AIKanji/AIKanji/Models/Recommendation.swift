@@ -8,13 +8,7 @@ enum RecommendationLabel: String, Codable {
     case crowdPleaser = "crowd_pleaser"
 
     var badge: String {
-        switch self {
-        case .fairest: return "Fairest"
-        case .bestAccess: return "Best Access"
-        case .bestValue: return "Best Value"
-        case .bestExperience: return "Best Experience"
-        case .crowdPleaser: return "Crowd Pleaser"
-        }
+        AppCopy.recommendation(self)
     }
 }
 
@@ -65,12 +59,7 @@ struct RestaurantFeature: Codable, Identifiable, Hashable {
     var id: String { placeId }
 
     var roomDescription: String? {
-        switch roomType {
-        case "private": return "Private room"
-        case "semi_private": return "Semi-private room"
-        case "open": return "Open seating"
-        default: return nil
-        }
+        roomType.flatMap(AppCopy.room)
     }
 
     enum CodingKeys: String, CodingKey {

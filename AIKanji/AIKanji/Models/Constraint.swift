@@ -5,7 +5,12 @@ enum ConstraintKind: String, Codable, CaseIterable, Identifiable {
     case want = "WANT"
 
     var id: String { rawValue }
-    var title: String { rawValue }
+    var title: String {
+        switch self {
+        case .must: return AppCopy.must
+        case .want: return AppCopy.want
+        }
+    }
 }
 
 enum NormalizedType: String, Codable, CaseIterable, Identifiable {
@@ -22,12 +27,7 @@ enum NormalizedType: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var label: String {
-        switch self {
-        case .travelTime: return "Travel time"
-        default: return rawValue.capitalized
-        }
-    }
+    var label: String { AppCopy.normalizedType(self) }
 }
 
 enum ConstraintVisibility: String, Codable, CaseIterable, Identifiable {
@@ -37,13 +37,7 @@ enum ConstraintVisibility: String, Codable, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var label: String {
-        switch self {
-        case .publicToGroup: return "Group"
-        case .anonymous: return "Anonymous"
-        case .privateToSelf: return "Private"
-        }
-    }
+    var label: String { AppCopy.visibility(self) }
 }
 
 /// Response of the `llm-assist` Edge Function in `parse` mode.
@@ -90,7 +84,7 @@ extension JSONValue {
         switch self {
         case .string(let value): return value
         case .number(let value): return value == value.rounded() ? String(Int(value)) : String(value)
-        case .bool(let value): return value ? "yes" : "no"
+        case .bool(let value): return value ? "はい" : "いいえ"
         case .array(let values): return values.map(\.displayText).joined(separator: ", ")
         case .object(let values): return values.map { "\($0.key): \($0.value.displayText)" }.joined(separator: ", ")
         case .null: return "—"
@@ -99,19 +93,35 @@ extension JSONValue {
 }
 
 enum ConstraintFormatter {
-    /// Human summary of a normalized constraint, e.g. "Budget: max yen 4000".
     static func summary(type: NormalizedType, value: [String: JSONValue]) -> String {
         guard !value.isEmpty else { return type.label }
-        let details = value
-            .sorted { $0.key < $1.key }
-            .map { "\($0.key.replacingOccurrences(of: "_", with: " ")) \($0.value.displayText)" }
-            .joined(separator: ", ")
-        return "\(type.label): \(details)"
+        switch type {
+        case .room:
+            if let room = value["room"]?.displayText, let label = AppCopy.room(room) {
+                return "\(type.label)：\(label)"
+            }
+        case .budget:
+            if let amount = value["max_yen"]?.displayText { return "\(type.label)：\(amount)円まで" }
+        case .travelTime:
+            if let minutes = value["max_minutes"]?.displayText { return "\(type.label)：\(minutes)分以内" }
+        case .cuisine:
+            if let include = value["include"]?.displayText, !include.isEmpty {
+                return "\(type.label)：\(include)"
+            }
+        case .dietary, .atmosphere:
+            if let tags = value["tags"]?.displayText, !tags.isEmpty { return "\(type.label)：\(tags)" }
+        case .allergy:
+            if let allergens = value["allergens"]?.displayText, !allergens.isEmpty {
+                return "\(type.label)：\(allergens)"
+            }
+        default: break
+        }
+        return "\(type.label)：\(value.values.map(\.displayText).joined(separator: "、"))"
     }
 
     static func feedLine(_ item: FeedItem) -> String {
-        let who = item.displayName ?? "Someone"
-        let verb = item.kind == .must ? "requires" : "would like"
-        return "\(who) \(verb): \(summary(type: item.normalizedType, value: item.normalizedValue))"
+        let who = item.displayName ?? "匿名の参加者"
+        let prefix = item.kind == .must ? "絶対に必要" : "できれば欲しい"
+        return "\(who)｜\(prefix)：\(summary(type: item.normalizedType, value: item.normalizedValue))"
     }
 }

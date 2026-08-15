@@ -47,32 +47,24 @@ struct FeasibilityResult: Codable, Hashable {
 }
 
 extension PendingNegotiation {
-    /// Plain-language rendering of the one-step relaxation being proposed, e.g.
-    /// "Would you accept a semi-private room instead of fully private?".
     var question: String {
         switch constraint.normalizedType {
         case .room:
-            let proposed = proposedValue["room"]?.displayText.replacingOccurrences(of: "_", with: "-") ?? "different"
-            let current = constraint.normalizedValue["room"]?.displayText ?? "your current"
-            return "Would you accept a \(proposed) room instead of \(current)?"
+            let proposed = proposedValue["room"].flatMap { AppCopy.room($0.displayText) } ?? "別の席"
+            let current = constraint.normalizedValue["room"].flatMap { AppCopy.room($0.displayText) } ?? "今の条件"
+            return "\(current)を\(proposed)に変更しても大丈夫ですか？"
         case .travelTime:
-            let proposed = proposedValue["max_minutes"]?.displayText ?? "a longer"
-            return "Would you accept a trip of up to \(proposed) minutes?"
+            let proposed = proposedValue["max_minutes"]?.displayText ?? "少し長い"
+            return "移動時間を\(proposed)分以内に変更しても大丈夫ですか？"
         case .budget:
-            let proposed = proposedValue["max_yen"]?.displayText ?? "a higher"
-            return "Would you accept a budget of up to ¥\(proposed)?"
+            let proposed = proposedValue["max_yen"]?.displayText ?? "少し高い"
+            return "予算を\(proposed)円まで変更しても大丈夫ですか？"
         default:
-            let proposed = ConstraintFormatter.summary(
-                type: constraint.normalizedType,
-                value: proposedValue
-            )
-            return "Would you accept this change — \(proposed)?"
+            return "\(ConstraintFormatter.summary(type: constraint.normalizedType, value: proposedValue))に変更しても大丈夫ですか？"
         }
     }
 
     var impact: String {
-        unlockedCount == 1
-            ? "This would unlock 1 more option."
-            : "This would unlock \(unlockedCount) more options."
+        "\(unlockedCount)件のお店が候補に加わります。"
     }
 }

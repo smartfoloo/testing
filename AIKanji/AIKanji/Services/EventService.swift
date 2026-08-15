@@ -54,6 +54,31 @@ struct EventService {
             .value
     }
 
+    func decision(eventId: UUID) async throws -> EventDecision {
+        try await client
+            .from("events")
+            .select("chosen_place_id, chosen_at")
+            .eq("id", value: eventId)
+            .single()
+            .execute()
+            .value
+    }
+
+    private struct ChooseRestaurantParams: Encodable {
+        let p_event_id: UUID
+        let p_place_id: String
+    }
+
+    func chooseRestaurant(eventId: UUID, placeId: String) async throws -> EventDecision {
+        try await client
+            .rpc("fn_choose_restaurant", params: ChooseRestaurantParams(
+                p_event_id: eventId,
+                p_place_id: placeId
+            ))
+            .execute()
+            .value
+    }
+
     private struct RoleRow: Decodable {
         let role: ParticipantRole
     }
