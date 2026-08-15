@@ -27,11 +27,21 @@
  * that stops a 個室 MUST from dead-ending on a Places-only candidate set, without ever
  * admitting a venue known to be the wrong room type (22).
  *
+ * Section 23 covers 0026_allergen_vocabulary_and_unverified_coverage.sql — the same shape of bug
+ * in the most safety-critical category. It asserts the closed allergen and dietary vocabularies,
+ * that a Japanese allergen (what the live model actually returned for
+ * 「えびとかにのアレルギーがあります」) can never match a venue, that an allergen the vocabulary
+ * cannot express stays a GATING allergy MUST with the writer's words preserved rather than
+ * degrading to a note, that allergy is still never negotiable, and that
+ * `allergy_unverified_count` makes the resulting zero legible instead of silent.
+ *
  * Run with `npm run verify:engine`.
  */
 
 import {
   ACCESSIBILITY_VOCABULARY,
+  ALLERGEN_VOCABULARY,
+  DIETARY_VOCABULARY,
   candidateBlockingTypes,
   candidateIsFeasible,
   countUnlockedIfRelaxed,
@@ -1395,6 +1405,221 @@ console.log('22. a room MUST is escapable, and consent does not admit the wrong 
   demoNegotiation.status = 'ACCEPTED'
   const demoRun = recompute(demo)
   assert('the 0-then-3 invariant survives the new room step', demoRun.feasible_count, 3)
+  assert(
+    'and it is still 001, 002 and 004 — never 003',
+    demo.scores
+      .filter((score) => score.run_id === demoRun.run_id)
+      .map((score) => score.restaurant_place_id)
+      .sort(),
+    ['demo_place_001', 'demo_place_002', 'demo_place_004'],
+  )
+}
+
+/* 23. 0026: one closed allergen vocabulary, and an allergy zero that explains itself. */
+console.log('23. the allergen vocabulary is closed, and its exclusions are legible')
+{
+  // Asserted against literals, exactly as backend_tests.sql asserts fn_allergen_vocabulary() and
+  // fn_dietary_vocabulary(), so the two implementations cannot drift.
+  assert('the allergen vocabulary is the six labelled members', [...ALLERGEN_VOCABULARY], [
+    'buckwheat',
+    'egg',
+    'milk',
+    'peanut',
+    'shellfish',
+    'wheat',
+  ])
+  assert('and the dietary vocabulary is the four patterns', [...DIETARY_VOCABULARY], [
+    'gluten_free',
+    'halal',
+    'vegan',
+    'vegetarian',
+  ])
+
+  const db = emptyDb()
+  const eventId = addEvent(db)
+  const [p1] = addParticipants(db, eventId, 1)
+  const travel = { [p1]: 20 }
+  addConstraint(db, eventId, p1, 'MUST', 'budget', { max_yen: 4000 })
+  const allergyId = addConstraint(db, eventId, p1, 'MUST', 'allergy', {
+    allergens: ['shellfish', 'egg'],
+  })
+  addVenue(db, 'confirmed', {
+    allergy_safe_tags: ['shellfish_free', 'egg_free'],
+    travel_minutes_by_participant: travel,
+  })
+  addVenue(db, 'partly_confirmed', {
+    allergy_safe_tags: ['shellfish_free'],
+    travel_minutes_by_participant: travel,
+  })
+  // What every provider-discovered venue looks like: nobody publishes restaurant allergen data,
+  // so the column stays empty forever.
+  addVenue(db, 'unverified', { travel_minutes_by_participant: travel })
+  // Over budget too, so confirming its kitchen would NOT put it on the shortlist.
+  addVenue(db, 'unverified_and_pricey', {
+    price_yen_estimate: 9000,
+    travel_minutes_by_participant: travel,
+  })
+
+  assert(
+    'an allergy MUST is met when the recorded _free tags cover every allergen',
+    candidateIsFeasible(db, eventId, 'confirmed'),
+    true,
+  )
+  assert(
+    'tags covering only part of the allergens stay infeasible',
+    candidateIsFeasible(db, eventId, 'partly_confirmed'),
+    false,
+  )
+  assert(
+    'and no recorded tags at all stays infeasible — unknown is not safe',
+    candidateIsFeasible(db, eventId, 'unverified'),
+    false,
+  )
+  assert('blocking types name allergy alone', candidateBlockingTypes(db, eventId, 'unverified'), [
+    'allergy',
+  ])
+  assert(
+    'and name both obstacles when there are two',
+    candidateBlockingTypes(db, eventId, 'unverified_and_pricey'),
+    ['allergy', 'budget'],
+  )
+
+  const run = recompute(db, eventId)
+  assert('only the fully confirmed venue is feasible', run.feasible_count, 1)
+  // The whole point: 「N件はアレルギー対応が確認できませんでした（お店に確認できます）」 rather than
+  // 「0件」. `unverified_and_pricey` is excluded because a phone call cannot fix its price.
+  assert('the payload counts the venues only missing allergy proof', run.allergy_unverified_count, 2)
+  assert('and 0022 accessibility coverage is untouched', run.accessibility_unverified_count, 0)
+  assert('every pre-0026 key is still there', Object.keys(run).sort(), [
+    'accessibility_unverified_count',
+    'allergy_unverified_count',
+    'feasible_count',
+    'run_id',
+  ])
+  assert(
+    'an allergy MUST is still never proposed for relaxation',
+    proposeRelaxation(db, eventId, nextId, nextTime),
+    null,
+  )
+
+  // THE BUG, exactly as the live model produced it before 0026: the prompt gave allergy no
+  // example, so 「えびとかにのアレルギーがあります」 came back as {"allergens":["えび","かに"]}.
+  // Feasibility looks for 'えび_free', no venue has it, and allergy is never relaxable.
+  db.constraints.find((row) => row.id === allergyId)!.normalized_value = {
+    allergens: ['えび', 'かに'],
+  }
+  const dead = recompute(db, eventId)
+  assert('a Japanese allergen can never be matched by any venue', dead.feasible_count, 0)
+  assert(
+    'and every candidate in budget is reported as allergy-only, never a silent zero',
+    dead.allergy_unverified_count,
+    3,
+  )
+  assert(
+    'still not negotiable — consent is never asked for an unverified allergen claim',
+    proposeRelaxation(db, eventId, nextId, nextTime),
+    null,
+  )
+  // 0026 canonicalises exactly this row on the way in (llm-assist server-side, the parser below,
+  // and the one-shot backfill in the migration), which is what makes the venue reachable again.
+  db.constraints.find((row) => row.id === allergyId)!.normalized_value = {
+    allergens: ['egg', 'shellfish'],
+  }
+  assert(
+    'the canonical form matches the venue again',
+    candidateIsFeasible(db, eventId, 'confirmed'),
+    true,
+  )
+
+  // A MUST the vocabulary cannot express at all ({"allergens":[]}, what 「マンゴーアレルギー」
+  // becomes) still gates and still fails closed — but every candidate is now reported as
+  // unverified, which for a mango allergy is simply true: no dataset has that flag.
+  db.constraints.find((row) => row.id === allergyId)!.normalized_value = { allergens: [] }
+  const inexpressible = recompute(db, eventId)
+  assert('an inexpressible allergen fails closed', inexpressible.feasible_count, 0)
+  assert('and is reported rather than silent', inexpressible.allergy_unverified_count, 3)
+
+  /* The parser: it can only ever emit vocabulary members, and it never drops an allergen. */
+  const shellfish = parseConstraintText('えびとかにのアレルギーがあります', 'MUST')
+  assert('「えびとかにのアレルギー」 is an allergy MUST', shellfish.normalized_type, 'allergy')
+  assert('mapped onto the crustacean member', shellfish.normalized_value, {
+    allergens: ['shellfish'],
+  })
+  assert('and it still requires human confirmation', shellfish.verification_requirement, 'required')
+  assert('and defaults to ANONYMOUS', shellfish.suggested_visibility, 'ANONYMOUS')
+  const buckwheat = parseConstraintText('そばアレルギーです', 'MUST')
+  assert('「そばアレルギー」 is buckwheat, not the soba cuisine', buckwheat.normalized_value, {
+    allergens: ['buckwheat'],
+  })
+  assert('and needs no clarification', buckwheat.needs_clarification, false)
+  const eggMilk = parseConstraintText('卵と乳製品がだめです', 'MUST')
+  assert('「卵と乳製品がだめです」 is an allergy, not a dietary tag', eggMilk.normalized_type, 'allergy')
+  assert('with both ingredients named', eggMilk.normalized_value, { allergens: ['egg', 'milk'] })
+  const vegetarian = parseConstraintText('ベジタリアンです', 'MUST')
+  assert('「ベジタリアンです」 is still dietary', vegetarian.normalized_type, 'dietary')
+  assert('with the canonical tag', vegetarian.normalized_value, { tags: ['vegetarian'] })
+
+  // The case that must never be a silent weakening: an allergen with no member and no venue tag.
+  const mango = parseConstraintText('マンゴーアレルギー', 'MUST')
+  assert('an inexpressible allergen STAYS a gating allergy MUST', mango.normalized_type, 'allergy')
+  assert('with an empty list rather than an unmatchable one', mango.normalized_value, {
+    allergens: [],
+  })
+  assert('the writer’s own words are kept', mango.semantic_remainder, 'マンゴーアレルギー')
+  assert('and a human is asked before it is saved', mango.needs_clarification, true)
+  assert('while it still demands verification', mango.verification_requirement, 'required')
+  // 貝 is molluscs; `shellfish` is the CRUSTACEAN tag. Mapping it would record a weaker
+  // requirement than was stated, so it is preserved and asked about instead.
+  const mollusc = parseConstraintText('貝アレルギーです', 'MUST')
+  assert('貝 is not folded into the crustacean member', mollusc.normalized_value, { allergens: [] })
+  assert('it stays an allergy MUST', mollusc.normalized_type, 'allergy')
+  assert('and is asked about', mollusc.needs_clarification, true)
+  // Partial: what maps gates the search, what does not is kept and asked about.
+  const partial = parseConstraintText('えびと貝のアレルギーがあります', 'MUST')
+  assert('the expressible half still gates', partial.normalized_value, { allergens: ['shellfish'] })
+  assert('the whole wording survives', partial.semantic_remainder, 'えびと貝のアレルギーがあります')
+  assert('and the weakening is never silent', partial.needs_clarification, true)
+  // No allergy word at all: 「だめ」 must not turn a dietary statement into an empty allergy MUST.
+  const stillDietary = parseConstraintText('ベジタリアンなので肉がだめです', 'MUST')
+  assert('a dietary statement is not captured by the allergy rule', stillDietary.normalized_type, 'dietary')
+
+  // Whatever the phrasing, the parser can only ever emit vocabulary members.
+  const emitted = [
+    'えびアレルギーです',
+    '海老と蟹がだめです',
+    '卵アレルギーがあります',
+    '牛乳がだめです',
+    '落花生アレルギー',
+    '小麦アレルギーです',
+    'そばアレルギー',
+    'peanut allergy',
+    'shellfish allergy please',
+  ].flatMap((text) => {
+    const parsed = parseConstraintText(text, 'MUST')
+    const allergens = parsed.normalized_value.allergens
+    return Array.isArray(allergens) ? allergens.map(String) : []
+  })
+  assert('the parser only ever emits vocabulary members', emitted.length > 0, true)
+  assert(
+    'and never invents one outside it',
+    emitted.filter((allergen) => !(ALLERGEN_VOCABULARY as readonly string[]).includes(allergen)),
+    [],
+  )
+
+  // The demo invariant, once more against the new count: Emma's shellfish MUST is MET by every
+  // seeded venue, so allergy coverage is 0 and the 0-then-3 outcome is untouched.
+  const demo = fresh()
+  const demoBaseline = recompute(demo)
+  assert('the demo is still 0 feasible at baseline', demoBaseline.feasible_count, 0)
+  assert('and allergy coverage is 0 when the allergy MUST is met', demoBaseline.allergy_unverified_count, 0)
+  const demoProposal = proposeRelaxation(demo, DEMO_EVENT_ID, nextId, nextTime)
+  const demoNegotiation = demo.negotiations.find((row) => row.id === demoProposal)!
+  assert('the proposal still targets Bob, never Emma', demoNegotiation.participant_id, BOB)
+  demo.constraints.find((row) => row.id === demoNegotiation.constraint_id)!.normalized_value =
+    demoNegotiation.proposed_value
+  demoNegotiation.status = 'ACCEPTED'
+  const demoRun = recompute(demo)
+  assert('the 0-then-3 invariant survives 0026', demoRun.feasible_count, 3)
   assert(
     'and it is still 001, 002 and 004 — never 003',
     demo.scores

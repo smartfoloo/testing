@@ -1,8 +1,9 @@
 /**
  * TypeScript port of the deterministic feasibility / scoring / relaxation engine
  * defined in AIKanji/supabase/migrations/0009_review_function_replacements.sql,
- * 0016_scoring_and_objective.sql, 0021_must_coverage_and_proposal_integrity.sql and
- * 0022_accessibility_vocabulary_and_room_unknown.sql (which together supersede
+ * 0016_scoring_and_objective.sql, 0021_must_coverage_and_proposal_integrity.sql,
+ * 0022_accessibility_vocabulary_and_room_unknown.sql and
+ * 0026_allergen_vocabulary_and_unverified_coverage.sql (which together supersede
  * 0005_feasibility.sql).
  *
  * This exists so the mock backend behaves the same as the real Postgres one: the LLM
@@ -25,6 +26,12 @@
  *  - accessibility needs and recorded venue tags share ONE closed vocabulary
  *    (`ACCESSIBILITY_VOCABULARY`, 0022): four members mapped 1:1 from the four booleans
  *    Google Places' `accessibilityOptions` can return;
+ *  - allergens and `<allergen>_free` venue claims share ONE closed vocabulary too
+ *    (`ALLERGEN_VOCABULARY`, 0026), as do dietary tags (`DIETARY_VOCABULARY`). Before 0026 the
+ *    live model answered 「えびとかにのアレルギーがあります」 in Japanese, so the containment test
+ *    looked for `えび_free` and no venue ever matched — permanently, since an allergy MUST is
+ *    never relaxable. Feasibility is unchanged; the vocabularies are enforced at the boundaries
+ *    (`llm-assist`, `mock.ts`'s parser) and reported on by `recomputeFeasibility`;
  *  - `(value->>'key')::int` on a missing key yields SQL NULL, and `x > NULL` is NULL,
  *    which `if` treats as false — so the MUST passes. `nullableInt` + `exceeds` model that;
  *    since 0021 SQL reads those keys through fn_jsonb_int, which also yields NULL for a
@@ -362,6 +369,51 @@ export const ACCESSIBILITY_VOCABULARY = [
   'wheelchair_accessible_seating',
 ] as const
 
+/* -------------------------------------------------------------------------- */
+/* Allergen / dietary vocabularies — fn_allergen_vocabulary (0026)             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The closed allergen vocabulary, ported from `fn_allergen_vocabulary()` (0026) and kept in the
+ * same (sorted) order as the SQL array.
+ *
+ * Six members, none of them invented here: `allergenLabel()` in `src/design/copy.ts`,
+ * `AppCopy.allergen` in AppCopy.swift and `ALLERGEN_WORDS` in `mock.ts` already enumerate exactly
+ * these, so every member has a Japanese label (甲殻類・卵・乳・落花生・小麦・そば) a fully
+ * Japanese UI can print. Five are 消費者庁の特定原材料 and `shellfish` is the CRUSTACEAN tag
+ * (えび・かに), which is the granularity the venue side records.
+ *
+ * The venue side speaks the same vocabulary with a `_free` suffix
+ * (`restaurant_features.allergy_safe_tags`, constrained since 0026 by
+ * `restaurant_features_allergen_safe_tag_vocabulary`), and `llm-assist` states the six strings in
+ * its prompt AND enforces them on the model's answer. Feasibility itself stays a plain
+ * containment test: normalization belongs at the boundaries, never inside the deterministic
+ * engine.
+ *
+ * WHY IT HAS TO BE CLOSED: before 0026 the live model answered 「えびとかにのアレルギーがありま
+ * す」 with `{"allergens":["えび","かに"]}` — the prompt gave allergy no example, so the model
+ * mirrored the writer's language — and the containment test below then looked for `えび_free`
+ * against a venue recording `shellfish_free`. Zero candidates, and allergy is never relaxable,
+ * so there was no proposal to escape through either.
+ */
+export const ALLERGEN_VOCABULARY = [
+  'buckwheat',
+  'egg',
+  'milk',
+  'peanut',
+  'shellfish',
+  'wheat',
+] as const
+
+/**
+ * The closed dietary vocabulary, ported from `fn_dietary_vocabulary()` (0026). The same bug one
+ * category over: for 「卵と乳製品がだめです」 the live model invented
+ * `{"tags":["egg-free","dairy-free"]}`, which no `dietary_tags` value can ever match. Unlike
+ * allergens these are *patterns a kitchen claims to cater for*, which is why `gluten_free` is
+ * here and 小麦 is an allergen.
+ */
+export const DIETARY_VOCABULARY = ['gluten_free', 'halal', 'vegan', 'vegetarian'] as const
+
 /** `room_type` / `{"room": …}` domain — `restaurant_features.room_type`'s CHECK (0001). */
 const ROOM_TYPES = ['private', 'semi_private', 'open']
 
@@ -377,6 +429,33 @@ function accessibilityNeedsMet(venueTags: string[], value: NormalizedValue): boo
   const needs = stringArray(value, 'needs')
   return (
     needs !== null && needs.length > 0 && venueTags.length > 0 && contains(venueTags, needs)
+  )
+}
+
+/**
+ * Ports `fn_allergy_allergens_met` (0026): the allergy predicate, in one place, so the gate and
+ * the coverage count in `recomputeFeasibility` cannot disagree about what "unmet" means.
+ *
+ * Unchanged from 0009/0016/0021/0022 — this is that expression moved, not edited. `allergens`
+ * must be a non-empty array (a MUST whose own value cannot be read is not one we may certify as
+ * met), the venue must have tags recorded, and those tags must CONTAIN `<allergen>_free` for
+ * every allergen. No tags recorded means UNKNOWN, and unknown is not safe (PRD §11).
+ *
+ * There is deliberately no `accept_unknown` escape of the kind `room` and `smoking` have: 0021
+ * may ask a group to accept an unconfirmed smoking policy, but nobody may be asked to consent to
+ * an unverified allergen claim. The escape is the coverage count plus a phone call
+ * (`verification_requirement = 'required'`), never consent.
+ */
+function allergyAllergensMet(venueTags: string[], value: NormalizedValue): boolean {
+  const allergens = stringArray(value, 'allergens')
+  return (
+    allergens !== null &&
+    allergens.length > 0 &&
+    venueTags.length > 0 &&
+    contains(
+      venueTags,
+      allergens.map((allergen) => `${allergen}_free`),
+    )
   )
 }
 
@@ -450,16 +529,12 @@ export function candidateBlockingTypes(
         blocked.add('dietary')
       }
     } else if (must.normalized_type === 'allergy') {
-      const allergens = stringArray(value, 'allergens')
-      if (
-        allergens === null ||
-        allergens.length === 0 ||
-        candidate.allergy_safe_tags.length === 0 ||
-        !contains(
-          candidate.allergy_safe_tags,
-          allergens.map((allergen) => `${allergen}_free`),
-        )
-      ) {
+      // {"allergens": string[]} drawn from ALLERGEN_VOCABULARY (0026), against
+      // restaurant_features.allergy_safe_tags' `<allergen>_free` claims. Never relaxable and
+      // never granted an `accept_unknown` flag — see allergyAllergensMet. A venue with no tags
+      // recorded is UNKNOWN, and `recomputeFeasibility` reports how many candidates are excluded
+      // for exactly that reason so the zero is never silent.
+      if (!allergyAllergensMet(candidate.allergy_safe_tags, value)) {
         blocked.add('allergy')
       }
     } else if (must.normalized_type === 'accessibility') {
@@ -933,24 +1008,43 @@ function assignHonestLabels(db: Db, runId: string): void {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Ports `fn_recompute_feasibility` (0022, itself 0018's definition).
+ * Ports `fn_recompute_feasibility` (0026, itself 0022's definition of 0018's).
  *
- * `accessibility_unverified_count` is the one key 0022 adds, and no existing key changed
- * meaning — the web and Swift clients decode this payload. It counts the candidates whose ONLY
- * unmet MUSTs are accessibility ones: the venues that would be on the shortlist if their
- * accessibility could be confirmed. That is the honest number behind 「N件は車椅子対応が確認
- * できませんでした（お店に確認できます）」, and it is why a wheelchair user is never shown a bare
- * 「0件」. It deliberately excludes venues that also break another MUST — a phone call would not
- * make those available — and it is 0 for every event that stated no accessibility MUST.
+ * `accessibility_unverified_count` (0022) and `allergy_unverified_count` (0026) are the two keys
+ * added since, and no existing key changed meaning — the web and Swift clients decode this
+ * payload, so adding a key is the only backwards-compatible way to say something new.
+ *
+ * Each counts the candidates whose ONLY unmet MUSTs are of that one type: the venues that would
+ * be on the shortlist if somebody could confirm the thing nobody has recorded. They are the
+ * honest numbers behind 「N件は車椅子対応が確認できませんでした（お店に確認できます）」 and
+ * 「N件はアレルギー対応が確認できませんでした（お店に確認できます）」, and they are why a
+ * wheelchair user or somebody with a shellfish allergy is never shown a bare 「0件」 — neither
+ * MUST is relaxable, so without them there is nothing to show and nothing to do.
+ *
+ * Both deliberately exclude venues that also break another MUST (a phone call would not make
+ * those available), and both are 0 for an event that stated no MUST of that type — including the
+ * five-persona demo, where Emma's shellfish MUST is met by every seeded venue.
+ *
+ * "Unverified" rather than "unsuitable" is accurate in both dimensions for the same reason: only
+ * POSITIVE claims are ever recorded (`accessibility_tags`, `<allergen>_free`), so a requirement
+ * the recorded data does not cover is unconfirmed, never confirmed-absent. On the allergy side
+ * that is the normal case rather than an edge one — no provider anywhere supplies restaurant
+ * allergen data (see 0026's header for the survey), so every live candidate arrives with `[]`.
  */
 export function recomputeFeasibility(
   db: Db,
   eventId: string,
   newId: () => string,
   now: () => string,
-): { run_id: string; feasible_count: number; accessibility_unverified_count: number } {
+): {
+  run_id: string
+  feasible_count: number
+  accessibility_unverified_count: number
+  allergy_unverified_count: number
+} {
   let feasibleCount = 0
   let accessibilityUnverifiedCount = 0
+  let allergyUnverifiedCount = 0
   const candidates = db.restaurants
     .slice()
     .sort((a, b) => a.place_id.localeCompare(b.place_id))
@@ -960,6 +1054,8 @@ export function recomputeFeasibility(
     if (blocked.length === 0) feasibleCount += 1
     else if (blocked.length === 1 && blocked[0] === 'accessibility') {
       accessibilityUnverifiedCount += 1
+    } else if (blocked.length === 1 && blocked[0] === 'allergy') {
+      allergyUnverifiedCount += 1
     }
   }
 
@@ -982,6 +1078,7 @@ export function recomputeFeasibility(
     run_id: runId,
     feasible_count: feasibleCount,
     accessibility_unverified_count: accessibilityUnverifiedCount,
+    allergy_unverified_count: allergyUnverifiedCount,
   }
 }
 
@@ -1008,10 +1105,11 @@ export function recomputeFeasibility(
  * いないお店も候補に入れてよいですか？」 (the constraint already carries
  * verification_requirement = 'recommended', the UI's cue to suggest phoning the venue). It
  * never trades away what was asked for: a venue known to be 喫煙可 still fails a
- * non_smoking MUST afterwards. accessibility deliberately has NO step — it stays on
- * NEVER_RELAXED, because accepting an unverified step-free entrance is accepting the risk of
- * not getting in; there the escape hatch is human verification and the coverage count in
- * `recomputeFeasibility`, not a negotiation.
+ * non_smoking MUST afterwards. accessibility and allergy deliberately have NO step — they stay
+ * on NEVER_RELAXED, because accepting an unverified step-free entrance is accepting the risk of
+ * not getting in, and accepting an unverified allergen claim is accepting a medical risk on the
+ * strength of data that (0026) no provider on earth publishes. For both, the escape hatch is
+ * human verification and the coverage counts in `recomputeFeasibility`, not a negotiation.
  *
  * WHY THE TWO ROOM CONCESSIONS ARE ONE STEP (0022). `room_type` is filled only from Hot
  * Pepper, so every Places-only candidate has it NULL and a 個室 MUST used to be infeasible

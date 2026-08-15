@@ -1470,6 +1470,632 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
+-- 0026: the allergen vocabulary, enforced on both sides, and the coverage count that stops an
+-- ALLERGY zero-candidate result from being silent.
+--
+-- The bug, verified against the live model (openai/gpt-5.6-luna) in the product's own language:
+-- 「えびとかにのアレルギーがあります」 came back as {"allergens":["えび","かに"]} — allergy was the
+-- only gating category llm-assist's prompt gave no example for, so the model mirrored the
+-- writer's language. Venues record 'shellfish_free', the predicate looks for 'えび_free', and
+-- allergy is on fn_propose_relaxation's never-relax list: zero candidates, permanently, with no
+-- explanation, for a medical requirement. And even with a perfect vocabulary no provider on earth
+-- publishes restaurant allergen data (0026's header surveys them), so every live venue arrives
+-- with '{}' and fails closed — which is right, but must not be silent.
+--
+-- Every scratch venue below carries a unique dietary tag its event requires, so these venues can
+-- never be feasible for the demo event and vice versa; the demo invariant is re-asserted by the
+-- block that follows this one regardless.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00260000-0000-0000-0000-00000000a000';
+  v_pid uuid := '00260000-0000-0000-0000-00000000a001';
+  v_allergy_id uuid;
+  v_result jsonb;
+  v_feasible int;
+  v_places text[];
+  v_raised boolean;
+begin
+  perform t_as_admin();
+
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA allergen vocabulary', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_pid, v_event, gen_random_uuid(), 'Allergy participant', 'organizer', 'station');
+  update events set organizer_participant_id = v_pid where id = v_event;
+
+  -- The vocabularies, asserted against literals so neither can drift from the TypeScript port
+  -- (ALLERGEN_VOCABULARY / DIETARY_VOCABULARY in web/src/backend/engine.ts) or from llm-assist.
+  perform t_check('the allergen vocabulary is the six labelled members',
+                  fn_allergen_vocabulary() = array[
+                    'buckwheat','egg','milk','peanut','shellfish','wheat'],
+                  fn_allergen_vocabulary()::text);
+  perform t_check('the dietary vocabulary is the four patterns',
+                  fn_dietary_vocabulary() = array[
+                    'gluten_free','halal','vegan','vegetarian'],
+                  fn_dietary_vocabulary()::text);
+  -- The venue side is the same vocabulary with a suffix, derived rather than restated.
+  perform t_check('the venue side speaks the same vocabulary with _free',
+                  fn_allergen_safe_tag_vocabulary() = array[
+                    'buckwheat_free','egg_free','milk_free','peanut_free','shellfish_free',
+                    'wheat_free'],
+                  fn_allergen_safe_tag_vocabulary()::text);
+
+  -- Canonicalisation. Every alias names the SAME ingredient as its member, so mapping preserves
+  -- the requirement; this is the exact input the live model produced.
+  perform t_check('the Japanese the model actually returned maps onto the crustacean member',
+                  fn_allergen_canonical_allergens(array['えび','かに','海老','蟹','カニ','甲殻類'])
+                    = array['shellfish'],
+                  fn_allergen_canonical_allergens(array['えび','かに'])::text);
+  perform t_check('and so do the other five 特定原材料 spellings',
+                  fn_allergen_canonical_allergens(array['卵','たまご','玉子','鶏卵'])
+                    = array['egg']
+                  and fn_allergen_canonical_allergens(array['乳','牛乳','ミルク','乳製品'])
+                    = array['milk']
+                  and fn_allergen_canonical_allergens(array['落花生','ピーナッツ'])
+                    = array['peanut']
+                  and fn_allergen_canonical_allergens(array['小麦','こむぎ']) = array['wheat']
+                  and fn_allergen_canonical_allergens(array['そば','蕎麦'])
+                    = array['buckwheat']);
+  perform t_check('canonical allergens are deduped and sorted',
+                  fn_allergen_canonical_allergens(array['乳','卵','たまご','shellfish','えび'])
+                    = array['egg','milk','shellfish'],
+                  fn_allergen_canonical_allergens(array['乳','卵','えび'])::text);
+  -- 貝 is molluscs and `shellfish` is the CRUSTACEAN tag (甲殻類), so folding it in would record
+  -- a WEAKER requirement than was stated. グルテン is a dietary tag, not 小麦. Both are dropped
+  -- here and preserved as the participant's own wording by llm-assist / the backfill instead.
+  perform t_check('an allergen the vocabulary cannot express is dropped, never approximated',
+                  fn_allergen_canonical_allergens(array['貝','大豆','ナッツ','マンゴー','グルテン'])
+                    = '{}'::text[],
+                  fn_allergen_canonical_allergens(array['貝','マンゴー'])::text);
+  perform t_check('a value echoing the venue side''s _free suffix still lands on the allergen',
+                  fn_allergen_canonical_allergens(array['SHELLFISH_FREE','Egg-Free'])
+                    = array['egg','shellfish'],
+                  fn_allergen_canonical_allergens(array['SHELLFISH_FREE'])::text);
+  perform t_check('and the same rule applies to a constraint value',
+                  fn_allergen_canonical_value('{"allergens":["えび","かに"]}')
+                    = array['shellfish']
+                  and fn_allergen_canonical_value('{"allergens":["マンゴー"]}') = '{}'::text[]
+                  and fn_allergen_canonical_value('{}') = '{}'::text[]
+                  -- An unreadable value is not a satisfied one, in either direction.
+                  and fn_allergen_canonical_value('{"allergens":"えび"}') = '{}'::text[]);
+
+  -- dietary, the same bug one category over. For 「卵と乳製品がだめです」 the live model invented
+  -- {"tags":["egg-free","dairy-free"]} — allergens wearing a dietary shape, matchable by nothing.
+  perform t_check('dietary Japanese maps onto the four patterns',
+                  fn_dietary_canonical_tags(
+                    array['ベジタリアン','ヴィーガン','ハラール','グルテンフリー'])
+                    = array['gluten_free','halal','vegan','vegetarian'],
+                  fn_dietary_canonical_tags(array['ベジタリアン'])::text);
+  perform t_check('a spelling variant is the same token, not a new tag',
+                  fn_dietary_canonical_tags(array['Gluten-Free','gluten free'])
+                    = array['gluten_free']);
+  perform t_check('and the tags the model invented for an ingredient are dropped',
+                  fn_dietary_canonical_tags(array['egg-free','dairy-free','no-shellfish'])
+                    = '{}'::text[],
+                  fn_dietary_canonical_tags(array['egg-free'])::text);
+  perform t_check('a dietary constraint value canonicalises the same way',
+                  fn_dietary_canonical_value('{"tags":["ベジタリアン"]}') = array['vegetarian']
+                  and fn_dietary_canonical_value('{"tags":["egg-free"]}') = '{}'::text[]
+                  and fn_dietary_canonical_value('{"tags":"vegan"}') = '{}'::text[]);
+
+  insert into restaurants (place_id) values
+    ('qa0026_allergy_full'), ('qa0026_allergy_partial'), ('qa0026_allergy_none'),
+    ('qa0026_allergy_and_budget');
+  insert into restaurant_features
+    (place_id, price_yen_estimate, room_type, dietary_tags, allergy_safe_tags)
+  values
+    ('qa0026_allergy_full', 3000, 'open', array['qa0026_allergy'],
+     array['shellfish_free','egg_free']),
+    ('qa0026_allergy_partial', 3000, 'open', array['qa0026_allergy'], array['shellfish_free']),
+    -- No data at all: what every provider-discovered venue looks like, forever.
+    ('qa0026_allergy_none', 3000, 'open', array['qa0026_allergy'], '{}'),
+    -- Also over budget, so it is NOT one phone call away from being a candidate.
+    ('qa0026_allergy_and_budget', 9000, 'open', array['qa0026_allergy'], '{}');
+
+  -- The venue side is constrained, so `allergens` and `allergy_safe_tags` cannot drift into
+  -- different languages the way they had.
+  v_raised := false;
+  begin
+    update restaurant_features set allergy_safe_tags = array['えび_free']
+     where place_id = 'qa0026_allergy_none';
+  exception when check_violation then
+    v_raised := true;
+  end;
+  perform t_check('the venue side refuses a tag outside the vocabulary', v_raised);
+  v_raised := false;
+  begin
+    update restaurant_features set allergy_safe_tags = array['貝_free']
+     where place_id = 'qa0026_allergy_none';
+  exception when check_violation then
+    v_raised := true;
+  end;
+  perform t_check('including a mollusc claim no allergen member covers', v_raised);
+  -- …and the CHECK cannot drift from the function, because every member it lists is inserted.
+  v_raised := false;
+  begin
+    update restaurant_features set allergy_safe_tags = fn_allergen_safe_tag_vocabulary()
+     where place_id = 'qa0026_allergy_none';
+  exception when check_violation then
+    v_raised := true;
+  end;
+  perform t_check('and accepts every member fn_allergen_safe_tag_vocabulary lists', not v_raised);
+  update restaurant_features set allergy_safe_tags = '{}'
+   where place_id = 'qa0026_allergy_none';
+  -- A hand-written legacy tag is canonicalised rather than kept: dropping a venue CLAIM is the
+  -- fail-closed direction (the venue simply stops asserting something we cannot interpret),
+  -- which is the opposite of dropping a participant's allergen.
+  perform t_check('a legacy venue tag canonicalises onto the vocabulary',
+                  fn_allergen_canonical_safe_tags(array['えび_free','shellfish_free','貝_free',
+                                                        'vegan','barrier_free'])
+                    = array['shellfish_free'],
+                  fn_allergen_canonical_safe_tags(array['えび_free','貝_free'])::text);
+
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'QA pool gate',
+          'dietary', '{"tags":["qa0026_allergy"]}', 'ANONYMOUS'),
+         (v_event, v_pid, 'MUST', '4000円まで', 'budget', '{"max_yen":4000}', 'PUBLIC');
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'えびと卵のアレルギーがあります',
+          'allergy', '{"allergens":["shellfish","egg"]}', 'ANONYMOUS')
+  returning id into v_allergy_id;
+
+  perform t_check('an allergy MUST is MET when the recorded _free tags cover every allergen',
+                  fn_candidate_is_feasible(v_event, 'qa0026_allergy_full'));
+  perform t_check('tags covering only part of the allergens stay infeasible',
+                  not fn_candidate_is_feasible(v_event, 'qa0026_allergy_partial'));
+  perform t_check('and no recorded tags at all is infeasible — unknown is not safe',
+                  not fn_candidate_is_feasible(v_event, 'qa0026_allergy_none'));
+  perform t_check('the predicate the gate and the count share agrees with the gate',
+                  fn_allergy_allergens_met(array['shellfish_free','egg_free'],
+                                           '{"allergens":["shellfish","egg"]}')
+                  and not fn_allergy_allergens_met(array['shellfish_free'],
+                                                   '{"allergens":["shellfish","egg"]}')
+                  and not fn_allergy_allergens_met('{}'::text[],
+                                                   '{"allergens":["shellfish"]}')
+                  -- A MUST whose own value cannot be read is never certified as met.
+                  and not fn_allergy_allergens_met(array['shellfish_free'],
+                                                   '{"allergens":[]}')
+                  and not fn_allergy_allergens_met(array['shellfish_free'],
+                                                   '{"allergens":"shellfish"}'));
+  perform t_check('the blocking types name allergy as the only obstacle',
+                  fn_candidate_blocking_types(v_event, 'qa0026_allergy_none')
+                    = array['allergy'],
+                  fn_candidate_blocking_types(v_event, 'qa0026_allergy_none')::text);
+  perform t_check('and name both obstacles when there are two',
+                  fn_candidate_blocking_types(v_event, 'qa0026_allergy_and_budget')
+                    = array['allergy','budget'],
+                  fn_candidate_blocking_types(v_event, 'qa0026_allergy_and_budget')::text);
+
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('only the venue whose tags cover every allergen is feasible',
+                  (v_result->>'feasible_count')::int = 1, v_result::text);
+  -- The reason is now in data the client can already read: 「N件はアレルギー対応が確認できません
+  -- でした（お店に確認できます）」 instead of 「0件」. The over-budget venue is deliberately NOT
+  -- counted: a phone call about its kitchen would not put it on the shortlist.
+  perform t_check('the payload reports how many venues are only missing allergy proof',
+                  (v_result->>'allergy_unverified_count')::int = 2, v_result::text);
+  perform t_check('and every pre-0026 key is still there with its old meaning',
+                  v_result ? 'run_id' and v_result ? 'feasible_count'
+                  and v_result ? 'accessibility_unverified_count'
+                  and (v_result->>'accessibility_unverified_count')::int = 0
+                  and (v_result->>'run_id')::uuid is not null, v_result::text);
+
+  -- NEVER RELAXABLE, AND NO accept_unknown. 0021 may ask a group to accept an unconfirmed smoking
+  -- policy; nobody may be asked to consent to an unverified allergen claim. The escape is the
+  -- count above plus verification_requirement = 'required' — reporting and a phone call, never
+  -- consent.
+  perform t_check('an allergy MUST is never proposed for relaxation',
+                  fn_propose_relaxation(v_event) is null);
+  perform t_check('there is no relaxation step for it to advertise',
+                  fn_relaxed_value('allergy', '{"allergens":["shellfish"]}')
+                    = '{"allergens":["shellfish"]}'::jsonb,
+                  fn_relaxed_value('allergy', '{"allergens":["shellfish"]}')::text);
+  perform t_check('and relaxing it would unlock nothing, so no question is ever phrased',
+                  fn_count_unlocked_if_relaxed(v_event, v_allergy_id) = 0,
+                  fn_count_unlocked_if_relaxed(v_event, v_allergy_id)::text);
+  perform t_check('the constraint carries the required-verification cue 0018 derives',
+                  (select verification_requirement from participant_constraints
+                    where id = v_allergy_id) = 'required'
+                  and (select sensitivity from participant_constraints
+                        where id = v_allergy_id) = 'highly_sensitive');
+
+  -- THE BUG ITSELF, stored the way the live model used to produce it.
+  update participant_constraints set normalized_value = '{"allergens":["えび","かに"]}'
+   where id = v_allergy_id;
+  select count(*) into v_feasible from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event, r.place_id);
+  perform t_check('a Japanese allergen can never be matched by any venue',
+                  v_feasible = 0
+                  and not fn_candidate_is_feasible(v_event, 'qa0026_allergy_full'),
+                  v_feasible::text);
+  perform t_check('and it cannot be negotiated either, which is why it must never be stored',
+                  fn_propose_relaxation(v_event) is null);
+  v_result := fn_recompute_feasibility(v_event);
+  -- Not silent any more: the three in-budget venues are reported as unverified, which is exactly
+  -- what they are — allergy_safe_tags records only positive claims, so absence is never a
+  -- contradiction.
+  perform t_check('the zero is explained instead of merely reported',
+                  (v_result->>'feasible_count')::int = 0
+                  and (v_result->>'allergy_unverified_count')::int = 3, v_result::text);
+
+  -- What 0026's one-shot backfill does to that row, using the same expression it uses.
+  update participant_constraints
+     set normalized_value = jsonb_build_object('allergens',
+           to_jsonb(fn_allergen_canonical_value(normalized_value))),
+         semantic_remainder = coalesce(semantic_remainder, btrim(raw_text))
+   where id = v_allergy_id;
+  perform t_check('the backfill rewrites it to the vocabulary and keeps the wording',
+                  (select normalized_value from participant_constraints where id = v_allergy_id)
+                    = '{"allergens":["shellfish"]}'::jsonb
+                  and (select semantic_remainder from participant_constraints
+                        where id = v_allergy_id) = 'えびと卵のアレルギーがあります',
+                  (select normalized_value::text from participant_constraints
+                    where id = v_allergy_id));
+  perform t_check('and the venue is reachable again afterwards',
+                  fn_candidate_is_feasible(v_event, 'qa0026_allergy_full'));
+
+  -- The row where NOTHING is expressible (「マンゴーアレルギー」, canonicalised to an empty list).
+  -- It stays a GATING allergy MUST — 0022 could re-type an inexpressible accessibility need to a
+  -- non-gating `other` note, but doing that to a medical requirement would drop it out of the
+  -- gate entirely and let the group be recommended a venue nobody has checked.
+  update participant_constraints set normalized_value = '{"allergens":[]}'
+   where id = v_allergy_id;
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('an inexpressible allergen still fails closed for every venue',
+                  (v_result->>'feasible_count')::int = 0, v_result::text);
+  perform t_check('and every candidate is reported as unverified, which is simply true',
+                  (v_result->>'allergy_unverified_count')::int = 3, v_result::text);
+  perform t_check('it is still an allergy MUST, not a note, and still not negotiable',
+                  (select normalized_type from participant_constraints
+                    where id = v_allergy_id) = 'allergy'
+                  and fn_propose_relaxation(v_event) is null);
+
+  update participant_constraints set normalized_value = '{"allergens":["shellfish","egg"]}'
+   where id = v_allergy_id;
+  select array_agg(r.place_id order by r.place_id) into v_places
+    from restaurants r
+    join restaurant_features rf on rf.place_id = r.place_id
+   where fn_candidate_is_feasible(v_event, r.place_id);
+  perform t_check('and the covered venue is the only feasible one at the end',
+                  v_places = array['qa0026_allergy_full'], v_places::text);
+
+  -- The seeded fixture went through the migration's backfill: Emma's MUST was already canonical,
+  -- so it is untouched and every seeded venue still covers it.
+  perform t_check('the demo allergy MUST is canonical after the backfill',
+                  (select normalized_value from participant_constraints
+                    where event_id = '00000000-0000-0000-0000-000000000001'
+                      and normalized_type = 'allergy')
+                    = '{"allergens":["shellfish"]}'::jsonb);
+  perform t_check('and the seeded venue tags are canonical too',
+                  (select bool_and(allergy_safe_tags = array['shellfish_free'])
+                     from restaurant_features
+                    where place_id like 'demo_place_%'));
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0027: Tabelog's three columns, their write path, and the two things that must NOT happen.
+--
+-- Tabelog has no API, so the writer of these columns is an HTML scraper whose terms we do not
+-- have consent under; it is off unless TABELOG_ENRICHMENT_ENABLED is exactly "true". None of
+-- that is testable from SQL. What IS testable, and is what these checks are for:
+--
+--   * an UNRESOLVED venue is left NULL rather than guessed, and a run that resolved nothing
+--     cannot erase an identity an earlier run confirmed (the present/absent key contract 0022
+--     and 0023 established);
+--   * a malformed resolution cannot reach a column, so a parser fault degrades the enrichment
+--     instead of failing the search on a CHECK violation;
+--   * SCORING DOES NOT MOVE. Tabelog's score lives in its own column beside Google's precisely
+--     so nothing blends the two, and 0016's scores must come out byte-identical either side of
+--     a Tabelog write.
+--
+-- The scratch venue carries a unique dietary tag its own event requires, so it can never be
+-- feasible for the demo event and vice versa; the 0-then-3 invariant is re-asserted below.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00270000-0000-0000-0000-00000000a000';
+  v_pid uuid := '00270000-0000-0000-0000-00000000a001';
+  v_uid uuid := '00270000-0000-0000-0000-0000000000aa';
+  v_written int;
+  v_result jsonb;
+  v_before jsonb;
+  v_after jsonb;
+  v_raised boolean;
+begin
+  perform t_as_admin();
+
+  insert into events (id, name, objective, status)
+  values (v_event, 'QA tabelog enrichment', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_pid, v_event, v_uid, 'Tabelog QA', 'organizer', 'office');
+  update events set organizer_participant_id = v_pid where id = v_event;
+
+  insert into restaurants (place_id) values
+    ('qa0027_resolved'), ('qa0027_unresolved'), ('qa0027_malformed');
+  insert into restaurant_features (place_id, price_yen_estimate, room_type, dietary_tags,
+                                   rating, user_rating_count)
+  values ('qa0027_resolved', 3000, 'open', array['qa0027_tabelog'], 4.0, 380),
+         -- Shortlisted, searched, and its identity never confirmed — which is most of what a
+         -- phone-only join returns, and the state that must stay NULL.
+         ('qa0027_unresolved', 3000, 'open', array['qa0027_tabelog'], 4.4, 82),
+         ('qa0027_malformed', 3000, 'open', array['qa0027_tabelog'], 3.9, 500);
+
+  perform t_check('every venue starts with no Tabelog data at all',
+                  (select count(*) from restaurant_features
+                    where tabelog_id is null and tabelog_rating is null
+                      and tabelog_review_count is null)
+                    = (select count(*) from restaurant_features));
+
+  -- One enrichment pass. The `tabelog` key is present ONLY for the venue whose telephone
+  -- number matched the page's own; the other two carry no key, which is what the Edge Function
+  -- sends for "we could not confirm which page this is".
+  select fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_resolved',
+                       'tabelog', jsonb_build_object('tabelog_id', '13039534',
+                                                     'rating', 3.39,
+                                                     'review_count', 357)),
+    jsonb_build_object('place_id', 'qa0027_unresolved'),
+    jsonb_build_object('place_id', 'qa0027_malformed'))) into v_written;
+  perform t_check('the writer touches only the venues whose identity was confirmed',
+                  v_written = 1, v_written::text);
+  perform t_check('a confirmed venue records the Tabelog id, score and review count',
+                  (select tabelog_id = '13039534' and tabelog_rating = 3.39
+                            and tabelog_review_count = 357
+                     from restaurant_features where place_id = 'qa0027_resolved'));
+  perform t_check('and an unresolved venue is left NULL rather than guessed',
+                  (select tabelog_id is null and tabelog_rating is null
+                            and tabelog_review_count is null
+                     from restaurant_features where place_id = 'qa0027_unresolved'));
+
+  -- Google's columns are Google's. Nothing here may touch them, because a Tabelog 3.39 and a
+  -- Google 4.0 are not measurements of the same thing on the same scale.
+  perform t_check('Google''s rating and review count are untouched by a Tabelog write',
+                  (select rating = 4.0 and user_rating_count = 380
+                     from restaurant_features where place_id = 'qa0027_resolved'));
+
+  -- AUTHORITATIVE where there IS a confirmed identity: the score is a live figure and this is a
+  -- refreshable cache of it, so a newer resolution replaces the old numbers — including with
+  -- NULL when the page has stopped publishing a score.
+  perform fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_resolved',
+                       'tabelog', jsonb_build_object('tabelog_id', '13039534',
+                                                     'rating', 3.41,
+                                                     'review_count', 361))));
+  perform t_check('a newer resolution replaces the stored score and count',
+                  (select tabelog_rating = 3.41 and tabelog_review_count = 361
+                     from restaurant_features where place_id = 'qa0027_resolved'));
+  perform fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_resolved',
+                       'tabelog', jsonb_build_object('tabelog_id', '13039534'))));
+  perform t_check('a page that publishes no score records NULL, keeping the identity',
+                  (select tabelog_id = '13039534' and tabelog_rating is null
+                            and tabelog_review_count is null
+                     from restaurant_features where place_id = 'qa0027_resolved'));
+  perform fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_resolved',
+                       'tabelog', jsonb_build_object('tabelog_id', '13039534',
+                                                     'rating', 3.39,
+                                                     'review_count', 357))));
+
+  -- ADDITIVE where there is NO answer, which is the common case: the flag off, the venue not in
+  -- the five-venue shortlist, no telephone number to match on, Tabelog's search finding nothing,
+  -- the page printing a different number, the request budget spent. None of them may erase an
+  -- identity confirmed by an exact phone match on an earlier run.
+  select fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_resolved'),
+    jsonb_build_object('place_id', 'qa0027_resolved', 'tabelog', null),
+    jsonb_build_object('place_id', 'qa0027_resolved', 'tabelog', '13039534'),
+    jsonb_build_object('place_id', 'qa0027_resolved', 'tabelog', jsonb_build_array()),
+    jsonb_build_object('tabelog', jsonb_build_object('tabelog_id', '13039534')),
+    jsonb_build_object('place_id', 'qa0027_no_such_place',
+                       'tabelog', jsonb_build_object('tabelog_id', '13039534')))) into v_written;
+  perform t_check('an absent, null or non-object tabelog key writes nothing at all',
+                  v_written = 0, v_written::text);
+  perform t_check('so a run that resolved nothing cannot erase a confirmed identity',
+                  (select tabelog_id = '13039534' and tabelog_rating = 3.39
+                     from restaurant_features where place_id = 'qa0027_resolved'));
+  perform t_check('and a malformed candidate list is ignored rather than raising',
+                  fn_record_tabelog_enrichment(v_event, null) = 0
+                  and fn_record_tabelog_enrichment(v_event, '{}'::jsonb) = 0
+                  and fn_record_tabelog_enrichment(v_event, '[]'::jsonb) = 0);
+
+  -- THE ID IS THE RESOLUTION. Without a well-formed one there is no identity to attach a score
+  -- to, so the whole element is discarded rather than writing loose numbers — a score attributed
+  -- to the wrong venue is the failure the phone-only join exists to prevent. A scraper's failure
+  -- mode is not a wrong number, it is a URL or an HTML fragment.
+  select fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object('tabelog_id', '', 'rating', 3.5)),
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object(
+                         'tabelog_id', 'https://tabelog.com/tokyo/A1304/A130401/13039534/',
+                         'rating', 3.5)),
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object('tabelog_id', '13039534abc',
+                                                     'rating', 3.5)),
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object('tabelog_id', '123', 'rating', 3.5)),
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object('tabelog_id', null, 'rating', 3.5)))
+  ) into v_written;
+  perform t_check('an id that is empty, a URL, not digits or too short writes nothing',
+                  v_written = 0, v_written::text);
+  perform t_check('so a score is never recorded without an identity to attach it to',
+                  (select tabelog_rating is null and tabelog_review_count is null
+                     from restaurant_features where place_id = 'qa0027_malformed'));
+
+  -- An off-scale score or a junk count is a parser fault, not a fact. It records NULL for that
+  -- field — the identity still lands — and can never violate 0027's CHECKs, so it cannot fail a
+  -- whole search the way a raw insert would.
+  select fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object('tabelog_id', '13100419',
+                                                     'rating', 7.2,
+                                                     'review_count', -5))) ) into v_written;
+  perform t_check('an off-scale score and a negative count are dropped, not recorded',
+                  v_written = 1
+                  and (select tabelog_id = '13100419' and tabelog_rating is null
+                              and tabelog_review_count is null
+                         from restaurant_features where place_id = 'qa0027_malformed'));
+  perform fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object('tabelog_id', '13100419',
+                                                     'rating', '3.17',
+                                                     'review_count', '315'))));
+  perform t_check('a numeric value arriving as a JSON string is still read',
+                  (select tabelog_rating = 3.17 and tabelog_review_count = 315
+                     from restaurant_features where place_id = 'qa0027_malformed'));
+  perform fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object('tabelog_id', '13100419',
+                                                     'rating', '４.２',
+                                                     'review_count', '1,304'))));
+  perform t_check('and a full-width or comma-formatted value is NOT guessed at',
+                  (select tabelog_rating is null and tabelog_review_count is null
+                     from restaurant_features where place_id = 'qa0027_malformed'));
+
+  -- The CHECKs themselves, at the table, for anything that ever writes these columns without
+  -- going through the function above. Same shape as 0016's guard rails on Google's rating.
+  v_raised := false;
+  begin
+    update restaurant_features set tabelog_rating = 5.1 where place_id = 'qa0027_unresolved';
+  exception when check_violation then v_raised := true;
+  end;
+  perform t_check('the table refuses a Tabelog score above 5', v_raised);
+  v_raised := false;
+  begin
+    update restaurant_features set tabelog_review_count = -1
+     where place_id = 'qa0027_unresolved';
+  exception when check_violation then v_raised := true;
+  end;
+  perform t_check('the table refuses a negative Tabelog review count', v_raised);
+  v_raised := false;
+  begin
+    update restaurant_features set tabelog_id = 'A1304' where place_id = 'qa0027_unresolved';
+  exception when check_violation then v_raised := true;
+  end;
+  perform t_check('the table refuses a Tabelog id that is not digits', v_raised);
+  perform t_check('and NULL is legal in all three, because unresolved is the normal state',
+                  (select tabelog_id is null from restaurant_features
+                    where place_id = 'qa0027_unresolved'));
+
+  -- The resolution cache. One row per place, so "we asked and learned nothing" is
+  -- representable — an unresolved attempt has no Tabelog id to key a row by, and forgetting it
+  -- would make every search re-ask about the venues that will never resolve.
+  insert into restaurant_source_records (place_id, provider, source_id, payload)
+  values ('qa0027_unresolved', 'tabelog', 'resolution',
+          '{"resolved":false,"phone_match":"not_confirmed"}'::jsonb);
+  perform t_check('tabelog is a legal provider for a cached resolution',
+                  (select count(*) from restaurant_source_records
+                    where provider = 'tabelog') = 1);
+  v_raised := false;
+  begin
+    insert into restaurant_source_records (place_id, provider, source_id)
+    values ('qa0027_unresolved', 'tabelog_reviews', 'resolution');
+  exception when check_violation then v_raised := true;
+  end;
+  perform t_check('and the provider list is still closed to everything else', v_raised);
+
+  -- THE POINT OF KEEPING TABELOG IN ITS OWN COLUMNS: scoring cannot see it. 0016's quality
+  -- signal is Google's rating shrunk toward a prior, and a Tabelog score on the same venue must
+  -- not move it by so much as a digit — averaging two providers' scales would change every
+  -- number in the breakdown while measuring nothing new.
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'QA pool gate',
+          'dietary', '{"tags":["qa0027_tabelog"]}', 'ANONYMOUS');
+  update restaurant_features set tabelog_id = null, tabelog_rating = null,
+                                 tabelog_review_count = null
+   where place_id like 'qa0027_%';
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('the QA venues are feasible before any Tabelog data exists',
+                  (v_result->>'feasible_count')::int = 3, v_result::text);
+  select jsonb_agg(jsonb_build_object('place', s.restaurant_place_id,
+                                      'quality', s.quality_score,
+                                      'objective', s.objective_score,
+                                      'breakdown', s.score_breakdown)
+                   order by s.restaurant_place_id)
+    into v_before
+    from recommendation_scores s
+   where s.run_id = (v_result->>'run_id')::uuid;
+
+  perform fn_record_tabelog_enrichment(v_event, jsonb_build_array(
+    jsonb_build_object('place_id', 'qa0027_resolved',
+                       'tabelog', jsonb_build_object('tabelog_id', '13039534',
+                                                     'rating', 3.39,
+                                                     'review_count', 357)),
+    jsonb_build_object('place_id', 'qa0027_malformed',
+                       'tabelog', jsonb_build_object('tabelog_id', '13100419',
+                                                     'rating', 4.24,
+                                                     'review_count', 360))));
+  v_result := fn_recompute_feasibility(v_event);
+  select jsonb_agg(jsonb_build_object('place', s.restaurant_place_id,
+                                      'quality', s.quality_score,
+                                      'objective', s.objective_score,
+                                      'breakdown', s.score_breakdown)
+                   order by s.restaurant_place_id)
+    into v_after
+    from recommendation_scores s
+   where s.run_id = (v_result->>'run_id')::uuid;
+  perform t_check('every score is byte-identical either side of a Tabelog write',
+                  v_before = v_after, v_after::text);
+  perform t_check('and feasibility is unchanged too — Tabelog gates nothing',
+                  (v_result->>'feasible_count')::int = 3
+                  and fn_candidate_is_feasible(v_event, 'qa0027_unresolved'),
+                  v_result::text);
+
+  -- The write path is the provider pipeline's. A client that could call it could attribute any
+  -- Tabelog page, and any score, to any venue.
+  perform t_as_user(v_uid);
+  v_raised := false;
+  begin
+    perform fn_record_tabelog_enrichment(v_event, '[]'::jsonb);
+  exception when insufficient_privilege then v_raised := true;
+  end;
+  perform t_check('an API caller cannot record Tabelog enrichment', v_raised);
+  perform t_as_admin();
+  perform t_check('service_role may, and only service_role and the owner may',
+                  has_function_privilege('service_role',
+                    'public.fn_record_tabelog_enrichment(uuid, jsonb)', 'EXECUTE')
+                  and not has_function_privilege('authenticated',
+                    'public.fn_record_tabelog_enrichment(uuid, jsonb)', 'EXECUTE')
+                  and not has_function_privilege('anon',
+                    'public.fn_record_tabelog_enrichment(uuid, jsonb)', 'EXECUTE'));
+
+  -- An unknown event is a caller bug, not something to write venue data for.
+  v_raised := false;
+  begin
+    perform fn_record_tabelog_enrichment('00270000-0000-0000-0000-0000000000ff'::uuid,
+                                         '[]'::jsonb);
+  exception when others then v_raised := true;
+  end;
+  perform t_check('recording enrichment for an unknown event raises', v_raised);
+
+  -- The three columns are readable by the client that would display them (0024's rule: a new
+  -- column reachable by a client needs the grant to exist, and a table-level grant covers
+  -- columns added later).
+  perform t_check('the new columns are readable through the restaurant_features grant',
+                  has_column_privilege('authenticated', 'public.restaurant_features',
+                                       'tabelog_rating', 'SELECT')
+                  and has_column_privilege('authenticated', 'public.restaurant_features',
+                                           'tabelog_review_count', 'SELECT')
+                  and has_column_privilege('authenticated', 'public.restaurant_features',
+                                           'tabelog_id', 'SELECT'));
+
+  -- Nothing above may have touched the demo fixture: it has no phone numbers, no Places
+  -- payloads and no Tabelog rows, and the flag is off anyway. Verified, not assumed.
+  perform t_check('the demo fixture holds no Tabelog data whatsoever',
+                  (select count(*) from restaurant_features
+                    where place_id like 'demo_place_%'
+                      and tabelog_id is null and tabelog_rating is null
+                      and tabelog_review_count is null) = 4);
+end $$;
+
+-- ---------------------------------------------------------------------------
 -- 0021: the demo invite code is reachable, and the demo invariant is untouched by
 -- everything above (every QA block adds its own events and venues to the same global pool —
 -- ten events and twenty-three venues by this point).

@@ -86,10 +86,49 @@ async function api(method, path, body) {
   return text.length === 0 ? null : JSON.parse(text)
 }
 
+/** How many users one admin-list request asks for. GoTrue's default page size is 50. */
+const USERS_PER_PAGE = 200
+/** Enough for 200k users; a guard so a misbehaving endpoint cannot spin here forever. */
+const MAX_USER_PAGES = 1000
+
+/**
+ * The persona's Auth user, or null.
+ *
+ * `GET /auth/v1/admin/users?email=…` looks like a lookup and is not one: GoTrue's admin list
+ * endpoint has no `email` parameter, ignores the ones it does not know, and answers with the
+ * FIRST PAGE of all users, newest first. That reads as "already exists" for as long as the
+ * project is young enough for the five personas to fit in one page — and stops working the
+ * moment it is not. Every anonymous sign-in creates a user (which is what the app does for any
+ * browser arriving without a session, and what `verify:p0:hosted` does four times a run), so a
+ * local stack crosses 50 users quickly; after that this script would try to CREATE alice, get
+ * `422 email_exists`, and abort before rewiring anything — leaving the fixture unreset, so the
+ * next hosted run dies at the join on a still-closed event. Exactly the failure the script
+ * exists to prevent.
+ *
+ * `filter` is the parameter GoTrue actually implements (a partial match on email/phone), and
+ * paging is behaviour every version has, so try the cheap one and fall back to the certain one.
+ */
+async function findPersonaUser(email) {
+  const filtered = await api(
+    'GET',
+    `/auth/v1/admin/users?filter=${encodeURIComponent(email)}&per_page=${USERS_PER_PAGE}`,
+  )
+  const hit = filtered?.users?.find((user) => user.email === email)
+  if (hit) return hit
+
+  for (let page = 1; page <= MAX_USER_PAGES; page += 1) {
+    const batch = await api('GET', `/auth/v1/admin/users?page=${page}&per_page=${USERS_PER_PAGE}`)
+    const users = batch?.users ?? []
+    const found = users.find((user) => user.email === email)
+    if (found) return found
+    if (users.length < USERS_PER_PAGE) return null
+  }
+  return null
+}
+
 /** Idempotent: returns the existing user's id when the address is already registered. */
 async function ensurePersonaUser(email) {
-  const existing = await api('GET', `/auth/v1/admin/users?email=${encodeURIComponent(email)}`)
-  const found = existing?.users?.find((user) => user.email === email)
+  const found = await findPersonaUser(email)
   if (found) return { id: found.id, created: false }
 
   if (dryRun) {
@@ -97,12 +136,28 @@ async function ensurePersonaUser(email) {
     return { id: '(dry-run)', created: true }
   }
   // email_confirm so the persona can sign in immediately without a mailbox.
-  const created = await api('POST', '/auth/v1/admin/users', {
-    email,
-    password,
-    email_confirm: true,
-  })
-  return { id: created.id, created: true }
+  try {
+    const created = await api('POST', '/auth/v1/admin/users', {
+      email,
+      password,
+      email_confirm: true,
+    })
+    return { id: created.id, created: true }
+  } catch (error) {
+    // The address exists after all — a lookup that could not see it, or a second run started
+    // in parallel. Either way "it already exists" is the outcome this function wants, so say
+    // so loudly and carry on rather than aborting the reset the caller came for.
+    if (!/email_exists|already been registered/i.test(error.message)) throw error
+    console.log(`  note: ${email} already exists but was not listed; resolving it directly`)
+    const resolved = await findPersonaUser(email)
+    if (!resolved) {
+      throw new Error(
+        `${email} is registered but cannot be found through /auth/v1/admin/users. ` +
+          'Delete the account or point this script at the right project.',
+      )
+    }
+    return { id: resolved.id, created: false }
+  }
 }
 
 async function main() {

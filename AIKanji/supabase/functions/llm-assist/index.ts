@@ -7,19 +7,44 @@
 //
 // Nothing the model says about a *category the engine gates on* is taken on trust: the
 // response shape is validated fail-closed, `sensitivity` / `verification_requirement` are
-// derived server-side, and accessibility `needs` are filtered to the closed vocabulary of
-// migration 0022 (ACCESSIBILITY_NEEDS below). An unmatchable need would otherwise make a
-// never-relaxable MUST unsatisfiable by every venue in Tokyo.
+// derived server-side, and the three safety categories are filtered to closed vocabularies —
+// accessibility `needs` to migration 0022's (ACCESSIBILITY_NEEDS below), allergy `allergens`
+// and dietary `tags` to migration 0026's (ALLERGENS / DIETARY_TAGS). An unmatchable value would
+// otherwise make a never-relaxable MUST unsatisfiable by every venue in Tokyo: that is not
+// hypothetical, it is what 「えびとかにのアレルギーがあります」 did — the model mirrored the
+// writer's language ({"allergens":["えび","かに"]}), venues record 'shellfish_free', and the
+// engine's containment test looked for 'えび_free' forever. Allergy is deliberately never
+// relaxable, so there was no negotiation to escape through either.
+//
+// The prompt states each closed list AND the server enforces it, in that order of trust: the
+// prompt is a hint, this file is the contract. The two `_free` shapes the live model actually
+// invented for 「卵と乳製品がだめです」 (dietary {"tags":["egg-free","dairy-free"]}) are exactly
+// what a prompt-only rule fails to prevent.
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
+import { canonicalCuisineTag, CUISINE_TAGS } from "../_shared/cuisine.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";
+// This project talks to OpenAI through OpenRouter, so the defaults name that route rather
+// than api.openai.com: a default nobody uses is a default nobody notices is wrong, and the
+// failure mode is a 401 that reads like a bad key rather than a wrong endpoint. OpenRouter is
+// OpenAI-compatible — same POST /chat/completions, same Bearer auth, same response shape — so
+// only the endpoint and the model id differ, and the request built below is unchanged.
 const LLM_BASE_URL = Deno.env.get("LLM_BASE_URL") ??
-  "https://api.openai.com/v1";
-const LLM_MODEL = Deno.env.get("LLM_MODEL") ?? "gpt-4o-mini";
+  "https://openrouter.ai/api/v1";
+// OpenAI GPT-5.6 Luna. The `openai/` prefix is OpenRouter's vendor namespace and is required:
+// the bare OpenAI name is not a slug there and 404s. Overridable, because the choice of model
+// is a product decision that should not need a redeploy.
+const LLM_MODEL = Deno.env.get("LLM_MODEL") ?? "openai/gpt-5.6-luna";
+// Sent only to OpenRouter, which uses them to attribute usage to an app. Neither is required
+// and neither carries anything private — the title is the product name, and the referer is the
+// repository rather than a user-facing URL, since this call is made server-side on behalf of a
+// group and no participant's address belongs in a provider's logs.
+const OPENROUTER_REFERER = "https://github.com/smartfoloo/testing";
+const OPENROUTER_TITLE = "AI Kanji (matomeshi)";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -74,6 +99,124 @@ const ACCESSIBILITY_NEEDS = [
 const ACCESSIBILITY_ALIASES = new Map<string, string>([
   ["step_free", "wheelchair_accessible_entrance"],
   ["wheelchair", "wheelchair_accessible_entrance"],
+]);
+
+/// The CLOSED allergen vocabulary — six members, defined once in migration 0026
+/// (fn_allergen_vocabulary, plus the CHECK on restaurant_features.allergy_safe_tags) and
+/// mirrored here, in web/src/backend/engine.ts and in web/src/backend/mock.ts.
+///
+/// They are not invented: allergenLabel() in web/src/design/copy.ts, AppCopy.allergen in
+/// AppCopy.swift and ALLERGEN_WORDS in mock.ts already enumerate exactly these, so every member
+/// has a Japanese label a fully Japanese UI can print (甲殻類・卵・乳・落花生・小麦・そば). Five
+/// are 消費者庁の特定原材料 and `shellfish` covers えび・かに as one crustacean tag, which is the
+/// granularity the venue side records.
+///
+/// Feasibility is exact array containment against '<allergen>_free' tags
+/// (fn_allergy_allergens_met), and an allergy MUST is NEVER relaxable, so a member outside this
+/// list can never be matched by any venue and would mean zero candidates forever.
+const ALLERGENS = [
+  "buckwheat",
+  "egg",
+  "milk",
+  "peanut",
+  "shellfish",
+  "wheat",
+] as const;
+
+/// The CLOSED dietary vocabulary — four members (fn_dietary_vocabulary, 0026), read off
+/// DIETARY_WORDS in mock.ts and dietaryLabel() in copy.ts, matched against
+/// restaurant_features.dietary_tags by the same containment test. Unlike allergens these are
+/// *patterns a kitchen claims to cater for*, which is why gluten_free lives here while 小麦 is an
+/// allergen.
+const DIETARY_TAGS = ["gluten_free", "halal", "vegan", "vegetarian"] as const;
+
+/// Every spelling of an allergen we are willing to translate, and the member it means. Maps
+/// rather than object literals so a value called "constructor" or "__proto__" resolves to
+/// nothing instead of to something inherited from Object.prototype.
+///
+/// Each alias names the SAME ingredient as its member, so mapping it preserves the requirement
+/// and invents nothing. Kept in step with fn_allergen_canonical in migration 0026 — the two are
+/// asserted against each other by tests/backend_tests.sql and scripts/verify-engine.ts.
+///
+/// WHAT IS DELIBERATELY ABSENT, because a wrong mapping here is a health risk:
+///   貝 / 貝類 / あさり / 牡蠣  molluscs. `shellfish` is this schema's CRUSTACEAN tag (甲殻類),
+///        and a venue that confirmed itself shellfish_free has said nothing about oysters.
+///   グルテン  is a dietary tag (gluten_free); rewriting it to `wheat` would answer a coeliac
+///        requirement with a label that does not cover barley or rye.
+///   大豆 / ナッツ / 魚 / マンゴー  real allergens with no member and no venue tag. They are never
+///        approximated and never silently dropped: applyAllergenVocabulary keeps the writer's
+///        own wording and forces needs_clarification.
+const ALLERGEN_ALIASES = new Map<string, string>([
+  ["shellfish", "shellfish"],
+  ["えび", "shellfish"],
+  ["エビ", "shellfish"],
+  ["海老", "shellfish"],
+  ["かに", "shellfish"],
+  ["カニ", "shellfish"],
+  ["蟹", "shellfish"],
+  ["甲殻類", "shellfish"],
+  ["甲殻", "shellfish"],
+  ["shrimp", "shellfish"],
+  ["prawn", "shellfish"],
+  ["crab", "shellfish"],
+  ["crustacean", "shellfish"],
+  ["crustaceans", "shellfish"],
+  ["egg", "egg"],
+  ["eggs", "egg"],
+  ["卵", "egg"],
+  ["たまご", "egg"],
+  ["タマゴ", "egg"],
+  ["玉子", "egg"],
+  ["鶏卵", "egg"],
+  ["milk", "milk"],
+  ["dairy", "milk"],
+  ["乳", "milk"],
+  ["牛乳", "milk"],
+  ["ミルク", "milk"],
+  ["乳製品", "milk"],
+  ["乳成分", "milk"],
+  ["チーズ", "milk"],
+  ["バター", "milk"],
+  ["peanut", "peanut"],
+  ["peanuts", "peanut"],
+  ["落花生", "peanut"],
+  ["ピーナッツ", "peanut"],
+  ["ピーナツ", "peanut"],
+  ["wheat", "wheat"],
+  ["小麦", "wheat"],
+  ["こむぎ", "wheat"],
+  ["コムギ", "wheat"],
+  ["小麦粉", "wheat"],
+  ["buckwheat", "buckwheat"],
+  ["soba", "buckwheat"],
+  ["そば", "buckwheat"],
+  ["蕎麦", "buckwheat"],
+  ["ソバ", "buckwheat"],
+  ["そば粉", "buckwheat"],
+]);
+
+/// The same table for dietary tags (fn_dietary_canonical, 0026). 菜食 IS vegetarian, ハラール IS
+/// halal, グルテンフリー IS gluten_free. Nothing ingredient-shaped is here: 'egg-free' and
+/// 'dairy-free' — which the live model produced for 「卵と乳製品がだめです」 — are allergens wearing
+/// a dietary shape, so they are dropped and flagged rather than guessed at, and the prompt now
+/// routes ingredient-level exclusions to `allergy` where the engine can actually check them.
+const DIETARY_ALIASES = new Map<string, string>([
+  ["vegan", "vegan"],
+  ["ヴィーガン", "vegan"],
+  ["ビーガン", "vegan"],
+  ["完全菜食", "vegan"],
+  ["vegetarian", "vegetarian"],
+  ["veggie", "vegetarian"],
+  ["ベジタリアン", "vegetarian"],
+  ["菜食", "vegetarian"],
+  ["菜食主義", "vegetarian"],
+  ["halal", "halal"],
+  ["ハラル", "halal"],
+  ["ハラール", "halal"],
+  ["gluten_free", "gluten_free"],
+  ["glutenfree", "gluten_free"],
+  ["グルテンフリー", "gluten_free"],
+  ["グルテン", "gluten_free"],
 ]);
 
 type NormalizedType = (typeof NORMALIZED_TYPES)[number];
@@ -149,6 +292,39 @@ const FALLBACK: ParseResult = {
   needs_clarification: true,
 };
 
+/// What each vocabulary member covers, in the language the writer will have used. Typed as
+/// `Record<member, string>` on purpose: TypeScript then refuses to compile if a member is added
+/// to ALLERGENS / DIETARY_TAGS without being explained in the prompt, or explained without
+/// existing — the prompt and the enforced list cannot drift apart silently, which is the exact
+/// failure this whole file is fixing (allergy was the only gating category the prompt did not
+/// exemplify, so the model mirrored the writer's language).
+const ALLERGEN_COVERAGE: Record<(typeof ALLERGENS)[number], string> = {
+  shellfish: "えび・かに・甲殻類 (CRUSTACEANS ONLY)",
+  egg: "卵・たまご・玉子・鶏卵",
+  milk: "乳・牛乳・乳製品・チーズ・バター",
+  peanut: "落花生・ピーナッツ",
+  wheat: "小麦",
+  buckwheat: "そば・蕎麦",
+};
+
+const DIETARY_COVERAGE: Record<(typeof DIETARY_TAGS)[number], string> = {
+  vegan: "ヴィーガン・完全菜食",
+  vegetarian: "ベジタリアン・菜食",
+  halal: "ハラル・ハラール",
+  gluten_free: "グルテンフリー",
+};
+
+/// Renders one closed list for the prompt: `  member    what it covers`, in the vocabulary's own
+/// order so the prompt, the validator and the SQL all present the members identically.
+function promptVocabulary(
+  members: readonly string[],
+  coverage: Record<string, string>,
+): string {
+  return members
+    .map((member) => `  ${member.padEnd(12)} ${coverage[member]}`)
+    .join("\n");
+}
+
 const SYSTEM_PROMPT =
   `You normalize a single restaurant-outing requirement written by a member of a Tokyo coworker group.
 
@@ -163,14 +339,47 @@ Reply with JSON only, exactly these six keys and nothing else:
 normalized_value shape by type:
   budget       {"max_yen": number} or {"min_yen": number, "max_yen": number}
   cuisine      {"include": string[], "exclude": string[]}
-  dietary      {"tags": string[]}          e.g. ["vegetarian","halal"]
-  allergy      {"allergens": string[]}
+  dietary      {"tags": string[]}          CLOSED LIST, see below
+  allergy      {"allergens": string[]}     CLOSED LIST, see below
   smoking      {"preference": "non_smoking"|"smoking_ok"}
   room         {"room": "private"|"semi_private"|"open"}
   travel_time  {"max_minutes": number}
   accessibility{"needs": string[]}         CLOSED LIST, see below
   atmosphere   {"tags": string[]}          e.g. ["quiet","lively"]
   other        {}
+
+Every value in a closed list below is written in English EVEN WHEN THE TEXT IS JAPANESE. These
+are database identifiers, not words shown to anyone: the app prints its own Japanese label for
+each one. A Japanese value can never be matched against a restaurant's recorded data.
+
+allergy "allergens" is a CLOSED list of exactly these six values. The Japanese after each one
+is what it covers, not an alternative spelling to output:
+${promptVocabulary(ALLERGENS, ALLERGEN_COVERAGE)}
+  「えびとかにのアレルギーがあります」 -> {"allergens":["shellfish"]}
+  「そばアレルギーです」            -> {"allergens":["buckwheat"]}
+  「卵と乳製品がだめです」          -> allergy, {"allergens":["egg","milk"]}
+  "peanut allergy"                  -> {"allergens":["peanut"]}
+An allergen this list CANNOT express — マンゴー, 大豆, ナッツ, 魚, and 貝 (molluscs: shellfish
+above is crustaceans only) — goes in semantic_remainder in the writer's own words, and
+normalized_type STAYS allergy. NEVER approximate it with a different allergen, and never leave
+it out of semantic_remainder: someone else has to confirm it with the restaurant by phone.
+
+cuisine "include" and "exclude" are a CLOSED list of exactly these eleven values, in English even
+when the text is Japanese, for the same reason as the other lists — they are compared against a
+venue's recorded tags and a Japanese word can never match one:
+${CUISINE_TAGS.join(" ")}
+  「イタリアンがいい、中華は嫌」 -> {"include":["italian"],"exclude":["chinese"]}
+A cuisine outside the list (タパス, ビストロ, ベトナム料理) goes in semantic_remainder in the
+writer's own words. Unlike the lists below this does NOT need clarification on its own: cuisine
+only nudges the ranking, it never excludes a venue.
+
+dietary "tags" is a CLOSED list of exactly these four values:
+${promptVocabulary(DIETARY_TAGS, DIETARY_COVERAGE)}
+  「ベジタリアンです」 -> dietary, {"tags":["vegetarian"]}
+dietary is for a way of eating. A SPECIFIC INGREDIENT the writer cannot eat is an ALLERGY, not a
+dietary tag: never write "egg-free", "dairy-free", "no-shellfish" or any other invented tag —
+use allergy with the list above. Anything the four values cannot express (pescatarian, 五葷抜き,
+no pork on its own) goes in semantic_remainder in the writer's own words.
 
 accessibility "needs" is a CLOSED list. Use only these values, exactly as written, and never
 invent another one:
@@ -355,6 +564,185 @@ function applyAccessibilityVocabulary(
   };
 }
 
+/// Spelling normalization shared by the allergen and dietary tables, mirroring
+/// fn_taxonomy_token in migration 0026: case-folded, and space / ideographic space / ASCII
+/// hyphen / fullwidth hyphen / U+2010 hyphen folded to '_', so 'Gluten-Free', 'gluten free' and
+/// 'gluten_free' are one token. The katakana prolonged sound mark 'ー' is deliberately NOT folded
+/// — it is a letter in ピーナッツ and ミルク, not punctuation.
+function taxonomyToken(raw: string): string {
+  return raw.toLowerCase().replace(/[ 　\-－‐]/g, "_").trim();
+}
+
+/// One allergen word -> one ALLERGENS member, or null. A trailing '_free' is stripped first so a
+/// model that echoes the venue side's 'shellfish_free' still lands on 'shellfish' rather than
+/// being dropped. Mirrors fn_allergen_canonical (0026).
+function canonicalAllergen(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  return ALLERGEN_ALIASES.get(taxonomyToken(raw).replace(/_?free$/, "")) ??
+    null;
+}
+
+/// One dietary word -> one DIETARY_TAGS member, or null. No '_free' stripping here: 'gluten_free'
+/// IS a member. Mirrors fn_dietary_canonical (0026).
+function canonicalDietaryTag(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  return DIETARY_ALIASES.get(taxonomyToken(raw)) ?? null;
+}
+
+/// The closed vocabulary of ONE safety category, enforced on the model's answer rather than
+/// trusted — the same treatment applyAccessibilityVocabulary gives `needs`, and the same three
+/// outcomes, with ONE DELIBERATE DIFFERENCE spelled out below.
+///
+///   1. every value maps onto the vocabulary -> the canonical (sorted, deduped) list is stored,
+///      and the row is only left unflagged when the taxonomy also captured the WHOLE text (see
+///      the note on needs_clarification below).
+///   2. some map and some do not -> the ones that do are kept AND GATE THE SEARCH, the rest are
+///      removed from the value, the writer's OWN WORDING is preserved in semantic_remainder
+///      (falling back to their whole text when the model offered no remainder), and
+///      needs_clarification is forced true so a human is asked before this is saved. Keeping an
+///      unmapped value instead would be worse than dropping it: feasibility is exact array
+///      containment and neither of these MUSTs is relaxable, so one unknown value means zero
+///      candidates forever with no way out — the bug 0026 exists to remove.
+///   3. NOTHING is expressible (「マンゴーアレルギー」) -> the type STAYS `allergy` (or `dietary`)
+///      with an empty list, the wording is preserved and clarification is forced.
+///
+/// THAT THIRD CASE IS THE ASYMMETRY WITH ACCESSIBILITY, and it is intentional. 0022 re-types an
+/// inexpressible accessibility need to a non-gating `other` note, because the engine genuinely
+/// cannot check 「エレベーターがある店」 and a note a 幹事 can act on is more honest than a MUST
+/// that excludes all of Tokyo. Doing that to an allergy would drop a MEDICAL requirement out of
+/// the gate entirely and let the group be recommended a venue nobody has checked — the worst
+/// failure available here. So it stays gating and fails closed; what stops the resulting zero
+/// from being silent is migration 0026's `allergy_unverified_count`, which reports those
+/// candidates as unverified (they are: allergy_safe_tags records only positive claims, so absence
+/// is never a contradiction), plus verification_requirement = 'required', which is the cue to
+/// phone the venue. Reporting, never consent.
+///
+/// `sensitivity` and `verification_requirement` are derived afterwards from whatever type
+/// survives, so they always match what 0018's trigger would compute for the stored row.
+function applyClosedTagVocabulary(
+  result: ModelParse,
+  rawText: string,
+  type: "allergy" | "dietary",
+  key: "allergens" | "tags",
+  canonicalize: (raw: unknown) => string | null,
+): ModelParse {
+  if (result.normalized_type !== type) return result;
+
+  const stated = Array.isArray(result.normalized_value[key])
+    ? result.normalized_value[key] as unknown[]
+    : [];
+  const canonical: string[] = [];
+  // An unreadable or absent list is itself something to ask about: a safety MUST whose own value
+  // we cannot read must never be saved as if it had been understood.
+  let dropped = stated.length === 0;
+  for (const value of stated) {
+    const mapped = canonicalize(value);
+    if (mapped === null) {
+      dropped = true;
+      continue;
+    }
+    if (!canonical.includes(mapped)) canonical.push(mapped);
+    // A synonym is a rename, not a loss — but 「乳製品」 -> milk and 「甲殻類」 -> shellfish are
+    // both broader-to-narrower in places, so a human still confirms what we understood.
+    if (mapped !== value) dropped = true;
+  }
+  // Sorted so the stored value matches fn_allergen_canonical_allergens' output.
+  canonical.sort();
+
+  const remainder = dropped
+    ? result.semantic_remainder ?? (rawText.trim() || null)
+    : result.semantic_remainder;
+  return {
+    ...result,
+    normalized_value: { ...result.normalized_value, [key]: canonical },
+    semantic_remainder: remainder,
+    // ANY leftover wording on one of these two categories forces the question, even when the
+    // server dropped nothing — because the MODEL may have done the dropping. Verified live:
+    // 「えびアレルギーとマンゴーアレルギーです」 came back as {"allergens":["shellfish"]} with
+    // "マンゴーアレルギー" already in semantic_remainder and needs_clarification false, i.e. a
+    // correctly-shaped answer that still records a WEAKER requirement than the participant
+    // stated. Nothing about that row is wrong except its silence, so this is the one place the
+    // flag is raised on the model's behalf.
+    // Accessibility deliberately keeps 0022's rule instead (a remainder there is an amenity the
+    // engine cannot verify, not an ingredient somebody could react to).
+    needs_clarification: result.needs_clarification || dropped ||
+      remainder !== null,
+  };
+}
+
+/// Cuisine gets the same "enforce it, do not trust it" treatment, and for the same reason: the
+/// value is compared against restaurant_features.cuisine_tags with `&&`, so "Italian" and
+/// "italian" are simply two different strings and the first one matches nothing.
+///
+/// It is NOT one of the safety categories, and the difference is deliberate.
+/// fn_candidate_blocking_types does not list cuisine, so an unmapped value costs a little ranking
+/// accuracy and can never empty the shortlist the way an unmapped allergen would. So the writer's
+/// wording is still preserved when something is dropped — 「タパスが食べたい」 must not vanish in
+/// silence — but needs_clarification is left exactly as the model set it rather than forced.
+/// Interrupting somebody to confirm a preference that only nudges an ordering would train them to
+/// dismiss the question that matters, which is the allergy one.
+///
+/// A rename is not a loss: "Italian" -> "italian" leaves nothing unexpressed, so only a value that
+/// maps to nothing at all counts as dropped.
+function applyCuisineVocabulary(
+  result: ModelParse,
+  rawText: string,
+): ModelParse {
+  if (result.normalized_type !== "cuisine") return result;
+
+  let dropped = false;
+  const canonicalList = (key: "include" | "exclude"): string[] => {
+    const stated = Array.isArray(result.normalized_value[key])
+      ? result.normalized_value[key] as unknown[]
+      : [];
+    const canonical: string[] = [];
+    for (const value of stated) {
+      const mapped = canonicalCuisineTag(value);
+      if (mapped === null) {
+        dropped = true;
+        continue;
+      }
+      if (!canonical.includes(mapped)) canonical.push(mapped);
+    }
+    return canonical.sort();
+  };
+
+  const include = canonicalList("include");
+  const exclude = canonicalList("exclude");
+  return {
+    ...result,
+    normalized_value: { ...result.normalized_value, include, exclude },
+    semantic_remainder: dropped
+      ? result.semantic_remainder ?? (rawText.trim() || null)
+      : result.semantic_remainder,
+  };
+}
+
+/// The four closed vocabularies, applied in one place. Accessibility runs FIRST because it is
+/// the only one that can re-type a row (to `other`); the others then see a type that is no
+/// longer theirs and no-op, so the order cannot produce a half-converted row.
+function applyClosedVocabularies(
+  result: ModelParse,
+  rawText: string,
+): ModelParse {
+  return applyCuisineVocabulary(
+    applyClosedTagVocabulary(
+      applyClosedTagVocabulary(
+        applyAccessibilityVocabulary(result, rawText),
+        rawText,
+        "dietary",
+        "tags",
+        canonicalDietaryTag,
+      ),
+      rawText,
+      "allergy",
+      "allergens",
+      canonicalAllergen,
+    ),
+    rawText,
+  );
+}
+
 /// The two server-owned fields, assigned from normalized_type (and kind) rather than from the
 /// model: a hallucinated "not sensitive" allergy or "no confirmation needed" MUST would be a
 /// safety bug, and both fields are pure functions of the taxonomy anyway. Sensitivity stays out
@@ -384,6 +772,10 @@ async function chat(
     headers: {
       Authorization: `Bearer ${LLM_API_KEY}`,
       "Content-Type": "application/json",
+      // Ignored by an OpenAI-compatible endpoint that does not know them, so this stays
+      // correct if LLM_BASE_URL is pointed straight at OpenAI or a local model.
+      "HTTP-Referer": OPENROUTER_REFERER,
+      "X-Title": OPENROUTER_TITLE,
     },
     body: JSON.stringify({
       model: LLM_MODEL,
@@ -540,6 +932,21 @@ async function loadGrounding(
     .eq("kind", "WANT")
     .returns<WantRow[]>();
 
+  // Scoped to THIS event's participants. restaurant_features is a global pool keyed by place_id,
+  // so travel_minutes_by_participant accumulates an entry for every participant of every event
+  // that ever considered this venue. Handing the model all of them made it state a travel time
+  // belonging to a different group — verified: a fresh single-member event was told a venue was
+  // "about 25 minutes away", which was one of the seeded demo event's participants' figures, while
+  // this event's own fairness_score correctly read 0 because it has no travel data at all. The
+  // card contradicted itself, and one group's numbers surfaced in another group's text. Every
+  // other field here is already event-scoped (group_wants filters on run.event_id, and MUST rows
+  // are withheld entirely); this was the one that escaped.
+  const { data: members } = await admin
+    .from("participants")
+    .select("id")
+    .eq("event_id", run.event_id)
+    .returns<{ id: string }[]>();
+  const memberIds = new Set((members ?? []).map((member) => member.id));
   const travel = features.travel_minutes_by_participant ?? {};
   return {
     scoreId: score.id,
@@ -554,9 +961,10 @@ async function loadGrounding(
       dietary_tags: features.dietary_tags ?? [],
       allergy_safe_tags: features.allergy_safe_tags ?? [],
       atmosphere_tags: features.atmosphere_tags ?? [],
-      travel_minutes: Object.values(travel).map(Number).filter(
-        Number.isFinite,
-      ),
+      travel_minutes: Object.entries(travel)
+        .filter(([participantId]) => memberIds.has(participantId))
+        .map(([, minutes]) => Number(minutes))
+        .filter(Number.isFinite),
       group_wants: (wants ?? []).filter((want) =>
         want.normalized_type === "cuisine" ||
         want.normalized_type === "atmosphere"
@@ -656,13 +1064,14 @@ Deno.serve(async (req) => {
       await callModel(raw_text, kind, language),
       raw_text,
     );
-    // Order matters: the ANONYMOUS default is chosen while the type is still `accessibility`,
-    // so a need the vocabulary cannot express keeps that default even when it degrades to a
-    // note; the server-owned metadata is then derived from whatever type survived.
+    // Order matters: the ANONYMOUS default is chosen while the type is still one of the three
+    // sensitive ones, so a value the vocabulary cannot express keeps that default even when an
+    // accessibility need degrades to a note; the server-owned metadata is then derived from
+    // whatever type survived.
     return json(
       validated
         ? applyServerMetadata(
-          applyAccessibilityVocabulary(
+          applyClosedVocabularies(
             applyDefaultVisibility(validated),
             raw_text,
           ),

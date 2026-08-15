@@ -289,9 +289,17 @@ export function OrganizerDashboard({
         // unverified step-free entrance risks not getting in. So when they are the only
         // thing blocking a venue there is no proposal to make, and a bare 「0件」 would
         // strand the person who needs it most. Name the count and the way forward.
+        // Allergy first when both apply: it is the medical one, and unlike accessibility it is
+        // the NORMAL case on live data rather than an edge case — no provider supplies
+        // restaurant allergen information, so every discovered venue arrives unverified.
+        // Neither MUST is relaxable, so these sentences are the only thing standing between a
+        // participant and an unexplained 「0件」.
+        const allergyUnverified = result.allergy_unverified_count ?? 0
         const unverified = result.accessibility_unverified_count ?? 0
         setStatusMessage(
-          unverified > 0
+          allergyUnverified > 0
+            ? `${allergyUnverified}件のお店は、アレルギー対応ができるかどうかが確認できませんでした。お店に直接確認すると、候補にできるかもしれません。`
+            : unverified > 0
             ? `${unverified}件のお店は、車椅子で使えるかどうかが確認できませんでした。お店に直接確認すると、候補にできるかもしれません。`
             : negotiationId === null
               ? '今の条件では、まだ候補が見つかりません。みんなで相談してみましょう。'

@@ -21,7 +21,16 @@
  * `AIKanji/supabase/scripts/bootstrap-hosted-fixture.mjs` run against it: `seed.sql` fills
  * `auth_user_id` with `gen_random_uuid()`, so until those rows point at the real Auth users
  * the seeded event belongs to nobody and every RLS check fails.
+ *
+ * `becomeEphemeralUser` (bottom of this file) is the same idea for somebody who is NOT a
+ * seeded persona — the people `p0-features.mjs` invents to make a four-person event. They have
+ * no email, so hosted they cannot be signed in; a fresh identity there is a fresh ANONYMOUS
+ * session, which is exactly what the app hands a browser that arrives with no session. One
+ * browser holds one session, so each is captured as it is created and put back when it is that
+ * identity's turn again.
  */
+
+import { browserSession, restoreSession } from './hosted-db.mjs'
 
 export const DEMO_CODE = 'demo01'
 const USER_KEY = 'matomeshi.mock.user.v1'
@@ -130,4 +139,89 @@ export async function actAsPersona(api, name, base) {
   const persona = personaByName(name)
   await becomePersona(api, persona, base)
   await enterDemoEvent(api, persona.displayName)
+}
+
+/* -------------------------------------------------------------------------- */
+/* Identities that are nobody in particular                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Hosted sessions captured by `becomeEphemeralUser`, keyed by the name the scenario uses.
+ * A browser holds ONE session at a time, so acting as four people in turn means putting the
+ * right one back — which is all a returning browser does with its persisted session.
+ */
+const ephemeralSessions = new Map()
+
+/**
+ * The p0 suite's `p0-organizer` / `p0-b` / `p0-c` / `p0-d`: people with no seeded fixture and
+ * no email, who exist only to be a second, third and fourth participant.
+ *
+ *   mock    — the identity IS `matomeshi.mock.user.v1`, so writing it is the whole operation.
+ *   hosted  — a fresh identity is a fresh ANONYMOUS session, because that is what the app
+ *             gives a browser that arrives with no session (`ensureSession()` ->
+ *             `signInAnonymously()`). So: clear storage, reload, and let the app sign in;
+ *             then capture the session so this identity can be resumed later, since the next
+ *             `becomeEphemeralUser` for somebody else will replace it.
+ *
+ * Returns `{ id, isNew }`. `id` is the mock user id or the anonymous user's uid, which is what
+ * lets a caller assert that these really are DIFFERENT participants and not the same session
+ * joining four times (`fn_join_event` upserts on (event_id, auth_user_id), so a repeat would
+ * silently be one participant renamed — and every readiness count downstream would be wrong
+ * in a way that still looks plausible).
+ */
+export async function becomeEphemeralUser(api, name, base) {
+  if (mode() === 'mock') {
+    await api.evaluate(
+      `(() => { localStorage.setItem('${USER_KEY}', ${JSON.stringify(name)}); return true })()`,
+    )
+    await api.goto(base)
+    return { id: name, isNew: true }
+  }
+
+  const saved = ephemeralSessions.get(name)
+  if (saved) {
+    await restoreSession(api, base, saved)
+    const resumed = await waitForSession(api)
+    if (!resumed || resumed.userId !== saved.userId) {
+      throw new Error(
+        `restoring the hosted session for ${name} yielded ${resumed?.userId ?? 'no session'},` +
+          ` expected ${saved.userId}`,
+      )
+    }
+    // The refreshed token replaces the stored one; keep the newest so the next resume works.
+    ephemeralSessions.set(name, resumed)
+    return { id: resumed.userId, isNew: false }
+  }
+
+  // Nobody yet: clear everything and let the app introduce itself to the project.
+  await api.evaluate(`(() => { localStorage.clear(); return true })()`)
+  await api.goto(base)
+  const session = await waitForSession(api)
+  if (!session) throw new Error(`no session appeared for the new hosted identity ${name}`)
+  if (!session.isAnonymous) {
+    // A persona session surviving a localStorage.clear() would mean this identity is really
+    // somebody else — exactly the confusion that makes a multi-participant test meaningless.
+    throw new Error(
+      `the fresh identity ${name} is not anonymous (user ${session.userId}); ` +
+        'clearing storage did not end the previous session',
+    )
+  }
+  ephemeralSessions.set(name, session)
+  return { id: session.userId, isNew: true }
+}
+
+/** The app signs in asynchronously on load, so the session appears a moment after the page. */
+async function waitForSession(api, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const session = await browserSession(api)
+    if (session?.userId) return session
+    if (Date.now() >= deadline) return null
+    await api.wait(250)
+  }
+}
+
+/** The session the page is holding now — used to make a query as exactly this participant. */
+export function currentSession(api) {
+  return browserSession(api)
 }

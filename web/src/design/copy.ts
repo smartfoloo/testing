@@ -249,11 +249,12 @@ export function dietaryLabel(value: string): string | null {
  * (消費者庁の特定原材料: 卵・乳・小麦・そば・落花生), so the word on screen is the word on a
  * menu rather than an approximation of one.
  *
- * `shellfish` is the parser's crustacean tag — its own comment reads 「えび/かに are
- * crustaceans, mapped onto the fixture's `shellfish_free` tag」 — so it is 甲殻類 exactly.
- * (That regex also routes 貝 to `shellfish`, which is a parser-side imprecision on the
- * venue-matching side; widening the label to cover molluscs would misstate what the tag means,
- * so it is left alone here.)
+ * `shellfish` is the CRUSTACEAN member of the closed allergen vocabulary (0026) — えび and
+ * かに — so 甲殻類 is exact rather than an approximation. 貝 is deliberately outside it: a
+ * venue that has confirmed itself `shellfish_free` has said nothing about oysters or clams, so
+ * folding molluscs in would record a weaker requirement than the participant stated. Since
+ * 0026, 「貝アレルギー」 keeps the writer's wording in `semantic_remainder` and asks, rather
+ * than being silently mapped here.
  */
 export function allergenLabel(value: string): string | null {
   switch (value) {
@@ -345,7 +346,13 @@ export function errorMessage(error: unknown): string {
   if (
     description.includes('only the organizer') ||
     description.includes('not permitted') ||
-    description.includes('permission')
+    description.includes('permission') ||
+    // What PostgREST answers when RLS refuses the write: `403 new row violates row-level
+    // security policy for table "…"`. Without this probe it fell through to networkError, so
+    // adding a requirement after the organizer closed collection told the participant to
+    // 「時間をおいて、もう一度お試しください」 — advice that can never work, for a refusal that
+    // was deliberate. The message must say it was not allowed, not that the network failed.
+    description.includes('violates row-level security')
   ) {
     return AppCopy.permissionError
   }

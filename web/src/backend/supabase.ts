@@ -582,9 +582,25 @@ export class SupabaseBackend implements Backend {
     eventId: string,
     onUpdate: (update: RunUpdate) => void,
   ): Promise<Unsubscribe> {
-    return this.subscribeBroadcast(eventId, 'run_updated', (payload) =>
-      onUpdate(payload as RunUpdate),
-    )
+    // Realtime replays what is already in the topic, so the first thing a fresh subscriber
+    // hears can be older than what it already fetched — measured at 21 seconds old against a
+    // real stack, which is long enough to overwrite a correct screen with a wrong number.
+    // 0025 puts the run's own `run_at` on the wire so the two can be compared; everything not
+    // strictly newer than the newest seen is dropped.
+    //
+    // A payload with no `run_at` (written before 0025) is passed through rather than dropped:
+    // refusing it would make this subscription silently deaf against an older deployment,
+    // which is a worse failure than the staleness it guards against.
+    let newestSeen: string | null = null
+    return this.subscribeBroadcast(eventId, 'run_updated', (payload) => {
+      const update = payload as RunUpdate
+      const runAt = typeof update.run_at === 'string' ? update.run_at : null
+      if (runAt !== null) {
+        if (newestSeen !== null && runAt <= newestSeen) return
+        newestSeen = runAt
+      }
+      onUpdate(update)
+    })
   }
 
   /* ------------------------------------------------ RecommendationService */
@@ -598,7 +614,12 @@ export class SupabaseBackend implements Backend {
     return unwrap(
       await this.client
         .from('restaurant_features')
-        .select('place_id, name, price_yen_estimate, room_type, cuisine_tags, atmosphere_tags')
+        // provider_attributions is included because a client that cannot read it cannot
+        // display it, and Places requires that the per-place credits it returns are shown
+        // with the content they belong to (0023).
+        .select(
+          'place_id, name, price_yen_estimate, room_type, cuisine_tags, atmosphere_tags, provider_attributions',
+        )
         .in('place_id', placeIds),
     )
   }
