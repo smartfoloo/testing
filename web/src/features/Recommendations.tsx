@@ -2,14 +2,39 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { useBackend } from '../backend'
-import { AppCopy, errorMessage as toMessage } from '../design/copy'
+import {
+  AppCopy,
+  ScoreCopy,
+  errorMessage as toMessage,
+  objectiveEmphasisText,
+} from '../design/copy'
 import { EmptyStateView, InlineErrorView, LoadingStateView } from '../design/components'
 import { RecommendationCard } from './RecommendationCard'
 import type {
   EventDecision,
   RecommendationScore,
   RestaurantFeature,
+  ScoreBreakdown,
 } from '../models/types'
+
+/**
+ * PRD §9: the 幹事's objective changes the emphasis, not the feasibility. Saying that once
+ * above the list keeps every card free to spend its space on its own numbers, and gives the
+ * per-card 「重視」 dots and 「未確認」 marks a single place to be explained.
+ */
+function ObjectiveLegend({ breakdown }: { breakdown: ScoreBreakdown }) {
+  return (
+    <div
+      data-testid="score-legend"
+      className="flex flex-col gap-xxs rounded-card bg-green-soft px-md py-sm"
+    >
+      <p data-testid="score-emphasis" className="text-caption font-semibold">
+        {objectiveEmphasisText(breakdown)}
+      </p>
+      <p className="text-small text-ink/72">{ScoreCopy.legendNote}</p>
+    </div>
+  )
+}
 
 interface RecommendationsProps {
   runId: string
@@ -102,6 +127,9 @@ export function Recommendations({
     setIsChoosing(false)
   }
 
+  // Every row of a run shares the objective, so the first stored breakdown speaks for the list.
+  const legendBreakdown = scores.find((score) => score.score_breakdown)?.score_breakdown ?? null
+
   return (
     <div className="safe-b flex flex-col gap-lg px-lg pb-xxl pt-md">
       {isLoading && scores.length === 0 && (
@@ -114,6 +142,8 @@ export function Recommendations({
           message="条件を少し見直すと、候補が増えるかもしれません。"
         />
       )}
+
+      {legendBreakdown && <ObjectiveLegend breakdown={legendBreakdown} />}
 
       {scores.map((score) => (
         <RecommendationCard

@@ -3,27 +3,27 @@
 import { useEffect, useRef, useState } from 'react'
 import jsQR from 'jsqr'
 import { useBackend } from '../backend'
-import { AppCopy, travelLabel } from '../design/copy'
-import {
-  Divider,
-  InlineErrorView,
-  PrimaryButton,
-  SelectionChip,
-  TextField,
-} from '../design/components'
+import { AppCopy } from '../design/copy'
+import { Divider, InlineErrorView, PrimaryButton, TextField } from '../design/components'
 import { QrViewfinderIcon } from '../design/icons'
 import { extractInviteCode } from '../models/invite'
-import { SELECTABLE_TRAVEL_REFERENCES, type TravelReference } from '../models/types'
+import type { PlaceSuggestion, TravelReference } from '../models/types'
+// The 移動の基準 picker is shared with the other onboarding screen; it lives there
+// rather than in the design system because it is product logic, not a primitive.
+import { TravelReferenceField } from './CreateEvent'
 
 interface JoinEventProps {
+  /** Prefilled when the participant arrived via an invite link (`?code=`). */
+  initialCode?: string
   onContinue: (args: { eventId: string; participantId: string; inviteCode: string }) => void
 }
 
-export function JoinEvent({ onContinue }: JoinEventProps) {
+export function JoinEvent({ initialCode, onContinue }: JoinEventProps) {
   const backend = useBackend()
-  const [inviteCode, setInviteCode] = useState('')
+  const [inviteCode, setInviteCode] = useState(initialCode ?? '')
   const [displayName, setDisplayName] = useState('')
   const [travelReference, setTravelReference] = useState<TravelReference>('office')
+  const [travelPlace, setTravelPlace] = useState<PlaceSuggestion | null>(null)
   const [isScanning, setIsScanning] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [joined, setJoined] = useState<{ eventId: string; participantId: string } | null>(null)
@@ -40,6 +40,9 @@ export function JoinEvent({ onContinue }: JoinEventProps) {
         inviteCode: inviteCode.trim(),
         displayName: displayName.trim(),
         travelReference,
+        // Null when the participant skipped the place, or chose どこでも: the
+        // backend then leaves them out of the origins instead of guessing one.
+        travelReferencePlaceId: travelPlace?.place_id ?? null,
       })
       const event = await backend.event(inviteCode.trim())
       setJoined({ eventId: event.id, participantId })
@@ -84,19 +87,15 @@ export function JoinEvent({ onContinue }: JoinEventProps) {
         testId="join-display-name"
       />
 
-      <div className="flex flex-col gap-sm">
-        <h3 className="text-section">移動の基準</h3>
-        <div className="flex flex-wrap gap-xs">
-          {SELECTABLE_TRAVEL_REFERENCES.map((value) => (
-            <SelectionChip
-              key={value}
-              title={travelLabel(value)}
-              isSelected={travelReference === value}
-              onClick={() => setTravelReference(value)}
-            />
-          ))}
-        </div>
-      </div>
+      <TravelReferenceField
+        reference={travelReference}
+        place={travelPlace}
+        onChange={(next) => {
+          setTravelReference(next.reference)
+          setTravelPlace(next.place)
+        }}
+        testIdPrefix="join-travel"
+      />
 
       <PrimaryButton
         title="参加する"

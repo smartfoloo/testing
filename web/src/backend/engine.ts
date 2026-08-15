@@ -1,33 +1,55 @@
 /**
  * TypeScript port of the deterministic feasibility / scoring / relaxation engine
- * defined in AIKanji/supabase/migrations/0009_review_function_replacements.sql
- * (which supersedes the original 0005_feasibility.sql).
+ * defined in AIKanji/supabase/migrations/0009_review_function_replacements.sql,
+ * 0016_scoring_and_objective.sql and 0021_must_coverage_and_proposal_integrity.sql
+ * (which together supersede 0005_feasibility.sql).
  *
  * This exists so the mock backend behaves the same as the real Postgres one: the LLM
  * never decides feasibility or which MUST gets relaxed, it is all deterministic here too.
  *
  * SQL semantics that are deliberately reproduced:
- *  - a MUST of a type with no branch below (smoking, accessibility, cuisine, atmosphere,
- *    other) is silently satisfied, exactly as the `if/elsif` chain does;
+ *  - every MUST type that can gate a venue has a branch: budget, room, dietary, allergy,
+ *    accessibility, smoking, travel_time. Before 0021 the last two fell through the
+ *    `if/elsif` chain and were SILENTLY MET, so 「車椅子で入れる店」 was ignored as a hard
+ *    requirement. Only the non-gating types (cuisine, atmosphere, other — they are scored,
+ *    not filtered) still pass by default;
+ *  - absent venue data is never satisfaction (PRD §11 "unknown ≠ supported"): dietary,
+ *    allergy, accessibility and smoking all fail closed on a venue we know nothing about,
+ *    and on a MUST whose own normalized_value cannot be read;
  *  - `(value->>'key')::int` on a missing key yields SQL NULL, and `x > NULL` is NULL,
  *    which `if` treats as false — so the MUST passes. `nullableInt` + `exceeds` model that;
+ *    since 0021 SQL reads those keys through fn_jsonb_int, which also yields NULL for a
+ *    non-numeric value instead of raising — i.e. SQL now matches `nullableInt`;
  *  - `is distinct from` is null-safe inequality;
  *  - `@>` is array containment, `&&` is array overlap;
- *  - labels are assigned greedily in a fixed order to the best still-unlabelled row.
+ *  - travel minutes are read through one helper with the cache-then-feature precedence of
+ *    `fn_travel_minutes` (0016), so an event never sees another event's travel times;
+ *  - scoring is objective-weighted (`fn_objective_weights`), missing data is confined to a
+ *    band below measured data (`fn_banded_score`), and a label is only written when the row
+ *    genuinely leads that metric — otherwise the badge is dropped, never reassigned;
+ *  - a relaxation proposal is idempotent per event (`fn_propose_relaxation`, 0021): the open
+ *    proposal is returned rather than duplicated, and a step already rejected is not re-asked.
  */
 
 import type {
   ConstraintKind,
+  ConstraintSensitivity,
   ConstraintVisibility,
   EventObjective,
   EventStatus,
   NormalizedType,
   NormalizedValue,
   NegotiationStatus,
+  ObjectiveWeights,
   ParticipantRole,
+  QualityMethod,
   RecommendationLabel,
+  ScoreBreakdown,
+  ScoreDimension,
   TravelReference,
+  VerificationRequirement,
 } from '../models/types'
+import { SCORE_DIMENSIONS } from '../models/types'
 
 /* -------------------------------------------------------------------------- */
 /* Rows                                                                        */
@@ -43,6 +65,8 @@ export interface EventRow {
   created_at: string
   chosen_place_id: string | null
   chosen_at: string | null
+  /** Set by fn_close_preferences (0018). Non-null means constraint writes are refused. */
+  preferences_closed_at: string | null
 }
 
 export interface ParticipantRow {
@@ -65,6 +89,15 @@ export interface ConstraintRow {
   normalized_type: NormalizedType
   normalized_value: NormalizedValue
   visibility: ConstraintVisibility
+  /**
+   * Advisory metadata derived server-side from (kind, normalized_type) by 0018's
+   * trg_derive_constraint_metadata. Never read by feasibility — sensitivity must not
+   * influence visibility, which the participant owns.
+   */
+  sensitivity: ConstraintSensitivity
+  verification_requirement: VerificationRequirement
+  /** The participant's own wording the taxonomy did not capture; for P1 semantic matching. */
+  semantic_remainder: string | null
   created_at: string
   updated_at: string
 }
@@ -98,6 +131,31 @@ export interface FeatureRow {
   atmosphere_tags: string[]
   travel_minutes_by_participant: Record<string, number>
   fetched_at: string
+  /**
+   * Provider quality signal (`restaurant_features.rating` / `user_rating_count`, 0016).
+   * Optional here because fixtures written before 0016 do not set them; absent or null
+   * means "unrated", which the quality score treats as strictly worse than any rating.
+   */
+  rating?: number | null
+  user_rating_count?: number | null
+  /** `restaurant_features.accessibility_tags` (0016). Absent = no data, never "supported". */
+  accessibility_tags?: string[]
+  /**
+   * `restaurant_features.smoking_policy` (0021), the venue attribute a smoking MUST is
+   * judged against. Optional and nullable for the same reason the column is: no provider
+   * fills it yet, and absent/null means UNCONFIRMED — which fails a smoking MUST rather
+   * than satisfying it. 分煙 is recorded as null, not as a third value: we cannot certify
+   * from provider text which side of the partition the group would sit on.
+   */
+  smoking_policy?: 'non_smoking' | 'smoking_ok' | null
+}
+
+/** A row of `travel_matrix_cache` (event-scoped travel times, created by 0017). */
+export interface TravelMatrixRow {
+  event_id: string
+  participant_id: string
+  place_id: string
+  minutes: number
 }
 
 export interface RunRow {
@@ -115,6 +173,10 @@ export interface ScoreRow {
   fairness_score: number | null
   satisfaction_score: number | null
   quality_score: number | null
+  cost_burden_score: number | null
+  accessibility_burden_score: number | null
+  objective_score: number | null
+  score_breakdown: ScoreBreakdown | null
   label: RecommendationLabel | null
   explanation: string | null
 }
@@ -128,24 +190,78 @@ export interface Db {
   features: FeatureRow[]
   runs: RunRow[]
   scores: ScoreRow[]
+  /**
+   * Event-scoped travel times (`travel_matrix_cache`). Optional: callers written before
+   * 0017 simply do not have it, and then every lookup falls back to
+   * `restaurant_features.travel_minutes_by_participant`, exactly as `fn_travel_minutes` does.
+   */
+  travelMatrix?: TravelMatrixRow[]
 }
 
 /* -------------------------------------------------------------------------- */
 /* SQL-ish helpers                                                             */
 /* -------------------------------------------------------------------------- */
 
-/** `(jsonb->>'key')::int` — SQL NULL for a missing key or a non-numeric value. */
+/**
+ * `fn_jsonb_int(value, 'key')` (0021) — SQL NULL for a missing key or a non-numeric value.
+ * This port always behaved this way; 0021 replaced the raw `(value->>'key')::int` casts in
+ * SQL with the same rule, because a single `{"max_yen":"cheap"}` row raised
+ * invalid_text_representation and aborted the whole event's recompute. NULL is not a
+ * loophole: `x > NULL` is falsey, so an unreadable key leaves the MUST passing exactly as a
+ * missing key always did.
+ */
 function nullableInt(value: NormalizedValue, key: string): number | null {
   const raw = value[key]
   if (raw === undefined || raw === null) return null
-  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw), 10)
-  return Number.isFinite(parsed) ? Math.trunc(parsed) : null
+  // fn_jsonb_int guards the cast with `~ '^-?[0-9]+(\.[0-9]+)?$'` on the text form, so
+  // "40abc" is NULL there rather than 40 as Number.parseInt would have it. Same rule here, so
+  // the two implementations cannot disagree about a hand-written value.
+  let numeric = Number.NaN
+  if (typeof raw === 'number') numeric = raw
+  else if (/^-?\d+(\.\d+)?$/.test(String(raw))) numeric = Number(raw)
+  if (!Number.isFinite(numeric)) return null
+  const truncated = Math.trunc(numeric)
+  // `::int`: a value outside the 32-bit range is reported as absent rather than silently
+  // becoming a different number. Both implementations then leave the MUST passing, because
+  // `x > null` is falsey — the same outcome a missing key has always had.
+  if (truncated < -2147483648 || truncated > 2147483647) return null
+  return truncated
 }
 
 /** `left > right` where a NULL right-hand side makes the whole predicate NULL (falsey). */
 function exceeds(left: number, right: number | null): boolean {
   if (right === null) return false
   return left > right
+}
+
+/** `(jsonb->>'key')` — the value's text form, or null for a missing key or a JSON null. */
+function nullableText(value: NormalizedValue, key: string): string | null {
+  const raw = value[key]
+  if (raw === undefined || raw === null) return null
+  return typeof raw === 'string' ? raw : JSON.stringify(raw)
+}
+
+/**
+ * `fn_jsonb_flag(value, key)` (0021): true only for a real JSON `true`. The flag is written
+ * by `relaxedValue`, so anything else in that key is malformed and must not widen a MUST.
+ */
+function flag(value: NormalizedValue, key: string): boolean {
+  return value[key] === true
+}
+
+/**
+ * Postgres `jsonb = jsonb`: key order is not part of the value. Used to recognise a
+ * relaxation step a participant already rejected. Our relaxation values are flat objects of
+ * scalars, which is the only shape this canonicalisation has to handle.
+ */
+function sameValue(left: NormalizedValue, right: NormalizedValue): boolean {
+  const canonical = (value: NormalizedValue) =>
+    JSON.stringify(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, value[key]]),
+    )
+  return canonical(left) === canonical(right)
 }
 
 function stringArray(value: NormalizedValue, key: string): string[] | null {
@@ -169,10 +285,42 @@ function round4(value: number): number {
   return Math.round(value * 10000) / 10000
 }
 
-function travelMinutes(feature: FeatureRow): number[] {
-  return Object.values(feature.travel_minutes_by_participant).filter((value) =>
-    Number.isFinite(value),
+/** Postgres `greatest(0, least(1, x))`. */
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(1, Math.max(0, value))
+}
+
+/* -------------------------------------------------------------------------- */
+/* fn_travel_minutes                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Ports `public.fn_travel_minutes(p_event_id, p_place_id, p_participant_id)` from 0016 —
+ * the single place either implementation reads a travel time.
+ *
+ * Precedence, exactly as in SQL: the event-scoped `travel_matrix_cache` row wins, then the
+ * legacy global `restaurant_features.travel_minutes_by_participant` map, then NULL. NULL
+ * means "unknown", never "zero minutes": the global map is shared by every event, so one
+ * event's search used to silently overwrite another's (an event went 3 feasible → 0).
+ */
+export function travelMinutesFor(
+  db: Db,
+  eventId: string,
+  placeId: string,
+  participantId: string,
+): number | null {
+  const cached = db.travelMatrix?.find(
+    (row) =>
+      row.event_id === eventId &&
+      row.place_id === placeId &&
+      row.participant_id === participantId,
   )
+  if (cached && Number.isFinite(cached.minutes)) return Math.trunc(cached.minutes)
+
+  const feature = db.features.find((row) => row.place_id === placeId)
+  const fallback = feature?.travel_minutes_by_participant[participantId]
+  return typeof fallback === 'number' && Number.isFinite(fallback) ? Math.trunc(fallback) : null
 }
 
 /* -------------------------------------------------------------------------- */
@@ -230,13 +378,301 @@ export function candidateIsFeasible(
       ) {
         return false
       }
+    } else if (must.normalized_type === 'accessibility') {
+      // {"needs": string[]} against restaurant_features.accessibility_tags (0016). Same
+      // shape as dietary/allergy, and the same rule: a venue with no tags recorded is
+      // UNKNOWN, and unknown is not step-free. Before 0021 this MUST had no branch at all,
+      // so 「車椅子で入れる店」 was silently satisfied while also being un-negotiable.
+      const needs = stringArray(value, 'needs')
+      const venueTags = candidate.accessibility_tags ?? []
+      if (
+        needs === null ||
+        needs.length === 0 ||
+        venueTags.length === 0 ||
+        !contains(venueTags, needs)
+      ) {
+        return false
+      }
+    } else if (must.normalized_type === 'smoking') {
+      // {"preference": "non_smoking"|"smoking_ok"}, plus "accept_unknown": true once the
+      // participant has accepted the relaxation step (see relaxedValue). An unreadable
+      // preference is not a satisfied one, an unconfirmed venue only passes with the flag,
+      // and a venue KNOWN to have the other policy always fails.
+      const preference = nullableText(value, 'preference')
+      const policy = candidate.smoking_policy ?? null
+      if (
+        preference === null ||
+        (preference !== 'non_smoking' && preference !== 'smoking_ok') ||
+        (policy === null && !flag(value, 'accept_unknown')) ||
+        (policy !== null && policy !== preference)
+      ) {
+        return false
+      }
     } else if (must.normalized_type === 'travel_time') {
-      const minutes = candidate.travel_minutes_by_participant[must.participant_id] ?? 9999
+      // coalesce(fn_travel_minutes(...), 9999): an unknown travel time fails a travel MUST
+      // rather than passing it, and the lookup is event-scoped (0016).
+      const minutes = travelMinutesFor(db, eventId, placeId, must.participant_id) ?? 9999
       if (exceeds(minutes, nullableInt(value, 'max_minutes'))) return false
     }
   }
 
   return true
+}
+
+/* -------------------------------------------------------------------------- */
+/* Scoring constants — fn_banded_score / fn_quality_signal / fn_cost_burden    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Scores derived from COMPLETE data live in [0.2, 1.0]; anything with a gap is squeezed
+ * into [0, 0.2). Ports `fn_banded_score` (0016), and it is how "missing data must never
+ * win" is enforced structurally rather than by hoping the arithmetic works out. The old
+ * `round(1.0 / (1.0 + coalesce(travel_max - travel_min, 0)), 4)` handed a perfect 1.0000
+ * to a venue with one (or zero) known travel times, beating a venue with a real
+ * 5/30/75-minute spread at 0.0141.
+ */
+const COMPLETE_DATA_FLOOR = 0.2
+
+/** 30 minutes between the luckiest and the unluckiest participant halves fairness credit. */
+const TRAVEL_SPREAD_HALF_LIFE_MINUTES = 30
+
+/** An average one-way trip of two hours earns no access credit at all. */
+const TRAVEL_ACCESS_HORIZON_MINUTES = 120
+
+/**
+ * Bayesian prior for the quality signal: every venue starts out as "an average Tokyo
+ * izakaya with 50 reviews", so a 5.0 from 3 reviews cannot beat a 4.3 from 800.
+ */
+const QUALITY_PRIOR_RATING = 3.9
+const QUALITY_PRIOR_REVIEWS = 50
+const RATING_MAX = 5
+
+/**
+ * Only used when nobody stated a budget MUST, so the `cost` objective still has a signal
+ * to work with: a typical Tokyo 飲み会 per-head budget.
+ */
+const DEFAULT_BUDGET_REFERENCE_YEN = 6000
+
+/**
+ * Objective weight table — ports `fn_objective_weights` (0016). Each row sums to 1.0.
+ *
+ *   objective  | travel_fairness | travel_access | satisfaction | quality | cost_fit | accessibility_fit
+ *   -----------+-----------------+---------------+--------------+---------+----------+------------------
+ *   balanced   |            0.20 |          0.15 |         0.25 |    0.20 |     0.10 |              0.10
+ *   access     |            0.25 |          0.35 |         0.10 |    0.05 |     0.10 |              0.15
+ *   cost       |            0.10 |          0.10 |         0.15 |    0.10 |     0.45 |              0.10
+ *   experience |            0.10 |          0.10 |         0.25 |    0.35 |     0.10 |              0.10
+ *   custom     | = balanced
+ *
+ * WHY these numbers:
+ *  - the 幹事's objective may only re-emphasize, never override: feasibility is decided by
+ *    fn_candidate_is_feasible before any of this runs, so no weight can admit a venue that
+ *    breaks a MUST;
+ *  - every objective keeps a floor of 0.10 under travel_fairness and accessibility_fit, so
+ *    "cheap" or "impressive" can never be bought by dumping the burden on one participant;
+ *  - `access` splits its emphasis between raw proximity (travel_access) and equity
+ *    (travel_fairness), and lifts accessibility_fit — step-free access is access too;
+ *  - `custom` has no bespoke weights yet (nothing in the UI can express them), so it
+ *    deliberately resolves to `balanced` instead of inventing a fifth profile.
+ */
+const BALANCED_WEIGHTS: ObjectiveWeights = {
+  travel_fairness: 0.2,
+  travel_access: 0.15,
+  satisfaction: 0.25,
+  quality: 0.2,
+  cost_fit: 0.1,
+  accessibility_fit: 0.1,
+}
+
+export const OBJECTIVE_WEIGHTS: Record<EventObjective, ObjectiveWeights> = {
+  balanced: BALANCED_WEIGHTS,
+  access: {
+    travel_fairness: 0.25,
+    travel_access: 0.35,
+    satisfaction: 0.1,
+    quality: 0.05,
+    cost_fit: 0.1,
+    accessibility_fit: 0.15,
+  },
+  cost: {
+    travel_fairness: 0.1,
+    travel_access: 0.1,
+    satisfaction: 0.15,
+    quality: 0.1,
+    cost_fit: 0.45,
+    accessibility_fit: 0.1,
+  },
+  experience: {
+    travel_fairness: 0.1,
+    travel_access: 0.1,
+    satisfaction: 0.25,
+    quality: 0.35,
+    cost_fit: 0.1,
+    accessibility_fit: 0.1,
+  },
+  custom: BALANCED_WEIGHTS,
+}
+
+const SCALE_NOTE = {
+  components: '0..1, higher is better',
+  burdens: '0..1, higher is worse',
+}
+
+/** `fn_banded_score(p_coverage, p_credit)`: complete data in [0.2,1], gaps in [0,0.2). */
+function bandedScore(coverage: number, credit: number): number {
+  const value = clamp01(credit)
+  if (coverage >= 1) return round4(COMPLETE_DATA_FLOOR + (1 - COMPLETE_DATA_FLOOR) * value)
+  return round4(COMPLETE_DATA_FLOOR * clamp01(coverage) * value)
+}
+
+/* -------------------------------------------------------------------------- */
+/* fn_travel_profile / fn_quality_signal / fn_cost_burden / fn_accessibility_burden */
+/* -------------------------------------------------------------------------- */
+
+/** Ports `fn_travel_profile`: travel equity and proximity for one venue in one event. */
+function travelProfile(db: Db, eventId: string, placeId: string): ScoreBreakdown['travel'] {
+  const participants = db.participants.filter((row) => row.event_id === eventId)
+  const known: number[] = []
+  for (const participant of participants) {
+    const minutes = travelMinutesFor(db, eventId, placeId, participant.id)
+    if (minutes !== null) known.push(minutes)
+  }
+
+  const total = participants.length
+  const spread = known.length >= 2 ? Math.max(...known) - Math.min(...known) : 0
+  const average =
+    known.length > 0 ? known.reduce((sum, value) => sum + value, 0) / known.length : null
+  // Coverage is over the event's participants, not over the JSONB map: a stale key from
+  // another event must not count as data about this group.
+  const coverage = total === 0 ? 1 : known.length / total
+  const fairnessCredit = 1 / (1 + spread / TRAVEL_SPREAD_HALF_LIFE_MINUTES)
+  const accessCredit = average === null ? 0 : 1 - average / TRAVEL_ACCESS_HORIZON_MINUTES
+
+  return {
+    participants: total,
+    known: known.length,
+    spread_minutes: spread,
+    average_minutes: average === null ? null : round4(average),
+    complete: coverage >= 1,
+    fairness: bandedScore(coverage, fairnessCredit),
+    access: bandedScore(coverage, accessCredit),
+  }
+}
+
+/**
+ * Ports `fn_quality_signal`: a review-volume-adjusted quality signal.
+ *
+ * quality = shrink(rating, n) / 5 with shrink(r, n) = (50 * 3.9 + r * n) / (50 + n), so a
+ * 5.0 from 3 reviews lands at 0.79 while a 4.3 from 800 lands at 0.86. Google's scale
+ * starts at 1.0 and the field is absent for unrated places, so `rating <= 0` or a zero
+ * review count means "no signal", not "terrible": those fall back to the historical
+ * atmosphere-tag proxy, capped at COMPLETE_DATA_FLOOR so an unrated venue can never
+ * outscore a rated one (a rated venue is always > 0.2 because shrink() > 1).
+ */
+function qualitySignal(feature: FeatureRow): ScoreBreakdown['quality'] {
+  const rating =
+    typeof feature.rating === 'number' && Number.isFinite(feature.rating) ? feature.rating : null
+  const count =
+    typeof feature.user_rating_count === 'number' && Number.isFinite(feature.user_rating_count)
+      ? Math.trunc(feature.user_rating_count)
+      : null
+  const tags = Math.min(feature.atmosphere_tags.length, 3)
+
+  const shared = {
+    rating,
+    user_rating_count: count,
+    prior_rating: QUALITY_PRIOR_RATING,
+    prior_reviews: QUALITY_PRIOR_REVIEWS,
+    atmosphere_tags: tags,
+  }
+
+  if (rating !== null && rating > 0 && count !== null && count > 0) {
+    const clamped = Math.min(RATING_MAX, Math.max(1, rating))
+    const shrunk =
+      (QUALITY_PRIOR_REVIEWS * QUALITY_PRIOR_RATING + clamped * count) /
+      (QUALITY_PRIOR_REVIEWS + count)
+    const method: QualityMethod = 'rating_bayesian_shrunk'
+    return { score: round4(clamp01(shrunk / RATING_MAX)), method, ...shared }
+  }
+
+  const method: QualityMethod = 'atmosphere_tag_proxy'
+  return { score: round4(COMPLETE_DATA_FLOOR * (tags / 3)), method, ...shared }
+}
+
+/**
+ * Ports `fn_cost_burden`: how unfairly the price sits against the participants' budget
+ * MUSTs. The tightest budget in the group decides — a venue at the very top of it burdens
+ * that one person far more than a venue comfortably under everyone's ceiling — and an
+ * unknown price is scored as the worst case rather than as free.
+ */
+function costBurden(db: Db, eventId: string, feature: FeatureRow): ScoreBreakdown['cost'] {
+  const limits = db.constraints
+    .filter(
+      (constraint) =>
+        constraint.event_id === eventId &&
+        constraint.kind === 'MUST' &&
+        constraint.normalized_type === 'budget',
+    )
+    .map((constraint) => nullableInt(constraint.normalized_value, 'max_yen'))
+    .filter((value): value is number => value !== null && value > 0)
+
+  const price = feature.price_yen_estimate
+  const tightest = limits.length > 0 ? Math.min(...limits) : null
+  const reference = tightest ?? DEFAULT_BUDGET_REFERENCE_YEN
+  const burden = price === null ? 1 : clamp01(price / reference)
+
+  return {
+    burden: round4(burden),
+    price_yen: price,
+    tightest_budget_yen: tightest,
+    budget_musts: limits.length,
+    reference_yen: reference,
+  }
+}
+
+/**
+ * Ports `fn_accessibility_burden`. Both MUST and WANT accessibility rows count. Since 0021 a
+ * MUST is also a hard gate in candidateIsFeasible, so this no longer carries the whole
+ * weight of the requirement — but a WANT still has nowhere else to be honoured, and among
+ * venues that all clear the MUST this is what orders "meets more of the group's needs" first.
+ *
+ * A venue with no accessibility data at all is treated as UNKNOWN — full burden — never as
+ * "supported". The worst-affected request set decides, so one participant whose needs are
+ * entirely unmet is not averaged away by four who need nothing.
+ */
+function accessibilityBurden(
+  db: Db,
+  eventId: string,
+  feature: FeatureRow,
+): ScoreBreakdown['accessibility'] {
+  const venueTags = feature.accessibility_tags ?? []
+  const requests = db.constraints
+    .filter(
+      (constraint) =>
+        constraint.event_id === eventId && constraint.normalized_type === 'accessibility',
+    )
+    .map((constraint) => stringArray(constraint.normalized_value, 'needs') ?? [])
+    .filter((needs) => needs.length > 0)
+
+  const needs = [...new Set(requests.flat())].sort()
+  const unmet = needs.filter((need) => !venueTags.includes(need))
+  const burden =
+    requests.length === 0
+      ? 0
+      : Math.max(
+          ...requests.map(
+            (set) => set.filter((need) => !venueTags.includes(need)).length / set.length,
+          ),
+        )
+
+  return {
+    burden: round4(burden),
+    needs,
+    unmet_needs: unmet,
+    venue_tags: venueTags,
+    data_present: venueTags.length > 0,
+    requests: requests.length,
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -253,6 +689,11 @@ export function scoreFeasibleCandidates(
     (constraint) => constraint.event_id === eventId && constraint.kind === 'WANT',
   )
   const wantCount = wants.length
+
+  // The 幹事's objective decides emphasis only; the candidate set was already filtered by
+  // fn_candidate_is_feasible, so weights can never resurrect an infeasible venue.
+  const objective = db.events.find((event) => event.id === eventId)?.objective ?? 'balanced'
+  const weights = OBJECTIVE_WEIGHTS[objective] ?? BALANCED_WEIGHTS
 
   const rows = db.restaurants
     .map((restaurant) => db.features.find((feature) => feature.place_id === restaurant.place_id))
@@ -274,23 +715,54 @@ export function scoreFeasibleCandidates(
         return false
       }).length
 
-      const minutes = travelMinutes(feature)
-      const travelMax = minutes.length > 0 ? Math.max(...minutes) : null
-      const travelMin = minutes.length > 0 ? Math.min(...minutes) : null
-      const spread = travelMax !== null && travelMin !== null ? travelMax - travelMin : 0
+      const travel = travelProfile(db, eventId, feature.place_id)
+      const quality = qualitySignal(feature)
+      const cost = costBurden(db, eventId, feature)
+      const accessibility = accessibilityBurden(db, eventId, feature)
 
-      return {
-        feature,
-        wantsMatched,
-        fairness: round4(1 / (1 + spread)),
+      const components: Record<ScoreDimension, number> = {
+        travel_fairness: travel.fairness,
+        travel_access: travel.access,
         satisfaction: wantCount === 0 ? 1 : round4(wantsMatched / wantCount),
-        quality: round4(Math.min(feature.atmosphere_tags.length, 3) / 3),
+        quality: quality.score,
+        cost_fit: round4(1 - cost.burden),
+        accessibility_fit: round4(1 - accessibility.burden),
       }
+      const contributions = Object.fromEntries(
+        SCORE_DIMENSIONS.map((dimension) => [
+          dimension,
+          round4(weights[dimension] * components[dimension]),
+        ]),
+      ) as Record<ScoreDimension, number>
+      const objectiveScore = round4(
+        SCORE_DIMENSIONS.reduce(
+          (sum, dimension) => sum + weights[dimension] * components[dimension],
+          0,
+        ),
+      )
+
+      const breakdown: ScoreBreakdown = {
+        version: 1,
+        objective,
+        scale: { ...SCALE_NOTE },
+        weights: { ...weights },
+        components,
+        contributions,
+        objective_score: objectiveScore,
+        travel,
+        quality,
+        cost,
+        accessibility,
+      }
+
+      return { feature, components, quality, cost, accessibility, objectiveScore, breakdown }
     })
-    // order by c.wants_matched desc, c.place_id
+    // order by objective_score desc, place_id — the objective now decides which of the
+    // feasible venues make the 3–5 cards, not just the raw WANT count.
     .sort(
       (a, b) =>
-        b.wantsMatched - a.wantsMatched || a.feature.place_id.localeCompare(b.feature.place_id),
+        b.objectiveScore - a.objectiveScore ||
+        a.feature.place_id.localeCompare(b.feature.place_id),
     )
     .slice(0, 5)
 
@@ -299,55 +771,71 @@ export function scoreFeasibleCandidates(
       id: newId(),
       run_id: runId,
       restaurant_place_id: row.feature.place_id,
-      fairness_score: row.fairness,
-      satisfaction_score: row.satisfaction,
-      quality_score: row.quality,
+      fairness_score: row.components.travel_fairness,
+      satisfaction_score: row.components.satisfaction,
+      quality_score: row.quality.score,
+      cost_burden_score: row.cost.burden,
+      accessibility_burden_score: row.accessibility.burden,
+      objective_score: row.objectiveScore,
+      score_breakdown: row.breakdown,
       label: null,
       explanation: null,
     })
   }
 
-  const unlabelled = () => db.scores.filter((score) => score.run_id === runId && score.label === null)
-  const featureFor = (score: ScoreRow) =>
-    db.features.find((feature) => feature.place_id === score.restaurant_place_id)
-  const averageTravel = (score: ScoreRow): number | null => {
-    const feature = featureFor(score)
-    if (!feature) return null
-    const minutes = travelMinutes(feature)
-    if (minutes.length === 0) return null
-    return minutes.reduce((sum, value) => sum + value, 0) / minutes.length
-  }
+  assignHonestLabels(db, runId)
+}
 
-  /** `order by <metric> ... , restaurant_place_id limit 1` then `set label = ...`. */
-  const assign = (
-    label: RecommendationLabel,
-    compare: (a: ScoreRow, b: ScoreRow) => number,
-  ): void => {
-    const [winner] = unlabelled().sort(
-      (a, b) => compare(a, b) || a.restaurant_place_id.localeCompare(b.restaurant_place_id),
-    )
+/* -------------------------------------------------------------------------- */
+/* Labels                                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The metric each badge claims, in the fixed order labels are considered. Every metric is
+ * "higher is better"; `best_value` reads cost_fit rather than the raw price because that is
+ * the same ordering measured against the group's tightest budget, and it makes an unknown
+ * price ineligible instead of merely last.
+ */
+const LABEL_METRICS: Array<[RecommendationLabel, (row: ScoreRow) => number | null]> = [
+  ['fairest', (row) => row.fairness_score],
+  ['best_access', (row) => row.score_breakdown?.components.travel_access ?? null],
+  ['best_value', (row) => row.score_breakdown?.components.cost_fit ?? null],
+  ['best_experience', (row) => row.quality_score],
+  ['crowd_pleaser', (row) => row.satisfaction_score],
+]
+
+/**
+ * Honest label assignment, ported from the label loop in 0016.
+ *
+ * The old greedy pass gave each label to the best STILL-UNLABELLED row, so the badges lied:
+ * a venue with a 75-minute commute for one participant was labelled `best_access` only
+ * because the better venue had already taken `fairest`. Now a badge is written only when the
+ * row genuinely leads that metric:
+ *  - a row with no value for the metric can never lead it;
+ *  - if every row has the same value the metric separates nothing, so the badge is dropped
+ *    — there is no "most X" to claim;
+ *  - ties are legitimate co-leaders; the first by place_id that is still unlabelled takes it;
+ *  - if every genuine leader already carries a badge, the label goes unused rather than
+ *    being handed to a row that does not deserve it. Fewer than five labels is expected,
+ *    and the UI already renders a null label as the neutral 「おすすめ」 badge.
+ */
+function assignHonestLabels(db: Db, runId: string): void {
+  const rows = db.scores.filter((score) => score.run_id === runId)
+
+  for (const [label, metric] of LABEL_METRICS) {
+    const values = rows.map(metric).filter((value): value is number => value !== null)
+    if (values.length === 0) continue
+
+    const best = Math.max(...values)
+    const leaders = rows.filter((row) => metric(row) === best)
+    if (leaders.length === rows.length) continue
+
+    const winner = leaders
+      .slice()
+      .sort((a, b) => a.restaurant_place_id.localeCompare(b.restaurant_place_id))
+      .find((row) => row.label === null)
     if (winner) winner.label = label
   }
-
-  const descending = (pick: (score: ScoreRow) => number | null) => (a: ScoreRow, b: ScoreRow) =>
-    (pick(b) ?? 0) - (pick(a) ?? 0)
-
-  /** `asc nulls last` */
-  const ascendingNullsLast =
-    (pick: (score: ScoreRow) => number | null) => (a: ScoreRow, b: ScoreRow) => {
-      const left = pick(a)
-      const right = pick(b)
-      if (left === null && right === null) return 0
-      if (left === null) return 1
-      if (right === null) return -1
-      return left - right
-    }
-
-  assign('fairest', descending((score) => score.fairness_score))
-  assign('best_access', ascendingNullsLast(averageTravel))
-  assign('best_value', ascendingNullsLast((score) => featureFor(score)?.price_yen_estimate ?? null))
-  assign('best_experience', descending((score) => score.quality_score))
-  assign('crowd_pleaser', descending((score) => score.satisfaction_score))
 }
 
 /* -------------------------------------------------------------------------- */
@@ -388,7 +876,31 @@ export function recomputeFeasibility(
 /* Relaxation                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** The single relaxation step the engine is willing to propose, per constraint type. */
+/**
+ * The single relaxation step the engine is willing to propose, per constraint type. Ports
+ * `fn_relaxed_value` (0021), which is also what `fn_propose_relaxation` compares a REJECTED
+ * proposal against — so "what would we offer" and "what did we offer" cannot drift.
+ *
+ *   room         private → semi_private (a divider instead of a door)
+ *   travel_time  +10 minutes
+ *   budget       +500 yen
+ *   smoking      keep the preference, accept an UNCONFIRMED venue
+ *
+ * WHY the smoking step is `accept_unknown` and nothing else: no provider fills
+ * `smoking_policy`, so a fail-closed smoking MUST is unsatisfiable and — with no step —
+ * `countUnlockedIfRelaxed` would return 0, no proposal would ever be offered, and the group
+ * would be left with zero candidates and no question to answer. What actually blocks those
+ * venues is missing data, not a known conflict, so the honest question is 「禁煙が確認できて
+ * いないお店も候補に入れてよいですか？」 (the constraint already carries
+ * verification_requirement = 'recommended', the UI's cue to suggest phoning the venue). It
+ * never trades away what was asked for: a venue known to be 喫煙可 still fails a
+ * non_smoking MUST afterwards. accessibility deliberately has NO step — it stays on
+ * NEVER_RELAXED, because accepting an unverified step-free entrance is accepting the risk of
+ * not getting in; there the escape hatch is human verification, not a negotiation.
+ *
+ * A type with no step returns its value unchanged, so countUnlockedIfRelaxed measures a
+ * no-op and reports 0 unlocked.
+ */
 export function relaxedValue(constraint: ConstraintRow): NormalizedValue {
   switch (constraint.normalized_type) {
     case 'room':
@@ -401,6 +913,14 @@ export function relaxedValue(constraint: ConstraintRow): NormalizedValue {
       const current = nullableInt(constraint.normalized_value, 'max_yen')
       return { max_yen: (current ?? 0) + 500 }
     }
+    case 'smoking':
+      // `(value->>'preference')` is carried over verbatim: an unreadable preference stays
+      // unreadable, so the relaxed value is still infeasible and never gets proposed. We do
+      // not invent a preference on somebody's behalf.
+      return {
+        preference: nullableText(constraint.normalized_value, 'preference'),
+        accept_unknown: true,
+      }
     default:
       return constraint.normalized_value
   }
@@ -433,18 +953,54 @@ export function countUnlockedIfRelaxed(db: Db, eventId: string, constraintId: st
  */
 const NEVER_RELAXED: NormalizedType[] = ['allergy', 'dietary', 'accessibility']
 
+/**
+ * Ports `fn_propose_relaxation` (0021), including its three idempotency rules:
+ *
+ *  1. an OPEN proposal is returned, never duplicated. Pressing 「条件に合うお店を探す」 four
+ *     times while feasible = 0 used to write four identical PROPOSED rows and ask the same
+ *     participant the same question four times, which the PRD forbids;
+ *  2. if the open proposal targets a DIFFERENT constraint than the one now judged best, the
+ *     open one still wins and nothing is written. Retargeting would withdraw a question
+ *     somebody is looking at, or put a second question to a second person while the first is
+ *     unanswered — and since each unlocked_count assumes every other MUST is unchanged, two
+ *     acceptances relax more than the group needed. Answering the open proposal takes it out
+ *     of PROPOSED and the next call re-ranks from scratch, so the better target is deferred
+ *     one round, not dropped;
+ *  3. a step already REJECTED is never offered again ("on rejection, keep the MUST and do not
+ *     pressure repeatedly"). Matched on (constraint, proposed value) rather than the
+ *     constraint alone, so "no" means no to THAT question: if the participant later edits
+ *     their own MUST the step differs and asking it is a new question, and a single "no" does
+ *     not blacklist the constraint forever and dead-end the event.
+ *
+ * In SQL rule 1 is additionally a partial unique index on `negotiations (event_id) where
+ * status = 'PROPOSED'`, so a concurrent double-press cannot slip past the check. There is no
+ * concurrency here (one JS event loop, one localStorage snapshot), so the check is the whole
+ * mechanism.
+ */
 export function proposeRelaxation(
   db: Db,
   eventId: string,
   newId: () => string,
   now: () => string,
 ): string | null {
+  // Reuse before propose.
+  const open = db.negotiations
+    .filter((row) => row.event_id === eventId && row.status === 'PROPOSED')
+    .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))[0]
+  if (open) return open.id
+
   const candidates = db.constraints
     .filter(
       (constraint) =>
         constraint.event_id === eventId &&
         constraint.kind === 'MUST' &&
-        !NEVER_RELAXED.includes(constraint.normalized_type),
+        !NEVER_RELAXED.includes(constraint.normalized_type) &&
+        !db.negotiations.some(
+          (row) =>
+            row.constraint_id === constraint.id &&
+            row.status === 'REJECTED' &&
+            sameValue(row.proposed_value, relaxedValue(constraint)),
+        ),
     )
     .sort((a, b) => a.id.localeCompare(b.id))
 

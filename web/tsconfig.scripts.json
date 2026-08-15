@@ -1,0 +1,20 @@
+{
+  // scripts/verify-engine.ts is bundled by Vite (see vite.verify.config.ts), so it uses
+  // bundler-style extensionless imports rather than nodenext resolution. It gets its own
+  // config so its fixtures are still typechecked against the real row types — otherwise
+  // adding a required column silently leaves every test fixture stale.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["scripts/**/*.ts"]
+}

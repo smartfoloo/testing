@@ -48,8 +48,40 @@ export type EventStatus = 'collecting' | 'negotiating' | 'ready' | 'closed'
 export type ParticipantRole = 'organizer' | 'participant'
 
 export type TravelReference = 'office' | 'home' | 'station' | 'doesnt_matter'
-/** CreateEventView/JoinEventView only offer these three; `doesnt_matter` is not selectable. */
+/**
+ * PRD §4 lists all four as valid travel references. `doesnt_matter` imposes no travel
+ * constraint, so the backend excludes those participants from the origins set.
+ */
+export const TRAVEL_REFERENCES: TravelReference[] = ['office', 'home', 'station', 'doesnt_matter']
+/** Kept for callers that only offer the three location-bearing options. */
 export const SELECTABLE_TRAVEL_REFERENCES: TravelReference[] = ['office', 'home', 'station']
+
+/** A place candidate from the `place-search` Edge Function, for the travel-reference picker. */
+export interface PlaceSuggestion {
+  place_id: string
+  name: string
+  address: string | null
+}
+
+/**
+ * A participant's own travel reference: the UI category and the place it stands for.
+ * PRD §4 calls this context — "not itself a constraint; changeable later" — so it is
+ * readable and writable after joining, through `fn_set_travel_reference` (0020).
+ *
+ * `travel_reference_place_id` is what actually gives the participant a travel origin.
+ * Null means the backend has no origin for them and reports them as unresolved rather
+ * than geocoding the word 「会社」.
+ */
+export interface ParticipantTravel {
+  travel_reference: TravelReference | null
+  travel_reference_place_id: string | null
+}
+
+/** How sensitive a requirement is. Advisory metadata; the participant still owns visibility. */
+export type ConstraintSensitivity = 'normal' | 'sensitive' | 'highly_sensitive'
+
+/** Whether a MUST needs external confirmation before it can be trusted (PRD §11). */
+export type VerificationRequirement = 'none' | 'recommended' | 'required'
 
 /** Response of the `llm-assist` Edge Function in `parse` mode. */
 export interface ParseResult {
@@ -58,6 +90,26 @@ export interface ParseResult {
   suggested_visibility: Exclude<ConstraintVisibility, 'PRIVATE'>
   confidence: number
   needs_clarification: boolean
+  /**
+   * The participant's own wording that the structured taxonomy did not capture. Kept so
+   * P1 semantic matching has something to embed; withheld from the sanitized feed because
+   * it is verbatim human text.
+   */
+  semantic_remainder: string | null
+  /** Server-assigned from normalized_type — the model is not trusted with these. */
+  sensitivity: ConstraintSensitivity
+  verification_requirement: VerificationRequirement
+}
+
+/** Payload of `fn_get_collection_readiness` (PRD §12 progressive search). */
+export interface CollectionReadiness {
+  participant_count: number
+  responded_count: number
+  threshold_count: number
+  threshold_met: boolean
+  provisional_ready: boolean
+  preferences_closed: boolean
+  preferences_closed_at: string | null
 }
 
 /**
@@ -141,6 +193,89 @@ export interface RecommendationRun {
   feasible_count: number
 }
 
+/**
+ * The dimensions the ordering score is built from (0016_scoring_and_objective.sql).
+ * All six are normalized to 0..1 where **higher is better**, so the objective weights
+ * can simply be a weighted sum. Burdens (the inverse) are stored separately.
+ */
+export type ScoreDimension =
+  | 'travel_fairness'
+  | 'travel_access'
+  | 'satisfaction'
+  | 'quality'
+  | 'cost_fit'
+  | 'accessibility_fit'
+
+export const SCORE_DIMENSIONS: ScoreDimension[] = [
+  'travel_fairness',
+  'travel_access',
+  'satisfaction',
+  'quality',
+  'cost_fit',
+  'accessibility_fit',
+]
+
+/** Weight per dimension for one `events.objective`; the weights of an objective sum to 1. */
+export type ObjectiveWeights = Record<ScoreDimension, number>
+
+/**
+ * Which quality signal was actually available for a venue. `rating_bayesian_shrunk` is
+ * the real signal; `atmosphere_tag_proxy` is the legacy tag-richness stand-in used when
+ * the provider gave us no rating, and it is deliberately capped below any real rating.
+ */
+export type QualityMethod = 'rating_bayesian_shrunk' | 'atmosphere_tag_proxy'
+
+/**
+ * `recommendation_scores.score_breakdown`. PRD §9: never present one opaque universal
+ * score — every component, the weights that were applied to it, and the provenance of
+ * the quality signal are stored so the UI can show the arithmetic. Keys are stable and
+ * snake_case because both the SQL engine and this TS port write them.
+ */
+export interface ScoreBreakdown {
+  version: number
+  objective: EventObjective
+  /** Reading instructions for the numbers below, so no caller has to guess a direction. */
+  scale: { components: string; burdens: string }
+  weights: ObjectiveWeights
+  components: Record<ScoreDimension, number>
+  /** `weights[dimension] * components[dimension]`, i.e. what each dimension contributed. */
+  contributions: Record<ScoreDimension, number>
+  objective_score: number
+  travel: {
+    participants: number
+    known: number
+    spread_minutes: number
+    average_minutes: number | null
+    complete: boolean
+    fairness: number
+    access: number
+  }
+  quality: {
+    score: number
+    method: QualityMethod
+    rating: number | null
+    user_rating_count: number | null
+    prior_rating: number
+    prior_reviews: number
+    atmosphere_tags: number
+  }
+  cost: {
+    burden: number
+    price_yen: number | null
+    tightest_budget_yen: number | null
+    budget_musts: number
+    reference_yen: number
+  }
+  accessibility: {
+    burden: number
+    needs: string[]
+    unmet_needs: string[]
+    venue_tags: string[]
+    data_present: boolean
+    requests: number
+  }
+}
+
 export interface RecommendationScore {
   id: string
   run_id: string
@@ -148,6 +283,13 @@ export interface RecommendationScore {
   fairness_score: number | null
   satisfaction_score: number | null
   quality_score: number | null
+  /** 0..1, higher = more disproportionate cost burden (the inverse of `cost_fit`). */
+  cost_burden_score: number | null
+  /** 0..1, higher = more unmet/unknown accessibility needs (inverse of `accessibility_fit`). */
+  accessibility_burden_score: number | null
+  /** The objective-weighted composite the cards are ordered by. */
+  objective_score: number | null
+  score_breakdown: ScoreBreakdown | null
   label: RecommendationLabel | null
   explanation: string | null
 }

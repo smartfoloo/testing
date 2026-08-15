@@ -6,6 +6,26 @@
 // `rating` silently upgrades the call to a pricier billing tier.
 // Places content other than place_id is short-lived by policy, so
 // restaurant_features is a refreshable cache (fetched_at), not a warehouse.
+//
+// This function is read-through cached and event-scoped:
+//   * candidates belong to an event (event_restaurant_candidates), so a venue
+//     discovered for an unrelated event across Tokyo is not silently a candidate
+//     here;
+//   * travel times belong to an (event, participant, place) triple
+//     (travel_matrix_cache), so one event can no longer overwrite another
+//     event's commute times — the bug that took an event from 3 feasible venues
+//     to 0 with no error;
+//   * discovery re-runs only when the cache is stale or the meeting zones moved,
+//     and Routes is asked only for the legs we are actually missing;
+//   * a resolved origin is required only by the work that needs one — the
+//     meeting zones discovery searches around, and the legs Routes has to fetch.
+//     A fully cached event therefore succeeds with zero resolved origins, and a
+//     partially resolved one searches around the origins it has instead of
+//     failing; only a run that must call the providers with nowhere to search is
+//     an error (422, naming the participants it could not place);
+//   * raw provider payloads land in restaurant_source_records and provider
+//     failures land in provider_incidents instead of vanishing into a `return
+//     []`.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
@@ -23,6 +43,36 @@ const CORS_HEADERS = {
     "authorization, x-client-info, apikey, content-type",
 };
 
+// --- Cache policy ------------------------------------------------------------
+
+// Discovery (Places text search + Hot Pepper) is the expensive half and its
+// answer barely moves inside one evening's planning session, so a hit inside
+// this window skips both providers completely. Most participant edits then
+// rerun only the local filtering/ranking (PRD §10).
+const DISCOVERY_TTL_MINUTES = 6 * 60;
+// Scheduled transit durations move even less than the venue list, and a
+// (event, participant, place) leg is only invalidated by that participant
+// changing their travel reference — which moves the meeting zones and forces a
+// rediscovery anyway.
+const TRAVEL_TTL_MINUTES = 24 * 60;
+// The one thing that must re-run external discovery is the search space itself
+// shifting or expanding (PRD §12). A meeting zone that moved further than this
+// from the zone we last searched is a material shift; ~0.01° of latitude is
+// roughly 1.1 km, comfortably more than the 0.003° dedupe used when the zones
+// are built and comfortably less than a different neighbourhood.
+const ZONE_SHIFT_TOLERANCE_DEG = 0.01;
+
+// computeRouteMatrix bills and caps per element (origins × destinations). The
+// documented cap is 625 elements for most modes but only 100 for TRANSIT, and
+// 3 zones × 10 places × N participants blows past that without batching, so the
+// batcher always uses the TRANSIT number rather than the driving headroom.
+const ROUTES_MAX_ELEMENTS_PER_REQUEST = 100;
+const ROUTES_MAX_ORIGINS_PER_REQUEST = 50;
+
+// Bound what a failing provider can write into a row or a response body.
+const INCIDENT_MESSAGE_MAX_CHARS = 400;
+const INCIDENT_SUMMARY_MAX = 10;
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -37,7 +87,7 @@ interface LatLng {
 
 interface ParticipantRow {
   id: string;
-  travel_reference: string;
+  travel_reference: string | null;
   travel_reference_place_id: string | null;
 }
 
@@ -51,109 +101,215 @@ interface Candidate {
   dietary_tags: string[];
   allergy_safe_tags: string[];
   atmosphere_tags: string[];
+  rating: number | null;
+  user_rating_count: number | null;
   location: LatLng | null;
+}
+
+type Provider = "google_places" | "google_routes" | "hotpepper";
+
+interface ProviderIncident {
+  provider: Provider;
+  operation: string;
+  status_code: number | null;
+  message: string;
+}
+
+interface SourceRecord {
+  place_id: string;
+  provider: Provider;
+  source_id: string;
+  payload: unknown;
+}
+
+interface Origin {
+  participantId: string;
+  location: LatLng;
+}
+
+// --- Provider failures -------------------------------------------------------
+
+// A dead provider must never break the event, but it must not be invisible
+// either: every non-ok response and every thrown fetch becomes one of these.
+function recordIncident(
+  incidents: ProviderIncident[],
+  provider: Provider,
+  operation: string,
+  statusCode: number | null,
+  message: string,
+): void {
+  incidents.push({
+    provider,
+    operation,
+    status_code: statusCode,
+    message: scrubSecrets(message),
+  });
+}
+
+// Provider keys are request-scoped secrets. Hot Pepper takes its key in the
+// query string, so an error body or an exception message can echo it back.
+function scrubSecrets(text: string): string {
+  let out = text;
+  for (
+    const secret of [
+      GOOGLE_PLACES_API_KEY,
+      GOOGLE_ROUTES_API_KEY,
+      HOTPEPPER_API_KEY,
+    ]
+  ) {
+    if (secret.length > 0) out = out.split(secret).join("[redacted]");
+  }
+  return out.slice(0, INCIDENT_MESSAGE_MAX_CHARS);
+}
+
+async function bodyText(res: Response): Promise<string> {
+  try {
+    return await res.text();
+  } catch {
+    return "";
+  }
 }
 
 // --- Google Places ---------------------------------------------------------
 
-async function placeLocation(placeId: string): Promise<LatLng | null> {
-  const res = await fetch(
-    `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
-    {
-      headers: {
-        "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
-        "X-Goog-FieldMask": "location",
+async function placeLocation(
+  placeId: string,
+  incidents: ProviderIncident[],
+): Promise<LatLng | null> {
+  try {
+    const res = await fetch(
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
+      {
+        headers: {
+          "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+          "X-Goog-FieldMask": "location",
+        },
       },
-    },
-  );
-  if (!res.ok) return null;
-  const data = await res.json();
-  const loc = data?.location;
-  if (typeof loc?.latitude !== "number") return null;
-  return { lat: loc.latitude, lng: loc.longitude };
-}
-
-async function geocodeText(text: string): Promise<LatLng | null> {
-  const res = await fetch(
-    "https://places.googleapis.com/v1/places:searchText",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
-        "X-Goog-FieldMask": "places.id,places.location",
-      },
-      body: JSON.stringify({
-        textQuery: `${text} Tokyo`,
-        pageSize: 1,
-        languageCode: "ja",
-      }),
-    },
-  );
-  if (!res.ok) return null;
-  const data = await res.json();
-  const loc = data?.places?.[0]?.location;
-  if (typeof loc?.latitude !== "number") return null;
-  return { lat: loc.latitude, lng: loc.longitude };
+    );
+    if (!res.ok) {
+      recordIncident(
+        incidents,
+        "google_places",
+        "places.get",
+        res.status,
+        await bodyText(res),
+      );
+      return null;
+    }
+    const data = await res.json();
+    const loc = data?.location;
+    if (typeof loc?.latitude !== "number") return null;
+    return { lat: loc.latitude, lng: loc.longitude };
+  } catch (err) {
+    recordIncident(incidents, "google_places", "places.get", null, String(err));
+    return null;
+  }
 }
 
 async function searchRestaurants(
   area: LatLng,
   cuisineTags: string[],
-): Promise<Candidate[]> {
+  incidents: ProviderIncident[],
+): Promise<{ candidate: Candidate; raw: unknown }[]> {
   const query = cuisineTags.length > 0
     ? `${cuisineTags.join(" ")} restaurant`
     : "restaurant izakaya";
-  const res = await fetch(
-    "https://places.googleapis.com/v1/places:searchText",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
-        // Only what we use: anything extra (rating, photos…) raises the SKU.
-        "X-Goog-FieldMask":
-          "places.id,places.displayName,places.priceLevel,places.primaryType,places.location",
-      },
-      body: JSON.stringify({
-        textQuery: query,
-        pageSize: 10,
-        languageCode: "ja",
-        locationBias: {
-          circle: {
-            center: { latitude: area.lat, longitude: area.lng },
-            radius: 1200,
-          },
+  let data: { places?: Record<string, unknown>[] };
+  try {
+    const res = await fetch(
+      "https://places.googleapis.com/v1/places:searchText",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+          // Only what we use: anything extra (photos, editorial summaries…)
+          // raises the SKU. `rating` / `userRatingCount` do move this call into
+          // a pricier Places tier — accepted deliberately because the scoring
+          // engine needs a quality signal it is not allowed to invent, and they
+          // are two fields on a call we already make once per meeting zone.
+          "X-Goog-FieldMask":
+            "places.id,places.displayName,places.priceLevel,places.primaryType,places.location,places.rating,places.userRatingCount",
         },
-      }),
-    },
-  );
-  if (!res.ok) return [];
-  const data = await res.json();
+        body: JSON.stringify({
+          textQuery: query,
+          pageSize: 10,
+          languageCode: "ja",
+          locationBias: {
+            circle: {
+              center: { latitude: area.lat, longitude: area.lng },
+              radius: 1200,
+            },
+          },
+        }),
+      },
+    );
+    if (!res.ok) {
+      recordIncident(
+        incidents,
+        "google_places",
+        "places.searchText",
+        res.status,
+        await bodyText(res),
+      );
+      return [];
+    }
+    data = await res.json();
+  } catch (err) {
+    recordIncident(
+      incidents,
+      "google_places",
+      "places.searchText",
+      null,
+      String(err),
+    );
+    return [];
+  }
   const places: Record<string, unknown>[] = data?.places ?? [];
   return places
     .filter((p) => typeof p.id === "string")
     .map((p) => ({
-      place_id: p.id as string,
-      name: typeof (p.displayName as { text?: unknown } | undefined)?.text ===
-          "string"
-        ? (p.displayName as { text: string }).text
-        : null,
-      hotpepper_id: null,
-      price_yen_estimate: priceLevelToYen(p.priceLevel as string | undefined),
-      room_type: null,
-      cuisine_tags: typeof p.primaryType === "string" ? [p.primaryType] : [],
-      dietary_tags: [],
-      allergy_safe_tags: [],
-      atmosphere_tags: [],
-      location: (p.location as { latitude?: number; longitude?: number })
-          ?.latitude != null
-        ? {
-          lat: (p.location as { latitude: number }).latitude,
-          lng: (p.location as { longitude: number }).longitude,
-        }
-        : null,
+      candidate: {
+        place_id: p.id as string,
+        name: typeof (p.displayName as { text?: unknown } | undefined)?.text ===
+            "string"
+          ? (p.displayName as { text: string }).text
+          : null,
+        hotpepper_id: null,
+        price_yen_estimate: priceLevelToYen(p.priceLevel as string | undefined),
+        room_type: null,
+        cuisine_tags: typeof p.primaryType === "string" ? [p.primaryType] : [],
+        dietary_tags: [],
+        allergy_safe_tags: [],
+        atmosphere_tags: [],
+        rating: placesRating(p.rating),
+        user_rating_count: placesRatingCount(p.userRatingCount),
+        location: (p.location as { latitude?: number; longitude?: number })
+            ?.latitude != null
+          ? {
+            lat: (p.location as { latitude: number }).latitude,
+            lng: (p.location as { longitude: number }).longitude,
+          }
+          : null,
+      } satisfies Candidate,
+      raw: p,
     }));
+}
+
+// `restaurant_features` constrains rating to 0..5 and the review count to >= 0
+// (0016). A provider anomaly must degrade the quality signal, not blow up the
+// whole search with a constraint violation, so anything off-scale is dropped
+// here and the scoring engine falls back to its no-rating path.
+function placesRating(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (value < 0 || value > 5) return null;
+  return value;
+}
+
+function placesRatingCount(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (value < 0) return null;
+  return Math.round(value);
 }
 
 function priceLevelToYen(level: string | undefined): number | null {
@@ -183,7 +339,10 @@ interface HotPepperShop {
   lng?: string;
 }
 
-async function hotPepperSearch(area: LatLng): Promise<HotPepperShop[]> {
+async function hotPepperSearch(
+  area: LatLng,
+  incidents: ProviderIncident[],
+): Promise<HotPepperShop[]> {
   if (!HOTPEPPER_API_KEY) return [];
   const url = new URL(
     "https://webservice.recruit.co.jp/hotpepper/gourmet/v1/",
@@ -194,87 +353,188 @@ async function hotPepperSearch(area: LatLng): Promise<HotPepperShop[]> {
   url.searchParams.set("range", "3"); // 1000m
   url.searchParams.set("count", "10");
   url.searchParams.set("format", "json");
-  const res = await fetch(url);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return data?.results?.shop ?? [];
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      recordIncident(
+        incidents,
+        "hotpepper",
+        "gourmet.search",
+        res.status,
+        await bodyText(res),
+      );
+      return [];
+    }
+    const data = await res.json();
+    return data?.results?.shop ?? [];
+  } catch (err) {
+    recordIncident(incidents, "hotpepper", "gourmet.search", null, String(err));
+    return [];
+  }
 }
 
-function hotPepperRoomType(
-  shop: HotPepperShop,
-): "private" | "semi_private" | null {
+// `private_room: "あり"` only means the shop HAS private rooms, not that our
+// group gets one — it is availability, not a reservation. Reporting that as
+// room_type='private' satisfied a "private room" MUST on a promise nobody made,
+// so it is downgraded to semi_private: honest about being separated-ish, and it
+// only clears the MUST once the group has actually relaxed it. Only a confirmed
+// private-room booking may ever write 'private'.
+function hotPepperRoomType(shop: HotPepperShop): "semi_private" | null {
   if (shop.private_room && shop.private_room.includes("あり")) {
-    return "private";
+    return "semi_private";
   }
   return null;
 }
 
+// Budget is a hard MUST gate, so the estimate has to be the UPPER bound:
+// "3001〜4000円" is 4000, never the 3001 the old first-number regex returned,
+// which let a venue pass a budget MUST it should have failed. "5001円以上" has
+// no upper bound at all, so it stays unknown rather than being reported as its
+// floor price.
 function hotPepperBudgetYen(shop: HotPepperShop): number | null {
-  const avg = shop.budget?.average ?? "";
-  const m = avg.replace(/[,，]/g, "").match(/(\d{3,6})/);
-  return m ? Number(m[1]) : null;
+  const avg = (shop.budget?.average ?? "").replace(/[,，]/g, "");
+  if (/以上|超/.test(avg)) return null;
+  const numbers = [...avg.matchAll(/(\d{3,6})/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => Number.isFinite(n));
+  if (numbers.length === 0) return null;
+  return Math.max(...numbers);
 }
 
 // --- Google Routes ----------------------------------------------------------
 
+interface TravelMatrixResult {
+  // placeId -> participantId -> minutes
+  minutes: Map<string, Record<string, number>>;
+  // placeId -> the raw elements that produced it. The element's originIndex is
+  // only meaningful against the request that returned it, so the participant it
+  // resolved to travels with it.
+  raw: Map<string, { participant_id: string; element: unknown }[]>;
+}
+
 async function travelMatrix(
-  origins: { participantId: string; location: LatLng }[],
+  origins: Origin[],
   destinations: { placeId: string; location: LatLng }[],
-): Promise<Map<string, Record<string, number>>> {
-  const byPlace = new Map<string, Record<string, number>>();
-  if (origins.length === 0 || destinations.length === 0) return byPlace;
-  for (let offset = 0; offset < destinations.length; offset += 20) {
-    const chunk = destinations.slice(offset, offset + 20);
-    const res = await fetch(
-      "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": GOOGLE_ROUTES_API_KEY,
-          "X-Goog-FieldMask": "originIndex,destinationIndex,duration,condition",
-        },
-        body: JSON.stringify({
-          origins: origins.map((o) => ({
-            waypoint: {
-              location: {
-                latLng: { latitude: o.location.lat, longitude: o.location.lng },
-              },
-            },
-          })),
-          destinations: chunk.map((d) => ({
-            waypoint: {
-              location: {
-                latLng: { latitude: d.location.lat, longitude: d.location.lng },
-              },
-            },
-          })),
-          travelMode: "TRANSIT",
-        }),
-      },
+  incidents: ProviderIncident[],
+): Promise<TravelMatrixResult> {
+  const result: TravelMatrixResult = { minutes: new Map(), raw: new Map() };
+  if (origins.length === 0 || destinations.length === 0) return result;
+
+  // Batch to the TRANSIT element cap: chunk the origins first, then give each
+  // origin chunk as many destinations as the remaining element budget allows.
+  for (
+    let oOffset = 0;
+    oOffset < origins.length;
+    oOffset += ROUTES_MAX_ORIGINS_PER_REQUEST
+  ) {
+    const originChunk = origins.slice(
+      oOffset,
+      oOffset + ROUTES_MAX_ORIGINS_PER_REQUEST,
     );
-    if (!res.ok) continue;
-    const rows: {
-      originIndex?: number;
-      destinationIndex?: number;
-      duration?: string;
-    }[] = await res.json();
-    for (const row of Array.isArray(rows) ? rows : []) {
-      if (
-        row.originIndex == null || row.destinationIndex == null ||
-        typeof row.duration !== "string"
-      ) continue;
-      const seconds = Number(row.duration.replace(/s$/, ""));
-      if (!Number.isFinite(seconds)) continue;
-      const dest = chunk[row.destinationIndex];
-      const origin = origins[row.originIndex];
-      if (!dest || !origin) continue;
-      const entry = byPlace.get(dest.placeId) ?? {};
-      entry[origin.participantId] = Math.round(seconds / 60);
-      byPlace.set(dest.placeId, entry);
+    const destinationsPerRequest = Math.max(
+      1,
+      Math.floor(ROUTES_MAX_ELEMENTS_PER_REQUEST / originChunk.length),
+    );
+    for (
+      let dOffset = 0;
+      dOffset < destinations.length;
+      dOffset += destinationsPerRequest
+    ) {
+      const chunk = destinations.slice(
+        dOffset,
+        dOffset + destinationsPerRequest,
+      );
+      let rows: {
+        originIndex?: number;
+        destinationIndex?: number;
+        duration?: string;
+        condition?: string;
+      }[];
+      try {
+        const res = await fetch(
+          "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Goog-Api-Key": GOOGLE_ROUTES_API_KEY,
+              "X-Goog-FieldMask":
+                "originIndex,destinationIndex,duration,condition",
+            },
+            body: JSON.stringify({
+              origins: originChunk.map((o) => ({
+                waypoint: {
+                  location: {
+                    latLng: {
+                      latitude: o.location.lat,
+                      longitude: o.location.lng,
+                    },
+                  },
+                },
+              })),
+              destinations: chunk.map((d) => ({
+                waypoint: {
+                  location: {
+                    latLng: {
+                      latitude: d.location.lat,
+                      longitude: d.location.lng,
+                    },
+                  },
+                },
+              })),
+              travelMode: "TRANSIT",
+            }),
+          },
+        );
+        if (!res.ok) {
+          recordIncident(
+            incidents,
+            "google_routes",
+            "routes.computeRouteMatrix",
+            res.status,
+            await bodyText(res),
+          );
+          continue;
+        }
+        rows = await res.json();
+      } catch (err) {
+        recordIncident(
+          incidents,
+          "google_routes",
+          "routes.computeRouteMatrix",
+          null,
+          String(err),
+        );
+        continue;
+      }
+      for (const row of Array.isArray(rows) ? rows : []) {
+        // We ask for `condition` in the FieldMask, so an element that does not
+        // say ROUTE_EXISTS has no usable route (ROUTE_NOT_FOUND still carries a
+        // duration). Proto3 JSON omits enums only at their zero value, which is
+        // UNSPECIFIED — never ROUTE_EXISTS — so a missing condition is not a
+        // promise and is ignored too.
+        if (row.condition !== "ROUTE_EXISTS") continue;
+        if (typeof row.duration !== "string") continue;
+        // Proto3 JSON also omits int fields at their default, so index 0 simply
+        // is not there: treating absent as 0 stops the first origin and the
+        // first destination from being silently dropped.
+        const originIndex = row.originIndex ?? 0;
+        const destinationIndex = row.destinationIndex ?? 0;
+        const seconds = Number(row.duration.replace(/s$/, ""));
+        if (!Number.isFinite(seconds)) continue;
+        const dest = chunk[destinationIndex];
+        const origin = originChunk[originIndex];
+        if (!dest || !origin) continue;
+        const entry = result.minutes.get(dest.placeId) ?? {};
+        entry[origin.participantId] = Math.round(seconds / 60);
+        result.minutes.set(dest.placeId, entry);
+        const rawRows = result.raw.get(dest.placeId) ?? [];
+        rawRows.push({ participant_id: origin.participantId, element: row });
+        result.raw.set(dest.placeId, rawRows);
+      }
     }
   }
-  return byPlace;
+  return result;
 }
 
 // --- Meeting areas -----------------------------------------------------------
@@ -314,6 +574,38 @@ function meetingAreas(points: LatLng[]): LatLng[] {
     ) unique.push(a);
   }
   return unique.slice(0, 3);
+}
+
+// Did the search space materially shift? Every zone we are about to search has
+// to be close to a zone we already searched; a brand new zone (someone joined,
+// someone changed their travel reference) means the cached candidate set was
+// drawn around the wrong place.
+// No zone to search at all (nobody's travel reference resolved to a place) is
+// not a shift: there is no new search space to compare against, so claiming one
+// moved would be an invention — and it would force a rediscovery that has
+// nowhere to search.
+function zonesShifted(
+  areas: LatLng[],
+  stored: { lat: number; lng: number }[],
+): boolean {
+  if (areas.length === 0) return false;
+  if (stored.length === 0) return true;
+  return areas.some((a) =>
+    !stored.some((s) =>
+      Math.abs(s.lat - a.lat) <= ZONE_SHIFT_TOLERANCE_DEG &&
+      Math.abs(s.lng - a.lng) <= ZONE_SHIFT_TOLERANCE_DEG
+    )
+  );
+}
+
+function minutesAgoMs(minutes: number): number {
+  return Date.now() - minutes * 60_000;
+}
+
+function freshAt(timestamp: string | null, cutoffMs: number): boolean {
+  if (!timestamp) return false;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) && parsed > cutoffMs;
 }
 
 // --- Handler -----------------------------------------------------------------
@@ -384,97 +676,486 @@ Deno.serve(async (req: Request) => {
         : [];
     });
 
-  // 1. Resolve each participant's travel reference to a location.
-  const origins: { participantId: string; location: LatLng }[] = [];
-  for (const p of participants as ParticipantRow[]) {
-    const loc = p.travel_reference_place_id
-      ? await placeLocation(p.travel_reference_place_id)
-      : await geocodeText(p.travel_reference);
-    if (loc) origins.push({ participantId: p.id, location: loc });
-  }
-  if (origins.length === 0) {
-    return json({ error: "could not resolve any travel reference" }, 422);
-  }
+  const incidents: ProviderIncident[] = [];
 
-  // 2. Candidate meeting areas.
-  const areas = meetingAreas(origins.map((o) => o.location));
-
-  // 3+4. Places + Hot Pepper per area, dedupe by place_id.
-  const byPlaceId = new Map<string, Candidate>();
-  for (const area of areas) {
-    const [places, hpShops] = await Promise.all([
-      searchRestaurants(area, cuisineTags),
-      hotPepperSearch(area),
-    ]);
-    for (const c of places) {
-      if (!byPlaceId.has(c.place_id)) byPlaceId.set(c.place_id, c);
+  // Never fatal: losing a raw payload or an incident row must not fail a search
+  // that otherwise worked, so both of these log and move on. They close over the
+  // service-role client rather than taking it as a parameter, which keeps the
+  // generated PostgREST types on the client itself.
+  const persistSourceRecords = async (records: SourceRecord[]) => {
+    if (records.length === 0) return;
+    const fetchedAt = new Date().toISOString();
+    const { error } = await supabase.from("restaurant_source_records").upsert(
+      records.map((r) => ({ ...r, fetched_at: fetchedAt })),
+      { onConflict: "place_id,provider,source_id" },
+    );
+    if (error) {
+      console.error("restaurant_source_records upsert failed", error.message);
     }
-    // Enrich nearest Places candidate with Hot Pepper JP-specific attributes.
-    for (const shop of hpShops) {
-      const shopLat = Number(shop.lat);
-      const shopLng = Number(shop.lng);
-      if (!Number.isFinite(shopLat) || !Number.isFinite(shopLng)) continue;
-      let best: Candidate | null = null;
-      let bestD = Infinity;
-      for (const c of byPlaceId.values()) {
-        if (!c.location) continue;
-        const d = (c.location.lat - shopLat) ** 2 +
-          (c.location.lng - shopLng) ** 2;
-        if (d < bestD) {
-          bestD = d;
-          best = c;
+  };
+
+  const persistIncidents = async () => {
+    if (incidents.length === 0) return;
+    const occurredAt = new Date().toISOString();
+    const { error } = await supabase.from("provider_incidents").insert(
+      incidents.map((i) => ({
+        event_id: eventId,
+        provider: i.provider,
+        operation: i.operation,
+        status_code: i.status_code,
+        message: i.message,
+        occurred_at: occurredAt,
+      })),
+    );
+    if (error) {
+      console.error("provider_incidents insert failed", error.message);
+    }
+  };
+
+  // 1. Resolve each participant's travel reference to a location.
+  //
+  // `travel_reference` is a UI CATEGORY ('office'|'home'|'station'|
+  // 'doesnt_matter'), not an address. Geocoding the word — the old
+  // `geocodeText("office Tokyo")` path — invented a location somewhere in Tokyo
+  // for every participant and made the whole travel-fairness story fiction, so
+  // an unresolvable participant is now reported instead of guessed.
+  const origins: Origin[] = [];
+  const unresolved: { participant_id: string; reason: string }[] = [];
+  const unconstrained: string[] = [];
+  const locationByPlaceId = new Map<string, LatLng | null>();
+  for (const p of participants as ParticipantRow[]) {
+    if (p.travel_reference === "doesnt_matter") {
+      // No travel constraint by definition: they are not an origin, and their
+      // absence must not stop the event.
+      unconstrained.push(p.id);
+      continue;
+    }
+    const referencePlaceId = p.travel_reference_place_id;
+    if (!referencePlaceId) {
+      unresolved.push({
+        participant_id: p.id,
+        reason: "travel_reference_place_id_missing",
+      });
+      continue;
+    }
+    // Colleagues share an office: one Places lookup per distinct place id.
+    if (!locationByPlaceId.has(referencePlaceId)) {
+      locationByPlaceId.set(
+        referencePlaceId,
+        await placeLocation(referencePlaceId, incidents),
+      );
+    }
+    const loc = locationByPlaceId.get(referencePlaceId) ?? null;
+    if (!loc) {
+      unresolved.push({
+        participant_id: p.id,
+        reason: "travel_reference_place_lookup_failed",
+      });
+      continue;
+    }
+    origins.push({ participantId: p.id, location: loc });
+  }
+  // Deliberately NO blanket origin precondition here. An origin buys exactly two
+  // things — the meeting areas provider discovery searches around, and the travel
+  // legs Routes has not already cached — so demanding one up front failed
+  // searches that never needed it: budget, dietary, allergy, room and smoking
+  // MUSTs are decided server-side from data we already hold, and a fully cached
+  // event needs no provider call whatsoever. The requirement is asserted in
+  // step 4, once the cache has told us whether discovery has to run at all.
+
+  // 2. Candidate meeting areas, and the zones we searched last time. With no
+  // resolved origin there is no new search space at all, which zonesShifted()
+  // reads as "not shifted" rather than as a move.
+  const areas = meetingAreas(origins.map((o) => o.location));
+  const { data: storedZones } = await supabase
+    .from("meeting_zones")
+    .select("lat, lng")
+    .eq("event_id", eventId);
+  const searchSpaceShifted = zonesShifted(areas, storedZones ?? []);
+
+  // 3. Read-through cache: which of this event's candidates are still fresh?
+  const discoveryCutoffMs = minutesAgoMs(DISCOVERY_TTL_MINUTES);
+  const travelCutoffMs = minutesAgoMs(TRAVEL_TTL_MINUTES);
+  const { data: cachedCandidateRows, error: ccErr } = await supabase
+    .from("event_restaurant_candidates")
+    .select("place_id, discovered_at")
+    .eq("event_id", eventId);
+  if (ccErr) return json({ error: ccErr.message }, 500);
+  const allCandidateIds = (cachedCandidateRows ?? []).map((row) =>
+    row.place_id as string
+  );
+  const freshPlaceIds = (cachedCandidateRows ?? [])
+    .filter((row) => freshAt(row.discovered_at, discoveryCutoffMs))
+    .map((row) => row.place_id as string);
+
+  // Discovery searches *around* the meeting zones, and the zones are built from
+  // origins, so with no resolved origin the providers cannot be called at all.
+  // Refusing the run because the cache went stale would then punish the caller for
+  // something they cannot fix from here, so serve the candidates we already have and
+  // say they are stale. Freshness only decides anything when a refresh is possible.
+  const canDiscover = origins.length > 0;
+  const staleServed = !canDiscover && freshPlaceIds.length === 0 &&
+    allCandidateIds.length > 0;
+  const cachedPlaceIds = staleServed ? allCandidateIds : freshPlaceIds;
+
+  const discoveryNeeded = canDiscover &&
+    (freshPlaceIds.length === 0 || searchSpaceShifted);
+  const discoverySkipReason = discoveryNeeded
+    ? null
+    : staleServed
+    ? "stale_candidates_no_resolvable_origin"
+    : "fresh_candidates_for_unchanged_meeting_zones";
+
+  // 4. The only genuinely hopeless case: nobody's location is known, so the
+  // providers cannot be called, and there is not a single cached candidate to fall
+  // back on. That stays a 422, and it names the participants we could not place so
+  // the caller can say why (a missing travel_reference_place_id is a fixable UI
+  // state, not a server error).
+  // Everything else proceeds: a cache hit needs no origin, stale candidates beat no
+  // answer when no refresh is possible, and a partially resolved event searches
+  // around the origins it has and leaves the unresolved participants out of the
+  // travel matrix.
+  if (!canDiscover && cachedPlaceIds.length === 0) {
+    await persistIncidents();
+    return json({
+      error: "could not resolve any travel reference",
+      unresolved_participants: unresolved,
+      travel_unconstrained_participants: unconstrained,
+      provider_incidents: incidentSummary(incidents),
+    }, 422);
+  }
+
+  // 5+6. Places + Hot Pepper per area, dedupe by place_id — only when the cache
+  // cannot answer.
+  const byPlaceId = new Map<string, Candidate>();
+  const sourceRecords: SourceRecord[] = [];
+  if (discoveryNeeded) {
+    for (const area of areas) {
+      const [places, hpShops] = await Promise.all([
+        searchRestaurants(area, cuisineTags, incidents),
+        hotPepperSearch(area, incidents),
+      ]);
+      for (const { candidate, raw } of places) {
+        if (!byPlaceId.has(candidate.place_id)) {
+          byPlaceId.set(candidate.place_id, candidate);
+          sourceRecords.push({
+            place_id: candidate.place_id,
+            provider: "google_places",
+            source_id: candidate.place_id,
+            payload: raw,
+          });
         }
       }
-      // ~100m match threshold; otherwise skip rather than guess.
-      if (best && bestD < 1e-6 && !best.hotpepper_id) {
-        best.hotpepper_id = shop.id;
-        best.room_type = hotPepperRoomType(shop) ?? best.room_type;
-        best.price_yen_estimate = hotPepperBudgetYen(shop) ??
-          best.price_yen_estimate;
-        if (shop.genre?.name) best.cuisine_tags.push(shop.genre.name);
-        // dietary/allergy tags: only from verified structured attributes —
-        // Hot Pepper's basic response has none, so they stay empty
-        // ("unverified", never "confirmed safe").
+      // Enrich nearest Places candidate with Hot Pepper JP-specific attributes.
+      for (const shop of hpShops) {
+        const shopLat = Number(shop.lat);
+        const shopLng = Number(shop.lng);
+        if (!Number.isFinite(shopLat) || !Number.isFinite(shopLng)) continue;
+        let best: Candidate | null = null;
+        let bestD = Infinity;
+        for (const c of byPlaceId.values()) {
+          if (!c.location) continue;
+          const d = (c.location.lat - shopLat) ** 2 +
+            (c.location.lng - shopLng) ** 2;
+          if (d < bestD) {
+            bestD = d;
+            best = c;
+          }
+        }
+        // ~100m match threshold; otherwise skip rather than guess.
+        if (best && bestD < 1e-6 && !best.hotpepper_id) {
+          best.hotpepper_id = shop.id;
+          best.room_type = hotPepperRoomType(shop) ?? best.room_type;
+          best.price_yen_estimate = hotPepperBudgetYen(shop) ??
+            best.price_yen_estimate;
+          if (shop.genre?.name) best.cuisine_tags.push(shop.genre.name);
+          // dietary/allergy tags: only from verified structured attributes —
+          // Hot Pepper's basic response has none, so they stay empty
+          // ("unverified", never "confirmed safe"). The upsert below is
+          // additive, so staying empty no longer erases what another pass
+          // already confirmed.
+          sourceRecords.push({
+            place_id: best.place_id,
+            provider: "hotpepper",
+            source_id: shop.id,
+            payload: shop,
+          });
+        }
       }
     }
   }
 
-  const candidates = [...byPlaceId.values()];
-  if (candidates.length === 0) return json({ candidate_count: 0 });
+  const fetchedCandidates = [...byPlaceId.values()];
 
-  // 5. Travel-time matrix participant -> candidate.
-  const withLocation = candidates.filter((c) => c.location != null);
-  const matrix = await travelMatrix(
-    origins,
-    withLocation.map((c) => ({ placeId: c.place_id, location: c.location! })),
-  );
+  // 7. Normalized upsert. Additive by construction (see 0017): an empty
+  // dietary/allergy/room/cuisine value never overwrites a populated one, and the
+  // legacy travel JSONB is merged rather than replaced.
+  if (fetchedCandidates.length > 0) {
+    const { error: recordErr } = await supabase.rpc(
+      "fn_record_provider_candidates",
+      {
+        p_event_id: eventId,
+        p_candidates: fetchedCandidates.map((c) => ({
+          place_id: c.place_id,
+          name: c.name,
+          hotpepper_id: c.hotpepper_id,
+          price_yen_estimate: c.price_yen_estimate,
+          room_type: c.room_type,
+          cuisine_tags: c.cuisine_tags,
+          dietary_tags: c.dietary_tags,
+          allergy_safe_tags: c.allergy_safe_tags,
+          atmosphere_tags: c.atmosphere_tags,
+          rating: c.rating,
+          user_rating_count: c.user_rating_count,
+        })),
+      },
+    );
+    if (recordErr) return json({ error: recordErr.message }, 500);
+  }
 
-  // 6. Upsert.
-  const { error: rErr } = await supabase.from("restaurants").upsert(
-    candidates.map((c) => ({
-      place_id: c.place_id,
-      name: c.name,
-      hotpepper_id: c.hotpepper_id,
-      last_fetched_at: new Date().toISOString(),
-    })),
-  );
-  if (rErr) return json({ error: rErr.message }, 500);
+  // The zones this run actually searched (PRD §15), and the freshness signal for
+  // the next run. Written after discovery so a provider outage cannot record a
+  // zone we never managed to search.
+  if (areas.length > 0) {
+    await supabase.from("meeting_zones").upsert(
+      areas.map((a, i) => ({
+        event_id: eventId,
+        lat: a.lat,
+        lng: a.lng,
+        rank: i + 1,
+      })),
+      { onConflict: "event_id,rank" },
+    );
+    await supabase
+      .from("meeting_zones")
+      .delete()
+      .eq("event_id", eventId)
+      .gt("rank", areas.length);
+  }
 
-  const { error: fErr } = await supabase.from("restaurant_features").upsert(
-    candidates.map((c) => ({
-      place_id: c.place_id,
-      name: c.name,
-      price_yen_estimate: c.price_yen_estimate,
-      room_type: c.room_type,
-      cuisine_tags: c.cuisine_tags,
-      dietary_tags: c.dietary_tags,
-      allergy_safe_tags: c.allergy_safe_tags,
-      atmosphere_tags: c.atmosphere_tags,
-      travel_minutes_by_participant: matrix.get(c.place_id) ?? {},
-      fetched_at: new Date().toISOString(),
-    })),
-  );
-  if (fErr) return json({ error: fErr.message }, 500);
+  const activePlaceIds = [
+    ...new Set([...cachedPlaceIds, ...byPlaceId.keys()]),
+  ];
+  if (activePlaceIds.length === 0) {
+    await persistSourceRecords(sourceRecords);
+    await persistIncidents();
+    return json(searchResponse({
+      fetched: 0,
+      cached: 0,
+      total: 0,
+      discoverySkipReason,
+      searchSpaceShifted,
+      legsFetched: 0,
+      legsFromCache: 0,
+      areas,
+      unresolved,
+      unconstrained,
+      unroutable: [],
+      incidents,
+    }));
+  }
 
-  return json({ candidate_count: candidates.length });
+  // 8. Destination coordinates. New candidates carry theirs; cached ones are
+  // recovered from the stored raw Places payload so a cache hit stays free of
+  // provider calls. Place coordinates are Places content, so this only ever
+  // reads a payload that is still inside the discovery TTL.
+  const locations = new Map<string, LatLng>();
+  for (const c of fetchedCandidates) {
+    if (c.location) locations.set(c.place_id, c.location);
+  }
+  const needCoordinates = activePlaceIds.filter((id) => !locations.has(id));
+  if (needCoordinates.length > 0) {
+    const { data: rawRows } = await supabase
+      .from("restaurant_source_records")
+      .select("place_id, payload, fetched_at")
+      .eq("provider", "google_places")
+      .in("place_id", needCoordinates);
+    for (const row of rawRows ?? []) {
+      if (!freshAt(row.fetched_at, discoveryCutoffMs)) continue;
+      const loc = (row.payload as {
+        location?: { latitude?: number; longitude?: number };
+      })?.location;
+      if (typeof loc?.latitude !== "number") continue;
+      if (typeof loc?.longitude !== "number") continue;
+      locations.set(row.place_id as string, {
+        lat: loc.latitude,
+        lng: loc.longitude,
+      });
+    }
+  }
+
+  // 9. Travel matrix: only the (event, participant, place) legs we are missing.
+  // A leg exists per ORIGIN, so an unresolved participant contributes no missing
+  // leg and no Routes call: with nothing resolved there is nothing to route, and
+  // the event still scores against whatever legs the cache already holds (the
+  // scoring engine reads travel_matrix_cache through fn_travel_minutes, not this
+  // set). `travel_legs_from_cache` therefore counts the legs THIS RUN would
+  // otherwise have paid Routes for — not every leg the event has.
+  const activeSet = new Set(activePlaceIds);
+  const originIds = new Set(origins.map((o) => o.participantId));
+  const { data: cachedLegs } = await supabase
+    .from("travel_matrix_cache")
+    .select("participant_id, place_id, fetched_at")
+    .eq("event_id", eventId);
+  const freshLegs = new Set<string>();
+  for (const leg of cachedLegs ?? []) {
+    if (!activeSet.has(leg.place_id as string)) continue;
+    if (!originIds.has(leg.participant_id as string)) continue;
+    if (!freshAt(leg.fetched_at, travelCutoffMs)) continue;
+    freshLegs.add(`${leg.participant_id}|${leg.place_id}`);
+  }
+
+  const unroutable: string[] = [];
+  // Group places that need the exact same participant set so every Routes
+  // request is a full rectangle and we never pay for a leg we already have.
+  const groups = new Map<
+    string,
+    {
+      participantIds: string[];
+      destinations: { placeId: string; location: LatLng }[];
+    }
+  >();
+  for (const placeId of activePlaceIds) {
+    const location = locations.get(placeId);
+    const missing = origins
+      .map((o) => o.participantId)
+      .filter((participantId) => !freshLegs.has(`${participantId}|${placeId}`));
+    if (missing.length === 0) continue;
+    if (!location) {
+      // No coordinates (a cached candidate whose Places payload has aged out):
+      // keep whatever legs are cached rather than guessing a location.
+      unroutable.push(placeId);
+      continue;
+    }
+    const key = [...missing].sort().join(",");
+    const group = groups.get(key) ??
+      { participantIds: missing, destinations: [] };
+    group.destinations.push({ placeId, location });
+    groups.set(key, group);
+  }
+
+  const legs: { participant_id: string; place_id: string; minutes: number }[] =
+    [];
+  const routeRaw = new Map<
+    string,
+    { participant_id: string; element: unknown }[]
+  >();
+  for (const group of groups.values()) {
+    const groupOrigins = origins.filter((o) =>
+      group.participantIds.includes(o.participantId)
+    );
+    const matrix = await travelMatrix(
+      groupOrigins,
+      group.destinations,
+      incidents,
+    );
+    for (const [placeId, byParticipant] of matrix.minutes) {
+      for (const [participantId, minutes] of Object.entries(byParticipant)) {
+        legs.push({
+          participant_id: participantId,
+          place_id: placeId,
+          minutes,
+        });
+      }
+    }
+    for (const [placeId, rows] of matrix.raw) {
+      routeRaw.set(placeId, [...(routeRaw.get(placeId) ?? []), ...rows]);
+    }
+  }
+
+  // 10. Persist travel times: authoritative per-event rows plus the legacy JSONB
+  // that fn_travel_minutes falls back to.
+  if (legs.length > 0) {
+    const { error: legErr } = await supabase.rpc("fn_record_travel_minutes", {
+      p_event_id: eventId,
+      p_legs: legs,
+    });
+    if (legErr) return json({ error: legErr.message }, 500);
+  }
+
+  // 11. Raw payloads, kept separate from the normalized records. Routes matrices
+  // are event-scoped (their origins are this event's participants), so the event
+  // id is the source id.
+  for (const [placeId, rows] of routeRaw) {
+    sourceRecords.push({
+      place_id: placeId,
+      provider: "google_routes",
+      source_id: eventId,
+      payload: {
+        travel_mode: "TRANSIT",
+        elements: rows,
+      },
+    });
+  }
+  await persistSourceRecords(sourceRecords);
+  await persistIncidents();
+
+  return json(searchResponse({
+    fetched: fetchedCandidates.length,
+    cached: cachedPlaceIds.length,
+    total: activePlaceIds.length,
+    discoverySkipReason,
+    searchSpaceShifted,
+    legsFetched: legs.length,
+    legsFromCache: freshLegs.size,
+    areas,
+    unresolved,
+    unconstrained,
+    unroutable,
+    incidents,
+  }));
 });
+
+// --- Response ----------------------------------------------------------------
+
+function searchResponse(args: {
+  fetched: number;
+  cached: number;
+  total: number;
+  discoverySkipReason: string | null;
+  searchSpaceShifted: boolean;
+  legsFetched: number;
+  legsFromCache: number;
+  areas: LatLng[];
+  unresolved: { participant_id: string; reason: string }[];
+  unconstrained: string[];
+  unroutable: string[];
+  incidents: ProviderIncident[];
+}): Record<string, unknown> {
+  return {
+    // Unchanged key and unchanged meaning: how many candidates this call
+    // obtained from the providers. Clients read 0 as "showing previously
+    // fetched candidates", which is exactly what a cache hit is.
+    candidate_count: args.fetched,
+    // What the event can actually be scored against right now.
+    event_candidate_count: args.total,
+    candidates_fetched: args.fetched,
+    candidates_from_cache: args.cached,
+    discovery_served_from_cache: args.discoverySkipReason !== null,
+    discovery_skipped_reason: args.discoverySkipReason,
+    search_space_shifted: args.searchSpaceShifted,
+    travel_legs_fetched: args.legsFetched,
+    travel_legs_from_cache: args.legsFromCache,
+    meeting_zones: args.areas.map((a, i) => ({
+      lat: a.lat,
+      lng: a.lng,
+      rank: i + 1,
+    })),
+    unresolved_participants: args.unresolved,
+    travel_unconstrained_participants: args.unconstrained,
+    unroutable_place_ids: args.unroutable,
+    provider_incident_count: args.incidents.length,
+    provider_incidents: incidentSummary(args.incidents),
+  };
+}
+
+function incidentSummary(
+  incidents: ProviderIncident[],
+): Record<string, unknown>[] {
+  return incidents.slice(0, INCIDENT_SUMMARY_MAX).map((i) => ({
+    provider: i.provider,
+    operation: i.operation,
+    status_code: i.status_code,
+    message: i.message,
+  }));
+}

@@ -4,7 +4,7 @@
  * Models/Negotiation.swift.
  */
 
-import { AppCopy, normalizedTypeLabel, roomLabel } from '../design/copy'
+import { AppCopy, normalizedTypeLabel, roomLabel, smokingLabel } from '../design/copy'
 import type {
   FeedItem,
   JSONValue,
@@ -58,6 +58,18 @@ export function constraintSummary(type: NormalizedType, value: NormalizedValue):
       if (include) return `${label}：${include}`
       break
     }
+    case 'smoking': {
+      const preference = text(value, 'preference')
+      const named = preference ? smokingLabel(preference) : null
+      if (named) {
+        // 0021 relaxes a smoking MUST by accepting venues whose policy is unconfirmed,
+        // rather than by trading away the preference itself.
+        return value.accept_unknown === true
+          ? `${label}：${named}（未確認のお店も可）`
+          : `${label}：${named}`
+      }
+      break
+    }
     case 'dietary':
     case 'atmosphere': {
       const tags = text(value, 'tags')
@@ -99,6 +111,13 @@ export function negotiationQuestion(negotiation: PendingNegotiation): string {
     case 'budget': {
       const proposed = text(negotiation.proposed_value, 'max_yen') ?? '少し高い'
       return `予算を${proposed}円まで変更しても大丈夫ですか？`
+    }
+    case 'smoking': {
+      // The relaxation never gives up the preference; it accepts venues whose smoking
+      // policy no provider could confirm. Ask for exactly that, and say what it costs.
+      const current = text(constraint.normalized_value, 'preference')
+      const named = (current ? smokingLabel(current) : null) ?? '喫煙の条件'
+      return `${named}かどうか確認できていないお店も、候補に含めてよいですか？`
     }
     default:
       return `${constraintSummary(constraint.normalized_type, negotiation.proposed_value)}に変更しても大丈夫ですか？`

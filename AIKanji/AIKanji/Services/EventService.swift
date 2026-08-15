@@ -43,6 +43,29 @@ struct EventService {
             .value
     }
 
+    private struct PlaceSearchRequest: Encodable {
+        let query: String
+    }
+
+    private struct PlaceSearchResponse: Decodable {
+        let places: [PlaceSuggestion]
+    }
+
+    /// Turns what the participant typed into a real place, so their travel reference can be
+    /// stored as `participants.travel_reference_place_id`. The lookup happens server-side in
+    /// the `place-search` Edge Function because the Places key lives only in function
+    /// secrets; a provider failure answers 502, which the SDK surfaces as a thrown error so
+    /// the picker can say "could not search" instead of "no such place".
+    func searchPlaces(query: String) async throws -> [PlaceSuggestion] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let response: PlaceSearchResponse = try await client.functions.invoke(
+            "place-search",
+            options: FunctionInvokeOptions(body: PlaceSearchRequest(query: trimmed))
+        )
+        return response.places
+    }
+
     /// Readable only once the caller is a participant of the event (RLS on `events`).
     func event(inviteCode: String) async throws -> Event {
         try await client

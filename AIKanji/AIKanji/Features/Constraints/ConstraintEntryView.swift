@@ -19,6 +19,10 @@ struct ConstraintEntryView: View {
         var normalizedValue: [String: JSONValue]
         var visibility: ConstraintVisibility
         let needsClarification: Bool
+        /// Carried through untouched: the parser's leftover wording is stored for P1 semantic
+        /// matching, and the participant never edits it. `sensitivity` and
+        /// `verification_requirement` are not carried at all — the server assigns those.
+        var semanticRemainder: String?
     }
 
     private static let examples: [ConstraintKind: [(String, String)]] = [
@@ -143,7 +147,8 @@ struct ConstraintEntryView: View {
                 normalizedType: result.normalizedType,
                 normalizedValue: result.normalizedValue,
                 visibility: result.suggestedVisibility,
-                needsClarification: result.needsClarification
+                needsClarification: result.needsClarification,
+                semanticRemainder: result.semanticRemainder
             )
         } catch { errorMessage = AppCopy.errorMessage(for: error) }
         isParsing = false
@@ -157,7 +162,8 @@ struct ConstraintEntryView: View {
             rawText: constraint.rawText,
             normalizedType: constraint.normalizedType,
             normalizedValue: constraint.normalizedValue,
-            visibility: constraint.visibility
+            visibility: constraint.visibility,
+            semanticRemainder: constraint.semanticRemainder
         )
         drafts[constraint.kind] = ""
         savedCount += 1

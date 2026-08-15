@@ -3,13 +3,20 @@ import VisionKit
 
 struct JoinEventView: View {
     private let service = EventService()
-    @State private var inviteCode = ""
+    @State private var inviteCode: String
     @State private var displayName = ""
     @State private var travelReference: TravelReference = .office
+    @State private var travelPlace: PlaceSuggestion?
     @State private var isScanning = false
     @State private var isSubmitting = false
     @State private var joined: (eventId: UUID, participantId: UUID)?
     @State private var errorMessage: String?
+
+    /// `initialCode` is the invite-link path (PRD §3): a tapped `?code=` link lands here with
+    /// the field already filled in, exactly as a scanned QR does.
+    init(initialCode: String? = nil) {
+        _inviteCode = State(initialValue: initialCode.map { String($0.lowercased().prefix(6)) } ?? "")
+    }
 
     private var canSubmit: Bool {
         inviteCode.trimmingCharacters(in: .whitespacesAndNewlines).count == 6 &&
@@ -46,14 +53,11 @@ struct JoinEventView: View {
                         .appInputFieldStyle()
                         .accessibilityIdentifier("join-display-name")
                 }
-                VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                    Text("移動の基準").font(AppTypography.section)
-                    HStack {
-                        ForEach([TravelReference.office, .home, .station]) { value in
-                            SelectionChip(title: value.label, isSelected: travelReference == value) { travelReference = value }
-                        }
-                    }
-                }
+                TravelReferenceField(
+                    reference: $travelReference,
+                    place: $travelPlace,
+                    identifierPrefix: "join-travel"
+                )
                 PrimaryButton(title: "参加する", isLoading: isSubmitting) {
                     Task { await join() }
                 }
@@ -105,7 +109,10 @@ struct JoinEventView: View {
             let participantId = try await service.joinEvent(
                 inviteCode: inviteCode.trimmingCharacters(in: .whitespacesAndNewlines),
                 displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
-                travelReference: travelReference
+                travelReference: travelReference,
+                // Nil when the participant skipped the place, or chose どこでも: the backend
+                // then leaves them out of the origins instead of guessing one.
+                travelReferencePlaceId: travelPlace?.placeId
             )
             let event = try await service.event(inviteCode: inviteCode.trimmingCharacters(in: .whitespacesAndNewlines))
             joined = (event.id, participantId)

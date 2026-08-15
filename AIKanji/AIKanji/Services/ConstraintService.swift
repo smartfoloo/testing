@@ -38,9 +38,16 @@ struct ConstraintService {
         let normalized_type: String
         let normalized_value: [String: JSONValue]
         let visibility: String
+        /// What the taxonomy could not express, kept for P1 semantic matching. `sensitivity`
+        /// and `verification_requirement` are deliberately absent: 0018's BEFORE-INSERT
+        /// trigger decides both server-side, and sensitivity must never touch `visibility`,
+        /// which stays the participant's own choice.
+        let semantic_remainder: String?
     }
 
-    /// Direct table insert — RLS allows a participant to write only their own rows.
+    /// Direct table insert — RLS allows a participant to write only their own rows, and
+    /// after `fn_close_preferences` the `with check` clause rejects the write outright, so a
+    /// post-close save fails loudly instead of silently updating nothing.
     func insertConstraint(
         eventId: UUID,
         participantId: UUID,
@@ -48,7 +55,8 @@ struct ConstraintService {
         rawText: String,
         normalizedType: NormalizedType,
         normalizedValue: [String: JSONValue],
-        visibility: ConstraintVisibility
+        visibility: ConstraintVisibility,
+        semanticRemainder: String? = nil
     ) async throws {
         try await client
             .from("participant_constraints")
@@ -59,7 +67,8 @@ struct ConstraintService {
                 raw_text: rawText,
                 normalized_type: normalizedType.rawValue,
                 normalized_value: normalizedValue,
-                visibility: visibility.rawValue
+                visibility: visibility.rawValue,
+                semantic_remainder: semanticRemainder
             ))
             .execute()
     }
@@ -101,12 +110,20 @@ struct ConstraintService {
 
     /// Subscribes to the private `event-{id}` topic and yields sanitized broadcast payloads.
     /// The raw payload is exposed too so callers can assert on what the server actually sent.
-    func constraintBroadcasts(eventId: UUID) async throws -> (channel: RealtimeChannelV2, stream: AsyncStream<(item: FeedItem, payload: [String: AnyJSON])>) {
-        let channel = client.channel("event-\(eventId.uuidString.lowercased())") { config in
-            config.isPrivate = true
-        }
-        let broadcasts = channel.broadcastStream(event: "constraint_added")
-        try await channel.subscribeWithError()
+    /// The feed is a broadcast rather than a table read because RLS hides other participants'
+    /// constraint rows: the server sanitizes, then sends.
+    ///
+    /// The channel comes from `RealtimeTopicRegistry` because the organizer dashboard listens
+    /// for `run_updated` on this same topic, and Realtime keys channels by topic — a second
+    /// channel here would fight the dashboard's instead of multiplexing with it. What is
+    /// handed back is this listener's hold on the shared channel, which
+    /// `Supa.client.removeChannel(_:)` releases; the channel goes only with the last release.
+    func constraintBroadcasts(eventId: UUID) async throws -> (channel: RealtimeTopicSubscription, stream: AsyncStream<(item: FeedItem, payload: [String: AnyJSON])>) {
+        let (subscription, broadcasts) = try await RealtimeTopicRegistry.shared.subscribe(
+            topic: RealtimeTopicRegistry.eventTopic(eventId: eventId),
+            event: .constraintAdded,
+            client: client
+        )
 
         let stream = AsyncStream<(item: FeedItem, payload: [String: AnyJSON])> { continuation in
             let task = Task {
@@ -121,7 +138,7 @@ struct ConstraintService {
             continuation.onTermination = { _ in task.cancel() }
         }
 
-        return (channel, stream)
+        return (subscription, stream)
     }
 
     static func decodeFeedItem(from payload: [String: AnyJSON]) throws -> FeedItem {
