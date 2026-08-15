@@ -9,8 +9,9 @@ the data foundation (schema + RLS + RPC) and the create/join flow.
 AIKanji.xcodeproj          Xcode project (SPM dependency on supabase-swift)
 Config.xcconfig            SUPABASE_URL / SUPABASE_ANON_KEY (override in Secrets.xcconfig)
 AIKanji/                   App sources
-supabase/migrations/       0001_init.sql … 0004_realtime_broadcast.sql
-supabase/functions/        llm-assist Edge Function (parse mode)
+supabase/migrations/       0001_init.sql … 0005_feasibility.sql
+supabase/functions/        llm-assist (parse), restaurant-search Edge Functions
+supabase/seed.sql          Deterministic demo fixture for the feasibility engine
 project.yml                XcodeGen spec, kept in sync with the checked-in project
 ```
 
