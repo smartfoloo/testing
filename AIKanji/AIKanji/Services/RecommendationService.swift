@@ -32,6 +32,9 @@ struct RecommendationService {
 
     private struct ExplainRequest: Encodable {
         let mode = "explain"
+        // Stated, not left to the server's default: this client is Japanese-first, the same
+        // as the `language` the parse call sends.
+        let language = "ja"
         let run_id: UUID
         let restaurant_place_id: String
     }

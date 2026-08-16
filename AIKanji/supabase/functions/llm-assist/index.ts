@@ -1042,13 +1042,22 @@ async function callModel(
 
 // --- explain mode ----------------------------------------------------------
 
-const EXPLAIN_SYSTEM_PROMPT =
+// Parameterised by output language, and Japanese is stated OUTRIGHT rather than implied.
+// The old prompt named no language at all, so the model answered in the prompt's own
+// English — inside an app whose every other sentence is Japanese. Grounding is mostly
+// English identifiers (cuisine tags, room types), so "mirror the input" can never work
+// here; the output language has to be an instruction.
+const explainSystemPrompt = (language: "ja" | "en") =>
   `You write one short recommendation blurb for a Tokyo coworker group choosing a restaurant.
 
 You are given a JSON object of verified facts about one candidate. Use only those facts:
 never invent a name, dish, price, review, station, cuisine or amenity that is not in the JSON.
 An empty tag array means "unverified", never "confirmed". Do not restate raw score numbers.
-Reply with 1-2 plain sentences, at most 45 words, no markdown, no quotes.`;
+${
+    language === "ja"
+      ? "Write in natural Japanese (です・ます調). Reply with 1-2 plain sentences, at most 90 characters, no markdown, no quotes."
+      : "Reply with 1-2 plain sentences, at most 45 words, no markdown, no quotes."
+  }`;
 
 interface Grounding {
   label: string | null;
@@ -1096,9 +1105,54 @@ const LABEL_PHRASES: Record<string, string> = {
   crowd_pleaser: "the option matching the most preferences",
 };
 
+const LABEL_PHRASES_JA: Record<string, string> = {
+  fairest: "グループ全体のバランスが最も良いお店",
+  best_access: "みんなが最も行きやすいお店",
+  best_value: "予算に対して最もお得なお店",
+  best_experience: "最も印象に残る雰囲気のお店",
+  crowd_pleaser: "最も多くの希望に合うお店",
+};
+
+const ROOM_PHRASES_JA: Record<string, string> = {
+  private: "個室あり",
+  semi_private: "半個室あり",
+};
+
+const ATMOSPHERE_PHRASES_JA: Record<string, string> = {
+  quiet: "静か",
+  lively: "にぎやか",
+  casual: "カジュアル",
+  traditional_japanese: "和の雰囲気",
+  stylish: "おしゃれ",
+};
+
 /// Deterministic blurb from the same grounding data, used when the model is
-/// unavailable so a card never renders without an explanation.
-function fallbackExplanation(g: Grounding): string {
+/// unavailable so a card never renders without an explanation. Rendered in the
+/// requested language for the same reason the prompt states one: the fallback
+/// was English too, so even the no-key path broke the app's Japanese.
+function fallbackExplanation(g: Grounding, language: "ja" | "en"): string {
+  if (language === "ja") {
+    const parts: string[] = [];
+    if (g.price_yen_estimate !== null) {
+      parts.push(`1人あたり約¥${g.price_yen_estimate}`);
+    }
+    const room = g.room_type ? ROOM_PHRASES_JA[g.room_type] : undefined;
+    if (room) parts.push(room);
+    if (g.atmosphere_tags.length > 0) {
+      const words = g.atmosphere_tags
+        .map((tag) => ATMOSPHERE_PHRASES_JA[tag] ?? tag)
+        .join("・");
+      parts.push(`${words}な雰囲気`);
+    }
+    if (g.travel_minutes.length > 0) {
+      parts.push(`移動は最長${Math.max(...g.travel_minutes)}分`);
+    }
+    const lead = g.label && LABEL_PHRASES_JA[g.label]
+      ? `${LABEL_PHRASES_JA[g.label]}として選ばれました`
+      : "必須条件をすべて満たしています";
+    return parts.length > 0 ? `${lead}。${parts.join("、")}。` : `${lead}。`;
+  }
+
   const parts: string[] = [];
   if (g.price_yen_estimate !== null) {
     parts.push(`around ¥${g.price_yen_estimate} per person`);
@@ -1206,6 +1260,7 @@ async function handleExplain(
   req: Request,
   runId: string,
   placeId: string,
+  language: "ja" | "en",
 ): Promise<Response> {
   const authorization = req.headers.get("Authorization") ?? "";
   if (authorization === "") {
@@ -1227,11 +1282,11 @@ async function handleExplain(
   const loaded = await loadGrounding(admin, runId, placeId);
   if (!loaded) return json({ error: "no score row for this run" }, 404);
 
-  let explanation = fallbackExplanation(loaded.grounding);
+  let explanation = fallbackExplanation(loaded.grounding, language);
   if (LLM_API_KEY !== "") {
     try {
       explanation = await chat(
-        EXPLAIN_SYSTEM_PROMPT,
+        explainSystemPrompt(language),
         JSON.stringify(loaded.grounding),
       );
     } catch (error) {
@@ -1270,7 +1325,20 @@ Deno.serve(async (req) => {
         400,
       );
     }
-    return await handleExplain(req, run_id, restaurant_place_id);
+    // Absent means Japanese. The clients are Japanese-first and the old contract sent no
+    // language here at all, which is exactly how English blurbs ended up inside an
+    // all-Japanese UI — so the default has to be the language the app actually speaks,
+    // and a deployed app that predates the parameter is served correctly too.
+    const explainLanguage = language === undefined ? "ja" : language;
+    if (explainLanguage !== "ja" && explainLanguage !== "en") {
+      return json({ error: "language must be ja or en" }, 400);
+    }
+    return await handleExplain(
+      req,
+      run_id,
+      restaurant_place_id,
+      explainLanguage,
+    );
   }
 
   if (mode !== "parse") return json({ error: "unsupported mode" }, 400);
