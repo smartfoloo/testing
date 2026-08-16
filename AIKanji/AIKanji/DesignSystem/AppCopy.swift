@@ -15,6 +15,7 @@ enum AppCopy {
     static let invalidCredentialsError = "メールアドレスまたはパスワードが正しくありません。"
     static let retry = "もう一度試す"
     static let networkError = "通信できませんでした。時間をおいて、もう一度お試しください。"
+    static let sessionExpiredError = "セッションの有効期限が切れました。アプリを開き直すと、新しいセッションで続けられます。"
     static let save = "保存する"
     static let cancel = "キャンセル"
     static let continueAction = "続ける"
@@ -129,6 +130,14 @@ enum AppCopy {
 
     static func errorMessage(for error: Error) -> String {
         let description = error.localizedDescription.lowercased()
+        // A dead token comes back with JWT wording ("JWT expired", "invalid JWT") — an expired
+        // LOGIN, not a rule refusing. It used to fall through to the permission and validation
+        // branches, which told the person they were not allowed to do something they are
+        // allowed to do. Matched first, because "invalid jwt" also contains "invalid".
+        // Kept identical to errorMessage() in web/src/design/copy.ts.
+        if description.contains("jwt") || description.contains("unauthorized") {
+            return sessionExpiredError
+        }
         if description.contains("invalid login credentials")
             || description.contains("invalid email")
             || description.contains("invalid password")
