@@ -18,15 +18,24 @@ With no configuration it boots on an **in-browser mock backend** seeded from
 `AIKanji/supabase/seed.sql`, so the whole flow is usable offline. Invite code `demo01` joins the
 five-person demo event.
 
-To point it at a real project:
+To point it at a real project, use the repository-root environment as the only hand-maintained
+local source:
 
 ```bash
-cp .env.example .env.local   # fill VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY
+# Run from the repository root.
+cp .env.example .env
+# Fill the root .env, then generate both Web and iOS client configuration.
+node scripts/sync-local-secrets.mjs
+node scripts/sync-local-secrets.mjs --check
+cd web
 ```
 
-The same setup `AIKanji/README.md` describes is required: apply the migrations, enable
-anonymous sign-ins, disable public Realtime access, and deploy the `llm-assist` /
-`restaurant-search` functions.
+The script creates gitignored `web/.env.local`; do not copy or edit `web/.env.example` as a
+second source. The Supabase anon key is publishable client configuration. Service-role, provider,
+and hosted-test credentials are server/test-only and must never use a `VITE_*` name or enter a
+browser bundle. The same setup `AIKanji/README.md` describes is required: apply the migrations,
+enable anonymous sign-ins, disable public Realtime access, register provider settings in
+Supabase's encrypted Edge Function secret store, and deploy the functions.
 
 ## Scripts
 
@@ -61,30 +70,36 @@ login screen, as `<persona>@aikanji.demo`. One definition of the golden path, tw
 
 Order matters, because each step is a precondition for the next:
 
-1. **Apply the migrations and the seed** to the project (`0001` … `0023`, then `seed.sql`).
+1. **Apply all migrations and the seed** to the project (through `0028`, then `seed.sql`).
    `postgis` and `vector` must be available.
 2. **Authentication → Providers → enable Anonymous sign-ins**, and in Realtime settings
    **disable "Allow public access"** so the `event-{id}` topics stay private (`0004`'s policy
    on `realtime.messages` is what authorizes a join).
-3. **Deploy all three Edge Functions** and set their secrets — `GOOGLE_PLACES_API_KEY`,
-   `HOTPEPPER_API_KEY`, `LLM_API_KEY`. Migration `0023` must be applied *before or with* the
-   `restaurant-search` deploy: the function calls two RPCs that migration adds.
+3. **Load the ignored root `.env`, register configured provider values in Supabase's encrypted
+   secret store, and deploy all three Edge Functions.** The relevant server-only settings include
+   `GOOGLE_PLACES_API_KEY`, `GOOGLE_ROUTES_API_KEY`, `HOTPEPPER_API_KEY`, and `LLM_API_KEY`;
+   optional model/base URL and Tabelog settings stay server-side too. For each configured value,
+   run `supabase secrets set NAME="$NAME"` from `AIKanji/`, then deploy. Never copy these values to
+   `web/.env.local`.
 4. **Bootstrap the fixture.** `seed.sql` fills `auth_user_id` with `gen_random_uuid()`, so
    until this runs the seeded event belongs to nobody and every RLS check fails:
-   ```
-   SUPABASE_URL=… SUPABASE_SERVICE_ROLE_KEY=… AIKANJI_TEST_PASSWORD=… \
-     node ../AIKanji/supabase/scripts/bootstrap-hosted-fixture.mjs --dry-run
+   ```bash
+   set -a
+   . ../.env
+   set +a
+   node ../AIKanji/supabase/scripts/bootstrap-hosted-fixture.mjs --dry-run
    ```
    Drop `--dry-run` once the plan looks right. It is idempotent, so it is also how you reset
    between runs — it clears the negotiations, runs, decision and lifecycle columns the demo
    mutates, and re-stamps the seeded provider cache so it stays inside `restaurant-search`'s
    TTLs (6h for discovery, 24h for travel). A demo seeded in the morning and run in the
    afternoon would otherwise need a provider call it cannot make.
-5. **Point the app at the project** — `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in
-   `.env.local` — and run it (`npm run dev`, or `npm run build && npm run preview`).
-6. **Run it:**
-   ```
-   AIKANJI_TEST_PASSWORD=… APP_URL=http://localhost:5173 npm run verify:hosted
+5. **Generate the client configuration** from root `.env` with
+   `node ../scripts/sync-local-secrets.mjs`, then run the app (`npm run dev`, or
+   `npm run build && npm run preview`). Do not maintain `.env.local` directly.
+6. **Run it** after shell-sourcing root `.env` as shown above:
+   ```bash
+   APP_URL=http://localhost:5173 npm run verify:hosted
    ```
 
 Two things will waste your time if nobody says them:
@@ -128,12 +143,15 @@ another user's rows, so it is a setup tool and must never reach the app or an as
 Both need the same bootstrapped fixture as `verify:hosted`, plus two more values in the
 environment, because they talk to the project from node as well as through the browser:
 
+```bash
+set -a
+. ../.env                 # hosted project; the ignored root file is the only manual source
+set +a
+npm run verify:realtime
 ```
-set -a; . <(cd ../AIKanji && supabase status -o env); set +a     # local stack
-SUPABASE_URL="$API_URL" SUPABASE_ANON_KEY="$ANON_KEY" \
-  SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
-  AIKANJI_TEST_PASSWORD=… npm run verify:realtime
-```
+
+For a local stack, values reported by `supabase status -o env` can be exported for that process;
+they are generated stack output, not a second hand-maintained env file.
 
 - **`verify:realtime`** (`scripts/realtime-delivery.mjs`) is the only suite that proves a
   broadcast is **delivered**. Every other suite re-fetches after each action, so Realtime

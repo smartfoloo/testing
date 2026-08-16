@@ -38,14 +38,13 @@ actor RealtimeTopicRegistry {
     /// Every broadcast event the SQL side sends on `event-{id}`. `realtime.send` names the
     /// event, and the client dispatches by that name, so this list is the contract with the
     /// migrations — not something a caller should be free to spell.
-    enum EventBroadcast: String, Sendable {
-        /// 0004's `trg_broadcast_constraint`, sanitized: PRIVATE rows never reach it.
+    enum EventBroadcast: String, Sendable, Hashable {
         case constraintAdded = "constraint_added"
-        /// 0006/0009's recommendation-run triggers.
+        case constraintUpdated = "constraint_updated"
+        case constraintDeleted = "constraint_deleted"
+        case eventProgressUpdated = "event_progress_updated"
         case runUpdated = "run_updated"
-        /// `fn_choose_restaurant` (0015).
         case eventDecided = "event_decided"
-        /// `fn_close_preferences` (0018).
         case preferencesClosed = "preferences_closed"
         /// 0029's statement-level trigger on `participant_constraints`: somebody's requirement
         /// changed, so the last feasibility result is out of date. Deliberately NOT a recompute
@@ -124,6 +123,36 @@ actor RealtimeTopicRegistry {
         try await entry.join.value
 
         return (RealtimeTopicSubscription(topic: topic, id: id), messages)
+    }
+
+    func subscribe(
+        topic: String,
+        events: [EventBroadcast],
+        client: SupabaseClient
+    ) async throws -> (
+        subscription: RealtimeTopicSubscription,
+        messages: [EventBroadcast: AsyncStream<[String: AnyJSON]>]
+    ) {
+        while let removal = removals[topic] {
+            await removal.task.value
+        }
+
+        let id = UUID()
+        let entry: Entry
+        if var existing = entries[topic] {
+            existing.subscribers.insert(id)
+            entries[topic] = existing
+            entry = existing
+        } else {
+            entry = makeEntry(topic: topic, client: client, firstSubscriber: id)
+            entries[topic] = entry
+        }
+
+        let streams = Dictionary(uniqueKeysWithValues: events.map {
+            ($0, entry.channel.broadcastStream(event: $0.rawValue))
+        })
+        try await entry.join.value
+        return (RealtimeTopicSubscription(topic: topic, id: id), streams)
     }
 
     /// Drops one hold. The channel survives while anyone else is listening — the organizer

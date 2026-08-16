@@ -6,6 +6,31 @@ on:
   pull_request:
 
 jobs:
+  config-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify generated client configuration with placeholders
+        run: |
+          node --check scripts/sync-local-secrets.mjs
+          printf '%s\n' \
+            'SUPABASE_URL=https://example.invalid' \
+            'SUPABASE_ANON_KEY=ci-publishable-placeholder' \
+            'INVITE_LINK_BASE_URL=https://invite.example.invalid' \
+            'SUPABASE_SERVICE_ROLE_KEY=ci-server-only-placeholder' \
+            'LLM_API_KEY=ci-server-only-placeholder' \
+            'AIKANJI_TEST_PASSWORD=ci-server-only-placeholder' \
+            > .env
+          node scripts/sync-local-secrets.mjs
+          node scripts/sync-local-secrets.mjs --check
+          if grep -Fq 'ci-server-only-placeholder' AIKanji/Secrets.xcconfig web/.env.local; then
+            echo 'server-only placeholder reached a client output' >&2
+            exit 1
+          fi
+
   edge-functions:
     runs-on: ubuntu-latest
     steps:

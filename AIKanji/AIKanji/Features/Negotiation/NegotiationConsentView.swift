@@ -8,14 +8,14 @@ struct NegotiationConsentView: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        BottomSheetScaffold(title: "ちょっとした確認") {
+        BottomSheetScaffold(title: "候補を増やすための確認") {
             VStack(alignment: .leading, spacing: AppSpacing.lg) {
                 Text(negotiation.question).font(AppTypography.section)
-                Text(negotiation.impact).foregroundStyle(AppColors.accent).font(AppTypography.body.weight(.bold))
+                Text(negotiation.impact)
+                    .foregroundStyle(AppColors.accent)
+                    .font(AppTypography.body.weight(.bold))
                 if let errorMessage {
-                    InlineErrorView(message: errorMessage) {
-                        self.errorMessage = nil
-                    }
+                    InlineErrorView(message: errorMessage) { self.errorMessage = nil }
                 }
                 AppCard {
                     VStack(alignment: .leading, spacing: AppSpacing.xs) {
@@ -31,7 +31,7 @@ struct NegotiationConsentView: View {
                     Task { await respond(accept: false) }
                 }
                 .disabled(isSubmitting)
-                Text("回答はあなたの希望にだけ反映され、誰が何を選んだかは他の参加者には表示されません。")
+                Text("回答はあなたの希望にだけ反映され、誰が何を選んだかは他の参加者には表示されません。安全に関わる条件は調整の対象になりません。")
                     .font(AppTypography.caption)
                     .foregroundStyle(AppColors.ink.opacity(0.72))
             }
@@ -42,13 +42,13 @@ struct NegotiationConsentView: View {
     private func respond(accept: Bool) async {
         guard !isSubmitting else { return }
         isSubmitting = true
+        defer { isSubmitting = false }
         do {
             try await onResponse(accept)
             dismiss()
         } catch {
             errorMessage = AppCopy.errorMessage(for: error)
         }
-        isSubmitting = false
     }
 }
 
@@ -57,22 +57,51 @@ struct NegotiationWatcher: ViewModifier {
     private let service = NegotiationService()
     private static let pollInterval: Duration = .seconds(5)
     @State private var pending: PendingNegotiation?
+    @State private var presentedNegotiation: PendingNegotiation?
     @State private var errorMessage: String?
 
     func body(content: Content) -> some View {
         content
             .safeAreaInset(edge: .top) {
-                if let errorMessage {
-                    InlineErrorView(message: errorMessage) {
-                        self.errorMessage = nil
+                VStack(spacing: AppSpacing.xs) {
+                    if let pending {
+                        Button {
+                            presentedNegotiation = pending
+                        } label: {
+                            HStack(spacing: AppSpacing.sm) {
+                                Image(systemName: "questionmark.bubble.fill")
+                                    .foregroundStyle(AppColors.accent)
+                                Text("希望の調整をお願いします")
+                                    .font(AppTypography.body.weight(.semibold))
+                                    .foregroundStyle(AppColors.ink)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                Text("確認する")
+                                    .font(AppTypography.caption.weight(.bold))
+                                    .foregroundStyle(AppColors.accent)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(AppColors.accent)
+                            }
+                            .padding(.horizontal, AppSpacing.md)
+                            .frame(minHeight: 52)
+                            .background(AppColors.card)
+                            .clipShape(RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous))
+                            .shadow(color: AppColors.ink.opacity(0.12), radius: 8, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("negotiation-banner")
                     }
-                    .padding(.horizontal, AppSpacing.md)
+                    if let errorMessage {
+                        InlineErrorView(message: errorMessage) { self.errorMessage = nil }
+                    }
                 }
+                .padding(.horizontal, AppSpacing.md)
             }
-            .sheet(item: $pending) { negotiation in
+            .sheet(item: $presentedNegotiation) { negotiation in
                 NegotiationConsentView(negotiation: negotiation) { accept in
                     _ = try await service.respond(negotiationId: negotiation.id, accept: accept)
                     pending = nil
+                    presentedNegotiation = nil
                 }
             }
             .task { await watch() }
@@ -80,13 +109,13 @@ struct NegotiationWatcher: ViewModifier {
 
     private func watch() async {
         while !Task.isCancelled {
-            if pending == nil {
-                do {
-                    pending = try await service.pendingNegotiation(participantId: participantId)
-                    errorMessage = nil
-                } catch {
-                    errorMessage = AppCopy.networkError
-                }
+            do {
+                let latest = try await service.pendingNegotiation(participantId: participantId)
+                pending = latest
+                if latest == nil { presentedNegotiation = nil }
+                errorMessage = nil
+            } catch {
+                errorMessage = AppCopy.errorMessage(for: error)
             }
             do {
                 try await Task.sleep(for: Self.pollInterval)

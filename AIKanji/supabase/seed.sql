@@ -38,7 +38,7 @@ insert into participant_constraints (event_id, participant_id, kind, raw_text, n
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000c1','WANT','quiet atmosphere','atmosphere','{"tags":["quiet"]}','PUBLIC'),
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','MUST','within 35 min travel','travel_time','{"max_minutes":35}','PUBLIC'),
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000d1','WANT','casual','atmosphere','{"tags":["casual"]}','PUBLIC'),
-('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000e1','MUST','shellfish allergy','allergy','{"allergens":["shellfish"]}','ANONYMOUS'),
+('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000e1','MUST','shrimp and crab allergy','allergy','{"allergens":["shrimp","crab"]}','ANONYMOUS'),
 ('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-0000000000e1','WANT','traditional japanese atmosphere','atmosphere','{"tags":["traditional_japanese"]}','PUBLIC');
 
 insert into restaurants (place_id) values
@@ -51,16 +51,16 @@ insert into restaurants (place_id) values
 insert into restaurant_features
   (place_id, price_yen_estimate, room_type, dietary_tags, allergy_safe_tags,
    atmosphere_tags, travel_minutes_by_participant) values
-('demo_place_001', 3800, 'semi_private', array['vegetarian'], array['shellfish_free'],
+('demo_place_001', 3800, 'semi_private', array['vegetarian'], array['shrimp_free','crab_free'],
    array['quiet','traditional_japanese'],
    jsonb_build_object('00000000-0000-0000-0000-0000000000d1', 20)),
-('demo_place_002', 3500, 'semi_private', array['vegetarian'], array['shellfish_free'],
+('demo_place_002', 3500, 'semi_private', array['vegetarian'], array['shrimp_free','crab_free'],
    array['casual'],
    jsonb_build_object('00000000-0000-0000-0000-0000000000d1', 30)),
-('demo_place_003', 4200, 'open', array[]::text[], array['shellfish_free'],
+('demo_place_003', 4200, 'open', array[]::text[], array['shrimp_free','crab_free'],
    array['quiet'],
    jsonb_build_object('00000000-0000-0000-0000-0000000000d1', 15)),
-('demo_place_004', 3900, 'semi_private', array['vegetarian'], array['shellfish_free'],
+('demo_place_004', 3900, 'semi_private', array['vegetarian'], array['shrimp_free','crab_free'],
    array['quiet'],
    jsonb_build_object('00000000-0000-0000-0000-0000000000d1', 25));
 

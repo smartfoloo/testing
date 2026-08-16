@@ -25,21 +25,33 @@ struct PrimaryButton: View {
     var systemImage: String?
     var isLoading = false
     var action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: AppSpacing.xs) {
-                if isLoading { ProgressView().tint(.white) }
+                if isLoading {
+                    ProgressView()
+                        .tint(AppColors.accentForeground)
+                        .accessibilityHidden(true)
+                }
                 if let systemImage, !isLoading { Image(systemName: systemImage) }
-                Text(isLoading ? AppCopy.loading : title)
+                Text(title)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .font(AppTypography.body.weight(.bold))
+            .foregroundStyle(AppColors.accentForeground)
             .frame(maxWidth: .infinity)
             .frame(minHeight: 48)
+            .padding(.vertical, AppSpacing.xxs)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(AppColors.accent)
+        .buttonStyle(.plain)
+        .background(AppColors.accent)
         .clipShape(Capsule())
+        .opacity(isEnabled ? 1 : 0.45)
+        .accessibilityLabel(title)
+        .accessibilityValue(isLoading ? AppCopy.loading : "")
         .accessibilityIdentifier("primary-\(title)")
         .disabled(isLoading)
     }
@@ -49,22 +61,29 @@ struct SecondaryButton: View {
     let title: String
     var systemImage: String?
     var action: () -> Void
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: AppSpacing.xs) {
                 if let systemImage { Image(systemName: systemImage) }
                 Text(title)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .font(AppTypography.body.weight(.semibold))
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .frame(minHeight: 48)
+            .padding(.horizontal, AppSpacing.md)
+            .padding(.vertical, AppSpacing.xxs)
         }
         .buttonStyle(.plain)
         .foregroundStyle(AppColors.ink)
         .background(AppColors.card)
         .overlay(Capsule().strokeBorder(AppColors.border, style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
         .clipShape(Capsule())
+        .opacity(isEnabled ? 1 : 0.45)
+        .accessibilityLabel(title)
     }
 }
 
@@ -74,14 +93,23 @@ struct SelectionChip: View {
     var action: () -> Void
 
     var body: some View {
-        Button(title, action: action)
-            .font(AppTypography.body.weight(.semibold))
-            .foregroundStyle(isSelected ? Color.white : AppColors.ink)
-            .padding(.horizontal, AppSpacing.md)
-            .frame(minHeight: 44)
-            .background(isSelected ? AppColors.accent : AppColors.card)
-            .overlay(Capsule().strokeBorder(isSelected ? Color.clear : AppColors.border))
-            .clipShape(Capsule())
+        Button(action: action) {
+            Text(title)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(AppTypography.body.weight(.semibold))
+        .foregroundStyle(isSelected ? AppColors.accentForeground : AppColors.ink)
+        .padding(.horizontal, AppSpacing.md)
+        .padding(.vertical, AppSpacing.xxs)
+        .frame(minHeight: 44)
+        .background(isSelected ? AppColors.accent : AppColors.card)
+        .overlay(Capsule().strokeBorder(isSelected ? Color.clear : AppColors.border))
+        .clipShape(Capsule())
+        .accessibilityLabel(title)
+        .accessibilityValue(isSelected ? "選択中" : "未選択")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -93,9 +121,9 @@ struct StarterChip: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .multilineTextAlignment(.center)
+                .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, minHeight: 48)
+                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
                 .frame(maxHeight: .infinity)
                 .padding(.horizontal, AppSpacing.xs)
                 .background(tint)
@@ -104,8 +132,9 @@ struct StarterChip: View {
         }
         .buttonStyle(.plain)
         .font(AppTypography.caption.weight(.semibold))
-        .foregroundStyle(AppColors.ink)
+        .foregroundStyle(AppColors.warmForeground)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityLabel(title)
     }
 }
 
@@ -134,6 +163,9 @@ struct StatTile: View {
         .padding(AppSpacing.md)
         .background(tint)
         .clipShape(RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
     }
 }
 

@@ -9,11 +9,9 @@
 // response shape is validated fail-closed, `sensitivity` / `verification_requirement` are
 // derived server-side, and the three safety categories are filtered to closed vocabularies —
 // accessibility `needs` to migration 0022's (ACCESSIBILITY_NEEDS below), allergy `allergens`
-// and dietary `tags` to migration 0026's (ALLERGENS / DIETARY_TAGS). An unmatchable value would
-// otherwise make a never-relaxable MUST unsatisfiable by every venue in Tokyo: that is not
-// hypothetical, it is what 「えびとかにのアレルギーがあります」 did — the model mirrored the
-// writer's language ({"allergens":["えび","かに"]}), venues record 'shellfish_free', and the
-// engine's containment test looked for 'えび_free' forever. Allergy is deliberately never
+// and dietary `tags` to the canonical SQL vocabularies (ALLERGENS / DIETARY_TAGS). An
+// unmatchable value would otherwise make a never-relaxable MUST unsatisfiable by every venue in
+// Tokyo. Allergy is deliberately never
 // relaxable, so there was no negotiation to escape through either.
 //
 // The prompt states each closed list AND the server enforces it, in that order of trust: the
@@ -101,26 +99,41 @@ const ACCESSIBILITY_ALIASES = new Map<string, string>([
   ["wheelchair", "wheelchair_accessible_entrance"],
 ]);
 
-/// The CLOSED allergen vocabulary — six members, defined once in migration 0026
-/// (fn_allergen_vocabulary, plus the CHECK on restaurant_features.allergy_safe_tags) and
-/// mirrored here, in web/src/backend/engine.ts and in web/src/backend/mock.ts.
-///
-/// They are not invented: allergenLabel() in web/src/design/copy.ts, AppCopy.allergen in
-/// AppCopy.swift and ALLERGEN_WORDS in mock.ts already enumerate exactly these, so every member
-/// has a Japanese label a fully Japanese UI can print (甲殻類・卵・乳・落花生・小麦・そば). Five
-/// are 消費者庁の特定原材料 and `shellfish` covers えび・かに as one crustacean tag, which is the
-/// granularity the venue side records.
-///
+/// The CLOSED allergen vocabulary — the official 9 mandatory + 20 recommended catalog mirrored
+/// from Constraint.swift and defined in SQL by the post-0028 reconciliation migration.
 /// Feasibility is exact array containment against '<allergen>_free' tags
 /// (fn_allergy_allergens_met), and an allergy MUST is NEVER relaxable, so a member outside this
 /// list can never be matched by any venue and would mean zero candidates forever.
 const ALLERGENS = [
+  "shrimp",
+  "cashew_nut",
+  "crab",
+  "walnut",
+  "wheat",
   "buckwheat",
   "egg",
   "milk",
   "peanut",
-  "shellfish",
-  "wheat",
+  "almond",
+  "abalone",
+  "squid",
+  "salmon_roe",
+  "orange",
+  "kiwi",
+  "beef",
+  "sesame",
+  "salmon",
+  "mackerel",
+  "soybean",
+  "chicken",
+  "banana",
+  "pistachio",
+  "pork",
+  "macadamia_nut",
+  "peach",
+  "yam",
+  "apple",
+  "gelatin",
 ] as const;
 
 /// The CLOSED dietary vocabulary — four members (fn_dietary_vocabulary, 0026), read off
@@ -181,69 +194,143 @@ const ATMOSPHERE_ALIASES = new Map<string, string>([
   ["お洒落", "stylish"],
 ]);
 
-/// Every spelling of an allergen we are willing to translate, and the member it means. Maps
-/// rather than object literals so a value called "constructor" or "__proto__" resolves to
-/// nothing instead of to something inherited from Object.prototype.
-///
-/// Each alias names the SAME ingredient as its member, so mapping it preserves the requirement
-/// and invents nothing. Kept in step with fn_allergen_canonical in migration 0026 — the two are
-/// asserted against each other by tests/backend_tests.sql and scripts/verify-engine.ts.
-///
-/// WHAT IS DELIBERATELY ABSENT, because a wrong mapping here is a health risk:
-///   貝 / 貝類 / あさり / 牡蠣  molluscs. `shellfish` is this schema's CRUSTACEAN tag (甲殻類),
-///        and a venue that confirmed itself shellfish_free has said nothing about oysters.
-///   グルテン  is a dietary tag (gluten_free); rewriting it to `wheat` would answer a coeliac
-///        requirement with a label that does not cover barley or rye.
-///   大豆 / ナッツ / 魚 / マンゴー  real allergens with no member and no venue tag. They are never
-///        approximated and never silently dropped: applyAllergenVocabulary keeps the writer's
-///        own wording and forces needs_clarification.
-const ALLERGEN_ALIASES = new Map<string, string>([
-  ["shellfish", "shellfish"],
-  ["えび", "shellfish"],
-  ["エビ", "shellfish"],
-  ["海老", "shellfish"],
-  ["かに", "shellfish"],
-  ["カニ", "shellfish"],
-  ["蟹", "shellfish"],
-  ["甲殻類", "shellfish"],
-  ["甲殻", "shellfish"],
-  ["shrimp", "shellfish"],
-  ["prawn", "shellfish"],
-  ["crab", "shellfish"],
-  ["crustacean", "shellfish"],
-  ["crustaceans", "shellfish"],
-  ["egg", "egg"],
-  ["eggs", "egg"],
-  ["卵", "egg"],
-  ["たまご", "egg"],
-  ["タマゴ", "egg"],
-  ["玉子", "egg"],
-  ["鶏卵", "egg"],
-  ["milk", "milk"],
-  ["dairy", "milk"],
-  ["乳", "milk"],
-  ["牛乳", "milk"],
-  ["ミルク", "milk"],
-  ["乳製品", "milk"],
-  ["乳成分", "milk"],
-  ["チーズ", "milk"],
-  ["バター", "milk"],
-  ["peanut", "peanut"],
-  ["peanuts", "peanut"],
-  ["落花生", "peanut"],
-  ["ピーナッツ", "peanut"],
-  ["ピーナツ", "peanut"],
-  ["wheat", "wheat"],
-  ["小麦", "wheat"],
-  ["こむぎ", "wheat"],
-  ["コムギ", "wheat"],
-  ["小麦粉", "wheat"],
-  ["buckwheat", "buckwheat"],
-  ["soba", "buckwheat"],
-  ["そば", "buckwheat"],
-  ["蕎麦", "buckwheat"],
-  ["ソバ", "buckwheat"],
-  ["そば粉", "buckwheat"],
+/// Closed official catalog aliases. Most inputs map to one member; the legacy collective
+/// `shellfish`/甲殻類 expands to both shrimp and crab so old data is never weakened.
+const allergenMembers = (...members: (typeof ALLERGENS)[number][]) => members;
+const ALLERGEN_ALIASES = new Map<
+  string,
+  readonly (typeof ALLERGENS)[number][]
+>([
+  ["shrimp", allergenMembers("shrimp")],
+  ["prawn", allergenMembers("shrimp")],
+  ["prawns", allergenMembers("shrimp")],
+  ["えび", allergenMembers("shrimp")],
+  ["エビ", allergenMembers("shrimp")],
+  ["海老", allergenMembers("shrimp")],
+  ["cashew_nut", allergenMembers("cashew_nut")],
+  ["cashew", allergenMembers("cashew_nut")],
+  ["cashews", allergenMembers("cashew_nut")],
+  ["カシューナッツ", allergenMembers("cashew_nut")],
+  ["crab", allergenMembers("crab")],
+  ["crabs", allergenMembers("crab")],
+  ["かに", allergenMembers("crab")],
+  ["カニ", allergenMembers("crab")],
+  ["蟹", allergenMembers("crab")],
+  ["walnut", allergenMembers("walnut")],
+  ["walnuts", allergenMembers("walnut")],
+  ["くるみ", allergenMembers("walnut")],
+  ["クルミ", allergenMembers("walnut")],
+  ["胡桃", allergenMembers("walnut")],
+  ["wheat", allergenMembers("wheat")],
+  ["小麦", allergenMembers("wheat")],
+  ["こむぎ", allergenMembers("wheat")],
+  ["コムギ", allergenMembers("wheat")],
+  ["小麦粉", allergenMembers("wheat")],
+  ["buckwheat", allergenMembers("buckwheat")],
+  ["soba", allergenMembers("buckwheat")],
+  ["そば", allergenMembers("buckwheat")],
+  ["蕎麦", allergenMembers("buckwheat")],
+  ["ソバ", allergenMembers("buckwheat")],
+  ["そば粉", allergenMembers("buckwheat")],
+  ["egg", allergenMembers("egg")],
+  ["eggs", allergenMembers("egg")],
+  ["卵", allergenMembers("egg")],
+  ["たまご", allergenMembers("egg")],
+  ["タマゴ", allergenMembers("egg")],
+  ["玉子", allergenMembers("egg")],
+  ["鶏卵", allergenMembers("egg")],
+  ["milk", allergenMembers("milk")],
+  ["dairy", allergenMembers("milk")],
+  ["乳", allergenMembers("milk")],
+  ["牛乳", allergenMembers("milk")],
+  ["ミルク", allergenMembers("milk")],
+  ["乳製品", allergenMembers("milk")],
+  ["乳成分", allergenMembers("milk")],
+  ["チーズ", allergenMembers("milk")],
+  ["バター", allergenMembers("milk")],
+  ["peanut", allergenMembers("peanut")],
+  ["peanuts", allergenMembers("peanut")],
+  ["落花生", allergenMembers("peanut")],
+  ["ピーナッツ", allergenMembers("peanut")],
+  ["ピーナツ", allergenMembers("peanut")],
+  ["almond", allergenMembers("almond")],
+  ["almonds", allergenMembers("almond")],
+  ["アーモンド", allergenMembers("almond")],
+  ["abalone", allergenMembers("abalone")],
+  ["あわび", allergenMembers("abalone")],
+  ["アワビ", allergenMembers("abalone")],
+  ["鮑", allergenMembers("abalone")],
+  ["squid", allergenMembers("squid")],
+  ["いか", allergenMembers("squid")],
+  ["イカ", allergenMembers("squid")],
+  ["烏賊", allergenMembers("squid")],
+  ["salmon_roe", allergenMembers("salmon_roe")],
+  ["salmonroe", allergenMembers("salmon_roe")],
+  ["いくら", allergenMembers("salmon_roe")],
+  ["イクラ", allergenMembers("salmon_roe")],
+  ["orange", allergenMembers("orange")],
+  ["oranges", allergenMembers("orange")],
+  ["オレンジ", allergenMembers("orange")],
+  ["kiwi", allergenMembers("kiwi")],
+  ["kiwifruit", allergenMembers("kiwi")],
+  ["kiwi_fruit", allergenMembers("kiwi")],
+  ["キウイ", allergenMembers("kiwi")],
+  ["キウイフルーツ", allergenMembers("kiwi")],
+  ["beef", allergenMembers("beef")],
+  ["牛肉", allergenMembers("beef")],
+  ["sesame", allergenMembers("sesame")],
+  ["ごま", allergenMembers("sesame")],
+  ["ゴマ", allergenMembers("sesame")],
+  ["胡麻", allergenMembers("sesame")],
+  ["salmon", allergenMembers("salmon")],
+  ["さけ", allergenMembers("salmon")],
+  ["サケ", allergenMembers("salmon")],
+  ["鮭", allergenMembers("salmon")],
+  ["mackerel", allergenMembers("mackerel")],
+  ["さば", allergenMembers("mackerel")],
+  ["サバ", allergenMembers("mackerel")],
+  ["鯖", allergenMembers("mackerel")],
+  ["soybean", allergenMembers("soybean")],
+  ["soybeans", allergenMembers("soybean")],
+  ["soy", allergenMembers("soybean")],
+  ["大豆", allergenMembers("soybean")],
+  ["だいず", allergenMembers("soybean")],
+  ["chicken", allergenMembers("chicken")],
+  ["鶏肉", allergenMembers("chicken")],
+  ["とり肉", allergenMembers("chicken")],
+  ["banana", allergenMembers("banana")],
+  ["bananas", allergenMembers("banana")],
+  ["バナナ", allergenMembers("banana")],
+  ["pistachio", allergenMembers("pistachio")],
+  ["pistachios", allergenMembers("pistachio")],
+  ["ピスタチオ", allergenMembers("pistachio")],
+  ["pork", allergenMembers("pork")],
+  ["豚肉", allergenMembers("pork")],
+  ["macadamia_nut", allergenMembers("macadamia_nut")],
+  ["macadamia", allergenMembers("macadamia_nut")],
+  ["マカダミアナッツ", allergenMembers("macadamia_nut")],
+  ["peach", allergenMembers("peach")],
+  ["peaches", allergenMembers("peach")],
+  ["もも", allergenMembers("peach")],
+  ["モモ", allergenMembers("peach")],
+  ["桃", allergenMembers("peach")],
+  ["yam", allergenMembers("yam")],
+  ["yamaimo", allergenMembers("yam")],
+  ["やまいも", allergenMembers("yam")],
+  ["山芋", allergenMembers("yam")],
+  ["apple", allergenMembers("apple")],
+  ["apples", allergenMembers("apple")],
+  ["りんご", allergenMembers("apple")],
+  ["リンゴ", allergenMembers("apple")],
+  ["林檎", allergenMembers("apple")],
+  ["gelatin", allergenMembers("gelatin")],
+  ["gelatine", allergenMembers("gelatin")],
+  ["ゼラチン", allergenMembers("gelatin")],
+  ["shellfish", allergenMembers("shrimp", "crab")],
+  ["crustacean", allergenMembers("shrimp", "crab")],
+  ["crustaceans", allergenMembers("shrimp", "crab")],
+  ["甲殻類", allergenMembers("shrimp", "crab")],
+  ["甲殻", allergenMembers("shrimp", "crab")],
 ]);
 
 /// The same table for dietary tags (fn_dietary_canonical, 0026). 菜食 IS vegetarian, ハラール IS
@@ -350,12 +437,35 @@ const FALLBACK: ParseResult = {
 /// failure this whole file is fixing (allergy was the only gating category the prompt did not
 /// exemplify, so the model mirrored the writer's language).
 const ALLERGEN_COVERAGE: Record<(typeof ALLERGENS)[number], string> = {
-  shellfish: "えび・かに・甲殻類 (CRUSTACEANS ONLY)",
-  egg: "卵・たまご・玉子・鶏卵",
-  milk: "乳・牛乳・乳製品・チーズ・バター",
-  peanut: "落花生・ピーナッツ",
+  shrimp: "えび",
+  cashew_nut: "カシューナッツ",
+  crab: "かに",
+  walnut: "くるみ",
   wheat: "小麦",
-  buckwheat: "そば・蕎麦",
+  buckwheat: "そば",
+  egg: "卵",
+  milk: "乳",
+  peanut: "落花生（ピーナッツ）",
+  almond: "アーモンド",
+  abalone: "あわび",
+  squid: "いか",
+  salmon_roe: "いくら",
+  orange: "オレンジ",
+  kiwi: "キウイフルーツ",
+  beef: "牛肉",
+  sesame: "ごま",
+  salmon: "さけ",
+  mackerel: "さば",
+  soybean: "大豆",
+  chicken: "鶏肉",
+  banana: "バナナ",
+  pistachio: "ピスタチオ",
+  pork: "豚肉",
+  macadamia_nut: "マカダミアナッツ",
+  peach: "もも",
+  yam: "やまいも",
+  apple: "りんご",
+  gelatin: "ゼラチン",
 };
 
 const DIETARY_COVERAGE: Record<(typeof DIETARY_TAGS)[number], string> = {
@@ -399,19 +509,23 @@ normalized_value shape by type:
   atmosphere   {"tags": string[]}          CLOSED LIST, see below
   other        {}
 
+For budget, max_yen must be greater than 0. If min_yen is present it must satisfy
+0 <= min_yen < max_yen. Never omit max_yen and never emit a non-numeric budget.
+
 Every value in a closed list below is written in English EVEN WHEN THE TEXT IS JAPANESE. These
 are database identifiers, not words shown to anyone: the app prints its own Japanese label for
 each one. A Japanese value can never be matched against a restaurant's recorded data.
 
-allergy "allergens" is a CLOSED list of exactly these six values. The Japanese after each one
-is what it covers, not an alternative spelling to output:
+allergy "allergens" is a CLOSED list of exactly these 29 official values (9 mandatory, then
+20 recommended). The Japanese after each one is what it covers, not an alternative spelling to
+output:
 ${promptVocabulary(ALLERGENS, ALLERGEN_COVERAGE)}
-  「えびとかにのアレルギーがあります」 -> {"allergens":["shellfish"]}
+  「えびとかにのアレルギーがあります」 -> {"allergens":["shrimp","crab"]}
   「そばアレルギーです」            -> {"allergens":["buckwheat"]}
   「卵と乳製品がだめです」          -> allergy, {"allergens":["egg","milk"]}
   "peanut allergy"                  -> {"allergens":["peanut"]}
-An allergen this list CANNOT express — マンゴー, 大豆, ナッツ, 魚, and 貝 (molluscs: shellfish
-above is crustaceans only) — goes in semantic_remainder in the writer's own words, and
+A collective crustacean value such as 甲殻類 or shellfish means BOTH shrimp and crab. An
+allergen this list cannot express goes in semantic_remainder in the writer's own words, and
 normalized_type STAYS allergy. NEVER approximate it with a different allergen, and never leave
 it out of semantic_remainder: someone else has to confirm it with the restaurant by phone.
 
@@ -503,6 +617,19 @@ function validate(candidate: unknown, rawText: string): ModelParse | null {
     return null;
   }
   if (!isPlainObject(normalized_value)) return null;
+  if (normalized_type === "budget") {
+    const maximum = normalized_value.max_yen;
+    const minimum = normalized_value.min_yen;
+    if (
+      typeof maximum !== "number" || !Number.isFinite(maximum) || maximum <= 0
+    ) return null;
+    if (
+      minimum !== undefined &&
+      (typeof minimum !== "number" || !Number.isFinite(minimum) ||
+        minimum < 0 ||
+        minimum >= maximum)
+    ) return null;
+  }
   if (
     suggested_visibility !== "PUBLIC" && suggested_visibility !== "ANONYMOUS"
   ) return null;
@@ -630,20 +757,20 @@ function taxonomyToken(raw: string): string {
   return raw.toLowerCase().replace(/[ 　\-－‐]/g, "_").trim();
 }
 
-/// One allergen word -> one ALLERGENS member, or null. A trailing '_free' is stripped first so a
-/// model that echoes the venue side's 'shellfish_free' still lands on 'shellfish' rather than
-/// being dropped. Mirrors fn_allergen_canonical (0026).
-function canonicalAllergen(raw: unknown): string | null {
-  if (typeof raw !== "string") return null;
-  return ALLERGEN_ALIASES.get(taxonomyToken(raw).replace(/_?free$/, "")) ??
-    null;
+/// One allergen word -> one or more ALLERGENS members. A trailing '_free' is stripped first so
+/// stale venue-side values still land on the participant vocabulary. The only one-to-many alias
+/// is the legacy crustacean collective, which expands to both shrimp and crab.
+function canonicalAllergens(raw: unknown): readonly string[] {
+  if (typeof raw !== "string") return [];
+  return ALLERGEN_ALIASES.get(taxonomyToken(raw).replace(/_?free$/, "")) ?? [];
 }
 
-/// One dietary word -> one DIETARY_TAGS member, or null. No '_free' stripping here: 'gluten_free'
-/// IS a member. Mirrors fn_dietary_canonical (0026).
-function canonicalDietaryTag(raw: unknown): string | null {
-  if (typeof raw !== "string") return null;
-  return DIETARY_ALIASES.get(taxonomyToken(raw)) ?? null;
+/// One dietary word -> zero or one DIETARY_TAGS member. No '_free' stripping here:
+/// 'gluten_free' IS a member. Mirrors fn_dietary_canonical (0026).
+function canonicalDietaryTags(raw: unknown): readonly string[] {
+  if (typeof raw !== "string") return [];
+  const tag = DIETARY_ALIASES.get(taxonomyToken(raw));
+  return tag ? [tag] : [];
 }
 
 /// One atmosphere word -> one ATMOSPHERE_TAGS member, or null.
@@ -687,7 +814,7 @@ function applyClosedTagVocabulary(
   rawText: string,
   type: "allergy" | "dietary",
   key: "allergens" | "tags",
-  canonicalize: (raw: unknown) => string | null,
+  canonicalize: (raw: unknown) => readonly string[],
 ): ModelParse {
   if (result.normalized_type !== type) return result;
 
@@ -700,14 +827,14 @@ function applyClosedTagVocabulary(
   let dropped = stated.length === 0;
   for (const value of stated) {
     const mapped = canonicalize(value);
-    if (mapped === null) {
+    if (mapped.length === 0) {
       dropped = true;
       continue;
     }
-    if (!canonical.includes(mapped)) canonical.push(mapped);
-    // A synonym is a rename, not a loss — but 「乳製品」 -> milk and 「甲殻類」 -> shellfish are
-    // both broader-to-narrower in places, so a human still confirms what we understood.
-    if (mapped !== value) dropped = true;
+    for (const member of mapped) {
+      if (!canonical.includes(member)) canonical.push(member);
+    }
+    if (mapped.length !== 1 || mapped[0] !== value) dropped = true;
   }
   // Sorted so the stored value matches fn_allergen_canonical_allergens' output.
   canonical.sort();
@@ -832,12 +959,12 @@ function applyClosedVocabularies(
           rawText,
           "dietary",
           "tags",
-          canonicalDietaryTag,
+          canonicalDietaryTags,
         ),
         rawText,
         "allergy",
         "allergens",
-        canonicalAllergen,
+        canonicalAllergens,
       ),
       rawText,
     ),

@@ -18,6 +18,10 @@ final class OrganizerDashboardViewModel: ObservableObject {
     @Published var isConfirmingClose = false
     @Published var statusMessage: String?
     @Published var errorMessage: String?
+    private var pendingStaleAt: Date?
+    private var autoRecomputeTask: Task<Void, Never>?
+    private var autoRecomputeWorkTask: Task<Void, Never>?
+    private var isAutoRecomputing = false
     private let service: NegotiationService
     init(service: NegotiationService = NegotiationService()) { self.service = service }
     var negotiationInProgress: Bool { openNegotiations > 0 }
@@ -62,16 +66,17 @@ final class OrganizerDashboardViewModel: ObservableObject {
     }
 
     func load(eventId: UUID) async {
+        var staleAt: Date?
         do {
             responseCount = try await service.responseCount(eventId: eventId)
             openNegotiations = try await service.pendingNegotiationCount(eventId: eventId)
             if let run = try await service.latestRun(eventId: eventId) {
-                feasibleCount = run.feasibleCount
-                latestRunId = run.id
-                latestRunAt = run.runAt
+                applyRun(runId: run.id, runAt: run.runAt, feasibleCount: run.feasibleCount)
             }
-        } catch { errorMessage = AppCopy.networkError }
+            staleAt = try await service.feasibilityStaleAt(eventId: eventId)
+        } catch { errorMessage = AppCopy.errorMessage(for: error) }
         await refreshReadiness(eventId: eventId)
+        if let staleAt { scheduleAutoRecompute(staleAt: staleAt, eventId: eventId) }
     }
 
     func listenForRuns(eventId: UUID) async {
@@ -79,9 +84,11 @@ final class OrganizerDashboardViewModel: ObservableObject {
             let (channel, stream) = try await service.runUpdates(eventId: eventId)
             defer { Task { await Supa.client.removeChannel(channel) } }
             for await update in stream {
-                feasibleCount = update.feasibleCount
-                latestRunId = update.runId
-                latestRunAt = Date()
+                guard applyRun(
+                    runId: update.runId,
+                    runAt: update.runAt,
+                    feasibleCount: update.feasibleCount
+                ) else { continue }
                 do {
                     openNegotiations = try await service.pendingNegotiationCount(eventId: eventId)
                     responseCount = try await service.responseCount(eventId: eventId)
@@ -91,7 +98,7 @@ final class OrganizerDashboardViewModel: ObservableObject {
                 // Keep the readiness readout in step with the run that just arrived.
                 if let next = await refreshReadiness(eventId: eventId) { runBasis = next }
             }
-        } catch { errorMessage = AppCopy.networkError }
+        } catch { errorMessage = AppCopy.errorMessage(for: error) }
     }
 
     /// How long a burst of submissions is allowed to keep collapsing into one recompute.
@@ -99,86 +106,88 @@ final class OrganizerDashboardViewModel: ObservableObject {
     /// venue pool and writes a `recommendation_runs` row, and every row broadcasts to everybody.
     private static let staleDebounce = Duration.milliseconds(1500)
 
-    /// Listens for 0029's `feasibility_stale` and recomputes ONCE per burst, so the dashboard
-    /// is live without anybody pressing 「もう一度計算する」.
-    ///
-    /// Each signal restarts the timer rather than queueing a recompute, so a run happens
-    /// `staleDebounce` after the LAST change, not once per change.
-    ///
-    /// GATED ON A RUN ALREADY EXISTING. Before the organizer has searched there are no
-    /// candidates for this event, so recompute would truthfully answer 0 and the dashboard
-    /// would show 「条件を満たすお店 0」 to a group that has not looked for one yet — worse than
-    /// the button it replaces. Once a run exists, keeping it current is exactly the promise.
+    /// Listens for 0029's aggregate-only staleness mark and coalesces a burst into one run.
     func listenForStaleFeasibility(eventId: UUID) async {
         do {
             let (channel, stream) = try await service.feasibilityStaleSignals(eventId: eventId)
-            defer { Task { await Supa.client.removeChannel(channel) } }
-            var pending: Task<Void, Never>?
-            defer { pending?.cancel() }
-            for await staleAt in stream {
-                guard shouldAutoRecompute(staleAt: staleAt) else { continue }
-                pending?.cancel()
-                pending = Task { [weak self] in
-                    try? await Task.sleep(for: Self.staleDebounce)
-                    guard !Task.isCancelled, let self else { return }
-                    // Re-checked after the wait, not only before it: the burst that armed this
-                    // timer may have ended with the organizer closing collection, or with a
-                    // consent whose own recompute already counted the change.
-                    guard self.shouldAutoRecompute(staleAt: staleAt) else { return }
-                    await self.recomputeAfterChange(eventId: eventId)
-                }
+            defer {
+                autoRecomputeTask?.cancel()
+                autoRecomputeWorkTask?.cancel()
+                pendingStaleAt = nil
+                Task { await Supa.client.removeChannel(channel) }
             }
-        } catch { errorMessage = AppCopy.networkError }
+            for await staleAt in stream {
+                scheduleAutoRecompute(staleAt: staleAt, eventId: eventId)
+            }
+        } catch { errorMessage = AppCopy.errorMessage(for: error) }
     }
 
-    /// The three conditions under which a change is worth recomputing for on its own. Kept
-    /// identical to the web dashboard's gates, because the two clients are deliberately 1:1 and
-    /// an organizer watching on a phone must not see a different number from one watching in a
-    /// browser.
-    ///
-    ///   1. a run already exists — before the first search there are no candidates, so an
-    ///      automatic recompute would render a confident 0 meaning "nobody has looked yet";
-    ///   2. collection is still open — recalculating after the 幹事 closed it is their explicit
-    ///      act (PRD §12), which is why `fn_close_preferences` does not recompute either;
-    ///   3. the change is not already counted by the run on screen — which makes a REPLAYED
-    ///      message harmless (Realtime hands a fresh subscriber whatever is in the topic) and
-    ///      keeps a consent quiet, since `fn_respond_negotiation` marks stale and recomputes in
-    ///      the same transaction.
+    private func scheduleAutoRecompute(staleAt: Date, eventId: UUID) {
+        guard shouldAutoRecompute(staleAt: staleAt) else { return }
+        if pendingStaleAt == nil || staleAt > pendingStaleAt! { pendingStaleAt = staleAt }
+        autoRecomputeTask?.cancel()
+        autoRecomputeTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: Self.staleDebounce)
+            } catch {
+                return
+            }
+            guard let self, let newestStaleAt = self.pendingStaleAt else { return }
+            self.autoRecomputeTask = nil
+            guard self.shouldAutoRecompute(staleAt: newestStaleAt) else {
+                self.pendingStaleAt = nil
+                return
+            }
+            if self.isWorking || self.isAutoRecomputing {
+                self.scheduleAutoRecompute(staleAt: newestStaleAt, eventId: eventId)
+                return
+            }
+            self.pendingStaleAt = nil
+            let work = Task { [weak self] in
+                guard let self else { return }
+                await self.recomputeAfterChange(eventId: eventId)
+            }
+            self.autoRecomputeWorkTask = work
+            await work.value
+            self.autoRecomputeWorkTask = nil
+        }
+    }
+
     private func shouldAutoRecompute(staleAt: Date) -> Bool {
         guard latestRunId != nil, !preferencesClosed else { return false }
-        guard let latestRunAt else { return true }
-        return staleAt > latestRunAt
+        return FeasibilityStaleness.isUncounted(staleAt: staleAt, computedThrough: latestRunAt)
     }
 
-    /// The automatic half of `recompute`: no spinner and no status message, because nobody
-    /// asked for this and a banner appearing on its own would read as an error. The count
-    /// updates, and the `run_updated` broadcast the new run fires keeps every other screen —
-    /// including this one on another device — in step through the existing path.
     private func recomputeAfterChange(eventId: UUID) async {
-        guard !isWorking else { return }
+        guard !isWorking, !isAutoRecomputing else { return }
+        isAutoRecomputing = true
+        defer { isAutoRecomputing = false }
         do {
-            let result = try await service.recomputeFeasibility(eventId: eventId)
-            feasibleCount = result.feasibleCount
-            latestRunId = result.runId
-            latestRunAt = Date()
+            _ = try await service.recomputeFeasibility(eventId: eventId)
+            guard !Task.isCancelled, !preferencesClosed else { return }
+            if let run = try await service.latestRun(eventId: eventId) {
+                guard !Task.isCancelled else { return }
+                applyRun(runId: run.id, runAt: run.runAt, feasibleCount: run.feasibleCount)
+            }
             if let next = await refreshReadiness(eventId: eventId) { runBasis = next }
         } catch {
-            // Deliberately silent. A background refresh that failed is not something the
-            // organizer did, and the button is still there to try again on purpose.
+            // The explicit search action remains available if a background refresh fails.
         }
     }
 
     func findRestaurants(eventId: UUID) async {
-        guard !isWorking else { return }
+        guard !isWorking, !isAutoRecomputing else { return }
         isWorking = true
         errorMessage = nil
         statusMessage = nil
         do {
             let candidates = try await service.findRestaurants(eventId: eventId)
             let result = try await service.recomputeFeasibility(eventId: eventId)
-            feasibleCount = result.feasibleCount
-            latestRunId = result.runId
-            latestRunAt = Date()
+            if let run = try await service.latestRun(eventId: eventId) {
+                applyRun(runId: run.id, runAt: run.runAt, feasibleCount: run.feasibleCount)
+            } else {
+                feasibleCount = result.feasibleCount
+            }
             if result.feasibleCount == 0 {
                 statusMessage = try await service.proposeRelaxation(eventId: eventId) == nil
                     ? "今の条件では、まだ候補が見つかりません。みんなで相談してみましょう。"
@@ -191,10 +200,24 @@ final class OrganizerDashboardViewModel: ObservableObject {
             } else if candidates == 0 {
                 statusMessage = "以前に取得した候補を表示しています。"
             }
-        } catch { errorMessage = AppCopy.networkError }
+        } catch { errorMessage = AppCopy.errorMessage(for: error) }
         // The search is what makes the numbers move, so re-read them instead of going stale.
         if let next = await refreshReadiness(eventId: eventId) { runBasis = next }
         isWorking = false
+    }
+
+    @discardableResult
+    private func applyRun(runId: UUID, runAt: Date, feasibleCount: Int) -> Bool {
+        guard RunOrdering.isNewer(
+            runAt: runAt,
+            runId: runId,
+            than: latestRunAt,
+            currentRunId: latestRunId
+        ) else { return false }
+        latestRunId = runId
+        latestRunAt = runAt
+        self.feasibleCount = feasibleCount
+        return true
     }
 
     /// Organizer-only, idempotent, and deliberately without a recompute: closing states the
@@ -202,6 +225,9 @@ final class OrganizerDashboardViewModel: ObservableObject {
     func closePreferences(eventId: UUID) async {
         // fn_close_preferences is idempotent, but a double tap would still fire two RPCs.
         guard !isClosing, !preferencesClosed else { return }
+        autoRecomputeTask?.cancel()
+        autoRecomputeWorkTask?.cancel()
+        pendingStaleAt = nil
         isClosing = true
         errorMessage = nil
         statusMessage = nil
@@ -274,6 +300,8 @@ struct OrganizerDashboardView: View {
     @Binding var chosenRestaurantName: String?
     @StateObject private var viewModel = OrganizerDashboardViewModel()
     @State private var openRunId: UUID?
+    @State private var decisionNameTask: Task<Void, Never>?
+    @State private var decisionNameGeneration = 0
     private let eventService = EventService()
 
     var body: some View {
@@ -302,27 +330,64 @@ struct OrganizerDashboardView: View {
                 runId: runId,
                 eventId: eventId,
                 isOrganizer: isOrganizer,
+                decision: $decision,
                 onChosen: { result in
-                    decision = result
-                    Task {
-                        if let placeId = result.chosenPlaceId {
-                            do {
-                                chosenRestaurantName = try await eventService.restaurantName(placeId: placeId)
-                            } catch {
-                                viewModel.errorMessage = AppCopy.errorMessage(for: error)
-                            }
-                        }
-                    }
+                    Task { await receiveDecision(result) }
                 }
             )
         }
         .sheet(isPresented: $viewModel.isConfirmingClose) { closeSheet }
         .task { await viewModel.load(eventId: eventId) }
         .task { await viewModel.listenForRuns(eventId: eventId) }
-        // A separate .task, not a branch inside listenForRuns: the two consume different
-        // broadcast events off the same shared channel, and SwiftUI cancels each with the
-        // view. RealtimeTopicRegistry multiplexes them onto one topic subscription.
         .task { await viewModel.listenForStaleFeasibility(eventId: eventId) }
+        .onDisappear { decisionNameTask?.cancel() }
+    }
+
+    @MainActor
+    private func receiveDecision(_ incoming: EventDecision) async {
+        var candidate = incoming
+        var authoritativeLegacy = false
+        if incoming.chosenPlaceId != nil, incoming.chosenAt == nil {
+            do {
+                candidate = try await eventService.decision(eventId: eventId)
+                authoritativeLegacy = candidate.chosenAt == nil
+            } catch {
+                viewModel.errorMessage = AppCopy.errorMessage(for: error)
+                return
+            }
+        }
+        applyDecision(candidate, authoritativeLegacy: authoritativeLegacy)
+    }
+
+    @MainActor
+    private func applyDecision(_ candidate: EventDecision, authoritativeLegacy: Bool) {
+        guard EventDecisionOrdering.isNewer(
+            candidate,
+            than: decision,
+            authoritativeLegacy: authoritativeLegacy
+        ) else { return }
+        decision = candidate
+        decisionNameGeneration += 1
+        let generation = decisionNameGeneration
+        decisionNameTask?.cancel()
+        chosenRestaurantName = nil
+        guard let placeId = candidate.chosenPlaceId else { return }
+        decisionNameTask = Task {
+            do {
+                let name = try await eventService.restaurantName(placeId: placeId)
+                try Task.checkCancellation()
+                guard generation == decisionNameGeneration,
+                      decision?.chosenPlaceId == placeId,
+                      decision?.chosenAt == candidate.chosenAt
+                else { return }
+                chosenRestaurantName = name
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == decisionNameGeneration else { return }
+                viewModel.errorMessage = AppCopy.errorMessage(for: error)
+            }
+        }
     }
 
     private var header: some View {

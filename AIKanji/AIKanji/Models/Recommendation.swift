@@ -26,6 +26,20 @@ struct RecommendationRun: Codable, Identifiable, Hashable {
     }
 }
 
+enum RunOrdering {
+    static func isNewer(
+        runAt: Date,
+        runId: UUID,
+        than currentRunAt: Date?,
+        currentRunId: UUID?
+    ) -> Bool {
+        guard let currentRunAt else { return true }
+        if runAt != currentRunAt { return runAt > currentRunAt }
+        guard let currentRunId else { return true }
+        return runId.uuidString.lowercased() > currentRunId.uuidString.lowercased()
+    }
+}
+
 /// The dimensions the ordering score is built from (0016_scoring_and_objective.sql).
 /// All six are normalized to 0..1 where **higher is better**, so the objective weights
 /// can simply be a weighted sum. Burdens (the inverse) are stored separately.
@@ -42,11 +56,10 @@ enum ScoreDimension: String, Codable, CaseIterable, Identifiable {
     var label: String { AppCopy.scoreDimension(self) }
 }
 
-/// Which quality signal was actually available for a venue. `ratingBayesianShrunk` is the
-/// real signal; `atmosphereTagProxy` is the tag-richness stand-in used when the provider
-/// gave us no rating, and it is deliberately capped below any real rating.
 enum QualityMethod: String, Codable {
-    case ratingBayesianShrunk = "rating_bayesian_shrunk"
+    case googleOnly = "google_only"
+    case googleAndTabelog = "google_and_tabelog"
+    case tabelogOnly = "tabelog_only"
     case atmosphereTagProxy = "atmosphere_tag_proxy"
 }
 
@@ -117,8 +130,21 @@ struct ScoreBreakdown: Codable, Hashable {
         var priorRating: Double = 0
         var priorReviews: Int = 0
         var atmosphereTags: Int = 0
+        var googleShrunk: Double?
+        var googlePercentile: Double?
+        var googleRankedCandidates: Int?
+        var tabelogRating: Double?
+        var tabelogReviewCount: Int?
+        var tabelogPriorRating: Double?
+        var tabelogShrunk: Double?
+        var tabelogPercentile: Double?
+        var tabelogRankedCandidates: Int?
+        var blendedPercentile: Double?
 
-        var method: QualityMethod? { QualityMethod(rawValue: methodRaw) }
+        var method: QualityMethod? {
+            if methodRaw == "rating_bayesian_shrunk" { return .googleOnly }
+            return QualityMethod(rawValue: methodRaw)
+        }
 
         enum CodingKeys: String, CodingKey {
             case score
@@ -128,6 +154,16 @@ struct ScoreBreakdown: Codable, Hashable {
             case priorRating = "prior_rating"
             case priorReviews = "prior_reviews"
             case atmosphereTags = "atmosphere_tags"
+            case googleShrunk = "google_shrunk"
+            case googlePercentile = "google_percentile"
+            case googleRankedCandidates = "google_ranked_candidates"
+            case tabelogRating = "tabelog_rating"
+            case tabelogReviewCount = "tabelog_review_count"
+            case tabelogPriorRating = "tabelog_prior_rating"
+            case tabelogShrunk = "tabelog_shrunk"
+            case tabelogPercentile = "tabelog_percentile"
+            case tabelogRankedCandidates = "tabelog_ranked_candidates"
+            case blendedPercentile = "blended_percentile"
         }
 
         init(from decoder: Decoder) throws {
@@ -139,6 +175,16 @@ struct ScoreBreakdown: Codable, Hashable {
             priorRating = try container.decodeIfPresent(Double.self, forKey: .priorRating) ?? 0
             priorReviews = try container.decodeIfPresent(Int.self, forKey: .priorReviews) ?? 0
             atmosphereTags = try container.decodeIfPresent(Int.self, forKey: .atmosphereTags) ?? 0
+            googleShrunk = try container.decodeIfPresent(Double.self, forKey: .googleShrunk)
+            googlePercentile = try container.decodeIfPresent(Double.self, forKey: .googlePercentile)
+            googleRankedCandidates = try container.decodeIfPresent(Int.self, forKey: .googleRankedCandidates)
+            tabelogRating = try container.decodeIfPresent(Double.self, forKey: .tabelogRating)
+            tabelogReviewCount = try container.decodeIfPresent(Int.self, forKey: .tabelogReviewCount)
+            tabelogPriorRating = try container.decodeIfPresent(Double.self, forKey: .tabelogPriorRating)
+            tabelogShrunk = try container.decodeIfPresent(Double.self, forKey: .tabelogShrunk)
+            tabelogPercentile = try container.decodeIfPresent(Double.self, forKey: .tabelogPercentile)
+            tabelogRankedCandidates = try container.decodeIfPresent(Int.self, forKey: .tabelogRankedCandidates)
+            blendedPercentile = try container.decodeIfPresent(Double.self, forKey: .blendedPercentile)
         }
 
         init() {}
@@ -357,6 +403,7 @@ struct RestaurantFeature: Codable, Identifiable, Hashable {
     let roomType: String?
     let cuisineTags: [String]
     let atmosphereTags: [String]
+    let providerAttributions: [JSONValue]
     /// `photo.pc.m` from Hot Pepper (168x168, on Recruit's image host), supplied by their API
     /// for display and already covered by the Recruit credit under the shortlist. Nil for the
     /// venues no Hot Pepper shop was matched to, so the card treats absence as normal rather
@@ -370,6 +417,25 @@ struct RestaurantFeature: Codable, Identifiable, Hashable {
         roomType.flatMap(AppCopy.room)
     }
 
+    var providerAttributionLines: [String] {
+        providerAttributions.compactMap { attribution in
+            switch attribution {
+            case .string(let value):
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            case .object(let value):
+                let provider = value["provider"]?.stringValue
+                let uri = value["providerUri"]?.stringValue
+                if let provider, let uri { return "\(provider)（\(uri)）" }
+                if let provider { return provider }
+                if let uri { return uri }
+                return attribution.displayText
+            default:
+                return nil
+            }
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
         case placeId = "place_id"
         case name
@@ -377,6 +443,7 @@ struct RestaurantFeature: Codable, Identifiable, Hashable {
         case roomType = "room_type"
         case cuisineTags = "cuisine_tags"
         case atmosphereTags = "atmosphere_tags"
+        case providerAttributions = "provider_attributions"
         case photoUrl = "photo_url"
     }
 }
@@ -385,9 +452,11 @@ struct RestaurantFeature: Codable, Identifiable, Hashable {
 struct RunUpdate: Codable, Hashable {
     let runId: UUID
     let feasibleCount: Int
+    let runAt: Date
 
     enum CodingKeys: String, CodingKey {
         case runId = "run_id"
         case feasibleCount = "feasible_count"
+        case runAt = "run_at"
     }
 }

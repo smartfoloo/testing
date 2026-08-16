@@ -8,8 +8,6 @@ struct ConstraintService {
         self.client = client
     }
 
-    // MARK: - Parse
-
     private struct ParseRequest: Encodable {
         let mode = "parse"
         let raw_text: String
@@ -17,8 +15,6 @@ struct ConstraintService {
         let language: String
     }
 
-    /// Calls the `llm-assist` Edge Function. The function itself never fails on a bad model
-    /// response — it answers with a `needs_clarification` fallback instead.
     func parse(rawText: String, kind: ConstraintKind, language: String = "en") async throws -> ParseResult {
         try await client.functions.invoke(
             "llm-assist",
@@ -28,7 +24,10 @@ struct ConstraintService {
         )
     }
 
-    // MARK: - Insert
+    private static let savedConstraintColumns = """
+        id, kind, raw_text, normalized_type, normalized_value, visibility, sensitivity, \
+        verification_requirement, semantic_remainder, created_at, updated_at
+        """
 
     private struct ConstraintInsert: Encodable {
         let event_id: UUID
@@ -38,16 +37,46 @@ struct ConstraintService {
         let normalized_type: String
         let normalized_value: [String: JSONValue]
         let visibility: String
-        /// What the taxonomy could not express, kept for P1 semantic matching. `sensitivity`
-        /// and `verification_requirement` are deliberately absent: 0018's BEFORE-INSERT
-        /// trigger decides both server-side, and sensitivity must never touch `visibility`,
-        /// which stays the participant's own choice.
         let semantic_remainder: String?
     }
 
-    /// Direct table insert — RLS allows a participant to write only their own rows, and
-    /// after `fn_close_preferences` the `with check` clause rejects the write outright, so a
-    /// post-close save fails loudly instead of silently updating nothing.
+    private struct ConstraintUpdate: Encodable {
+        let kind: String
+        let raw_text: String
+        let normalized_type: String
+        let normalized_value: [String: JSONValue]
+        let visibility: String
+        let semantic_remainder: String?
+    }
+
+    struct SavedConstraint: Decodable, Identifiable, Hashable {
+        let id: UUID
+        let kind: ConstraintKind
+        let rawText: String
+        let normalizedType: NormalizedType
+        let normalizedValue: [String: JSONValue]
+        let visibility: ConstraintVisibility
+        let sensitivity: ConstraintSensitivity
+        let verificationRequirement: VerificationRequirement
+        let semanticRemainder: String?
+        let createdAt: Date
+        let updatedAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case kind
+            case rawText = "raw_text"
+            case normalizedType = "normalized_type"
+            case normalizedValue = "normalized_value"
+            case visibility
+            case sensitivity
+            case verificationRequirement = "verification_requirement"
+            case semanticRemainder = "semantic_remainder"
+            case createdAt = "created_at"
+            case updatedAt = "updated_at"
+        }
+    }
+
     func insertConstraint(
         eventId: UUID,
         participantId: UUID,
@@ -57,7 +86,7 @@ struct ConstraintService {
         normalizedValue: [String: JSONValue],
         visibility: ConstraintVisibility,
         semanticRemainder: String? = nil
-    ) async throws {
+    ) async throws -> SavedConstraint {
         try await client
             .from("participant_constraints")
             .insert(ConstraintInsert(
@@ -70,32 +99,62 @@ struct ConstraintService {
                 visibility: visibility.rawValue,
                 semantic_remainder: semanticRemainder
             ))
+            .select(Self.savedConstraintColumns)
+            .single()
             .execute()
+            .value
     }
 
-    struct SavedConstraint: Decodable, Identifiable {
-        let id: UUID
-        let kind: ConstraintKind
-        let rawText: String
+    func updateConstraint(
+        id: UUID,
+        kind: ConstraintKind,
+        rawText: String,
+        normalizedType: NormalizedType,
+        normalizedValue: [String: JSONValue],
+        visibility: ConstraintVisibility,
+        semanticRemainder: String?
+    ) async throws -> SavedConstraint {
+        try await client
+            .from("participant_constraints")
+            .update(ConstraintUpdate(
+                kind: kind.rawValue,
+                raw_text: rawText,
+                normalized_type: normalizedType.rawValue,
+                normalized_value: normalizedValue,
+                visibility: visibility.rawValue,
+                semantic_remainder: semanticRemainder
+            ))
+            .eq("id", value: id)
+            .select(Self.savedConstraintColumns)
+            .single()
+            .execute()
+            .value
+    }
 
-        enum CodingKeys: String, CodingKey {
-            case id
-            case kind
-            case rawText = "raw_text"
+    func deleteConstraint(id: UUID) async throws {
+        let deleted: [DeletedConstraint] = try await client
+            .from("participant_constraints")
+            .delete()
+            .eq("id", value: id)
+            .select("id")
+            .execute()
+            .value
+        guard !deleted.isEmpty else {
+            throw NSError(domain: "ConstraintService", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "preferences are closed or constraint unavailable"
+            ])
         }
     }
 
     func ownConstraints(participantId: UUID) async throws -> [SavedConstraint] {
         try await client
             .from("participant_constraints")
-            .select("id, kind, raw_text")
+            .select(Self.savedConstraintColumns)
             .eq("participant_id", value: participantId)
             .order("created_at", ascending: true)
             .execute()
             .value
     }
-
-    // MARK: - Feed
 
     private struct FeedParams: Encodable {
         let p_event_id: UUID
@@ -108,68 +167,45 @@ struct ConstraintService {
             .value
     }
 
-    /// Subscribes to the private `event-{id}` topic and yields sanitized broadcast payloads.
-    /// The raw payload is exposed too so callers can assert on what the server actually sent.
-    /// The feed is a broadcast rather than a table read because RLS hides other participants'
-    /// constraint rows: the server sanitizes, then sends.
-    ///
-    /// The channel comes from `RealtimeTopicRegistry` because the organizer dashboard listens
-    /// for `run_updated` on this same topic, and Realtime keys channels by topic — a second
-    /// channel here would fight the dashboard's instead of multiplexing with it. What is
-    /// handed back is this listener's hold on the shared channel, which
-    /// `Supa.client.removeChannel(_:)` releases; the channel goes only with the last release.
-    func constraintBroadcasts(eventId: UUID) async throws -> (channel: RealtimeTopicSubscription, stream: AsyncStream<(item: FeedItem, payload: [String: AnyJSON])>) {
-        let (subscription, broadcasts) = try await RealtimeTopicRegistry.shared.subscribe(
+    private struct DeletedConstraint: Decodable {
+        let id: UUID
+    }
+
+    func constraintBroadcasts(
+        eventId: UUID
+    ) async throws -> (channel: RealtimeTopicSubscription, stream: AsyncStream<Void>) {
+        let (subscription, streams) = try await RealtimeTopicRegistry.shared.subscribe(
             topic: RealtimeTopicRegistry.eventTopic(eventId: eventId),
-            event: .constraintAdded,
+            events: [.constraintAdded, .constraintUpdated, .constraintDeleted],
             client: client
         )
+        guard let additions = streams[.constraintAdded],
+              let updates = streams[.constraintUpdated],
+              let deletions = streams[.constraintDeleted]
+        else {
+            await RealtimeTopicRegistry.shared.release(subscription)
+            throw NSError(domain: "ConstraintService", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "constraint broadcast streams unavailable"
+            ])
+        }
 
-        let stream = AsyncStream<(item: FeedItem, payload: [String: AnyJSON])> { continuation in
+        let stream = AsyncStream<Void> { continuation in
             let task = Task {
-                for await message in broadcasts {
-                    guard let payload = message["payload"]?.objectValue,
-                          let item = try? Self.decodeFeedItem(from: payload)
-                    else { continue }
-                    continuation.yield((item, payload))
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        for await _ in additions { continuation.yield(()) }
+                    }
+                    group.addTask {
+                        for await _ in updates { continuation.yield(()) }
+                    }
+                    group.addTask {
+                        for await _ in deletions { continuation.yield(()) }
+                    }
                 }
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
-
         return (subscription, stream)
     }
-
-    static func decodeFeedItem(from payload: [String: AnyJSON]) throws -> FeedItem {
-        let data = try JSONEncoder().encode(payload)
-        return try feedDecoder.decode(FeedItem.self, from: data)
-    }
-
-    private static let feedDecoder: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let text = try decoder.singleValueContainer().decode(String.self)
-            if let date = fractionalFormatter.date(from: text) ?? plainFormatter.date(from: text) {
-                return date
-            }
-            throw DecodingError.dataCorruptedError(
-                in: try decoder.singleValueContainer(),
-                debugDescription: "Unrecognized timestamp: \(text)"
-            )
-        }
-        return decoder
-    }()
-
-    private static let fractionalFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-
-    private static let plainFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }()
 }

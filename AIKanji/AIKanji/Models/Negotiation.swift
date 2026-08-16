@@ -6,6 +6,13 @@ enum NegotiationStatus: String, Codable {
     case rejected = "REJECTED"
 }
 
+enum FeasibilityStaleness {
+    static func isUncounted(staleAt: Date, computedThrough: Date?) -> Bool {
+        guard let computedThrough else { return true }
+        return staleAt > computedThrough
+    }
+}
+
 /// A relaxation proposal as seen by the participant it targets. RLS returns only that
 /// participant's own rows, and the embedded constraint is their own constraint — nobody
 /// else, organizer included, can read either side of this.

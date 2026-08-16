@@ -19,8 +19,9 @@ targets:
     info:
       path: AIKanji/Info.plist
       properties:
+        CFBundleDisplayName: まとメシ
         LSRequiresIPhoneOS: true
-        NSCameraUsageDescription: Scanning an event QR code needs the camera.
+        NSCameraUsageDescription: イベントのQRコードを読み取るためにカメラを使用します。
         SUPABASE_URL: $(SUPABASE_URL)
         SUPABASE_ANON_KEY: $(SUPABASE_ANON_KEY)
         # Host invite links are built against (PRD §3). Empty by default; see Config.xcconfig.
@@ -47,6 +48,7 @@ targets:
     dependencies:
       - package: Supabase
         product: Supabase
+      - target: AIKanji
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.aikanji.AIKanjiDomainTests

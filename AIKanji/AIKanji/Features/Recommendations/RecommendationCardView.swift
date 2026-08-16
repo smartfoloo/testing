@@ -216,6 +216,7 @@ struct RecommendationCardView: View {
     let isExplaining: Bool
     let isOrganizer: Bool
     let isChosen: Bool
+    let hasDecision: Bool
     let isChoosing: Bool
     let onChoose: () -> Void
 
@@ -296,7 +297,11 @@ struct RecommendationCardView: View {
                     objectiveScore: score.scoreBreakdown?.objectiveScore
                 )
                 if isOrganizer && !isChosen {
-                    PrimaryButton(title: "このお店に決める", systemImage: "checkmark", isLoading: isChoosing) { onChoose() }
+                    PrimaryButton(
+                        title: hasDecision ? "このお店に変更する" : "このお店に決める",
+                        systemImage: "checkmark",
+                        isLoading: isChoosing
+                    ) { onChoose() }
                         .accessibilityIdentifier("choose-restaurant")
                         .disabled(isChoosing)
                 } else if isChosen {

@@ -400,12 +400,9 @@ HOTPEPPER_API_KEY = "env(HOTPEPPER_API_KEY)"
 # NOT a key: a feature flag, and the only one here. Tabelog (食べログ) has no API, so
 # restaurant-search's Tabelog enrichment is an HTML SCRAPER, and Tabelog's terms of use forbid
 # reproducing its content without prior written consent and bar commercial use — consent we do
-# not have. It is ON BY DEFAULT by project decision: set this to exactly "false" to turn it
-# off, and note that leaving it UNSET no longer disables it. So a fresh clone that starts this
-# stack will scrape unless somebody says otherwise — set it to "false" in every environment
-# that is not a local non-commercial demo, and read the header of
+# not have. It is OFF BY DEFAULT: only the exact string "true" opts in. Read the header of
 # functions/restaurant-search/index.ts and migration 0027_tabelog_enrichment.sql before
-# leaving it on anywhere else.
+# enabling it.
 TABELOG_ENRICHMENT_ENABLED = "env(TABELOG_ENRICHMENT_ENABLED)"
 
 [analytics]

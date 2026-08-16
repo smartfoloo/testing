@@ -533,13 +533,7 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------------
--- 0021: one malformed constraint no longer aborts the whole recompute.
---
--- RLS lets any participant write an arbitrary normalized_value, and
--- (normalized_value->>'max_yen')::int raised invalid_text_representation on {"max_yen":
--- "cheap"} — killing the engine for the entire event. The SQL NULL semantics are unchanged:
--- an unreadable key behaves exactly like a MISSING one (`price > null` is falsey, so the MUST
--- passes), which is what the TypeScript port has always done.
+-- 0021/0030: malformed budgets are rejected on new writes and fail closed if legacy data remains.
 -- ---------------------------------------------------------------------------
 do $$
 declare
@@ -547,6 +541,7 @@ declare
   v_pid uuid := '00210000-0000-0000-0000-00000000c001';
   v_result jsonb;
   v_raised boolean := false;
+  v_rejected boolean := false;
 begin
   perform t_as_admin();
 
@@ -565,31 +560,43 @@ begin
                                        normalized_type, normalized_value, visibility)
   values (v_event, v_pid, 'MUST', 'QA pool gate',
           'dietary', '{"tags":["qa0021_cast"]}', 'ANONYMOUS'),
-         (v_event, v_pid, 'MUST', 'cheap please',
-          'budget', '{"max_yen":"cheap"}', 'PUBLIC'),
          (v_event, v_pid, 'MUST', 'すぐ着きたい',
           'travel_time', '{"max_minutes":"すぐ"}', 'PUBLIC');
+
+  begin
+    insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                         normalized_type, normalized_value, visibility)
+    values (v_event, v_pid, 'MUST', 'cheap please',
+            'budget', '{"max_yen":"cheap"}', 'PUBLIC');
+  exception when check_violation then
+    v_rejected := true;
+  end;
+  perform t_check('a new direct write cannot store a malformed budget', v_rejected);
+
+  -- Simulate a row already present on a hosted database before the reconciliation trigger.
+  alter table participant_constraints disable trigger trg_validate_constraint_value_v2;
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'legacy malformed budget',
+          'budget', '{"max_yen":"cheap"}', 'PUBLIC');
+  alter table participant_constraints enable trigger trg_validate_constraint_value_v2;
 
   begin
     v_result := fn_recompute_feasibility(v_event);
   exception when others then
     v_raised := true;
   end;
-  perform t_check('a malformed max_yen no longer aborts the recompute', not v_raised);
-  -- The unpriced venue is still excluded: that branch is an explicit null check on the venue,
-  -- not a comparison against the ceiling, so a junk ceiling cannot smuggle it through.
-  perform t_check('a malformed ceiling still refuses a venue with no price',
-                  not fn_candidate_is_feasible(v_event, 'qa0021_cast_unpriced'));
-  perform t_check('a priced venue is judged as if the ceiling were absent',
-                  fn_candidate_is_feasible(v_event, 'qa0021_cast_priced'));
-  perform t_check('so exactly one venue survives a malformed budget and travel MUST',
-                  (v_result->>'feasible_count')::int = 1, v_result::text);
-  perform t_check('a malformed max_yen is not proposable either (its step unlocks nothing)',
-                  fn_propose_relaxation(v_event) is null);
+  perform t_check('a legacy malformed max_yen does not abort recompute', not v_raised);
+  perform t_check('a malformed ceiling fails closed for priced and unpriced venues',
+                  not fn_candidate_is_feasible(v_event, 'qa0021_cast_priced')
+                  and not fn_candidate_is_feasible(v_event, 'qa0021_cast_unpriced'));
+  perform t_check('no venue survives a malformed budget MUST',
+                  (v_result->>'feasible_count')::int = 0, v_result::text);
+  perform t_check('a malformed max_yen is not proposable either',
+                  fn_propose_relaxation(v_event) is null
+                  and fn_relaxed_value('budget', '{"max_yen":"cheap"}')
+                        = '{"max_yen":"cheap"}'::jsonb);
 
-  -- The exact rule the TypeScript port reproduces: a fully numeric string IS the number, a
-  -- partly numeric one is absent (never 40), a fractional one truncates, and a value outside
-  -- int range is absent rather than a different number.
   perform t_check('fn_jsonb_int reads a numeric string as its number',
                   fn_jsonb_int('{"max_yen":"4000"}', 'max_yen') = 4000);
   perform t_check('fn_jsonb_int truncates a fractional value',
@@ -602,8 +609,6 @@ begin
                   and fn_jsonb_int('{"max_yen":null}', 'max_yen') is null
                   and fn_jsonb_int('{"max_yen":99999999999}', 'max_yen') is null
                   and fn_jsonb_int('{}', 'max_yen') is null);
-  -- Only a real JSON true widens a MUST: the flag is written by fn_relaxed_value, so anything
-  -- else in that key is hand-edited and must not count.
   perform t_check('fn_jsonb_flag only accepts a real JSON true',
                   fn_jsonb_flag('{"accept_unknown":true}', 'accept_unknown')
                   and not fn_jsonb_flag('{"accept_unknown":"true"}', 'accept_unknown')
@@ -1524,6 +1529,8 @@ declare
   v_event uuid := '00260000-0000-0000-0000-00000000a000';
   v_pid uuid := '00260000-0000-0000-0000-00000000a001';
   v_allergy_id uuid;
+  v_drop_existing uuid;
+  v_drop_raw uuid;
   v_result jsonb;
   v_feasible int;
   v_places text[];
@@ -1537,60 +1544,69 @@ begin
   values (v_pid, v_event, gen_random_uuid(), 'Allergy participant', 'organizer', 'station');
   update events set organizer_participant_id = v_pid where id = v_event;
 
-  -- The vocabularies, asserted against literals so neither can drift from the TypeScript port
-  -- (ALLERGEN_VOCABULARY / DIETARY_VOCABULARY in web/src/backend/engine.ts) or from llm-assist.
-  perform t_check('the allergen vocabulary is the six labelled members',
+  -- Exact parity with Constraint.swift: 9 mandatory allergens followed by 20 recommended ones.
+  perform t_check('the allergen vocabulary is the full official 9 plus 20 catalog',
                   fn_allergen_vocabulary() = array[
-                    'buckwheat','egg','milk','peanut','shellfish','wheat'],
+                    'shrimp','cashew_nut','crab','walnut','wheat','buckwheat','egg','milk',
+                    'peanut','almond','abalone','squid','salmon_roe','orange','kiwi','beef',
+                    'sesame','salmon','mackerel','soybean','chicken','banana','pistachio','pork',
+                    'macadamia_nut','peach','yam','apple','gelatin'],
                   fn_allergen_vocabulary()::text);
   perform t_check('the dietary vocabulary is the four patterns',
                   fn_dietary_vocabulary() = array[
                     'gluten_free','halal','vegan','vegetarian'],
                   fn_dietary_vocabulary()::text);
-  -- The venue side is the same vocabulary with a suffix, derived rather than restated.
   perform t_check('the venue side speaks the same vocabulary with _free',
                   fn_allergen_safe_tag_vocabulary() = array[
-                    'buckwheat_free','egg_free','milk_free','peanut_free','shellfish_free',
-                    'wheat_free'],
+                    'abalone_free','almond_free','apple_free','banana_free','beef_free',
+                    'buckwheat_free','cashew_nut_free','chicken_free','crab_free','egg_free',
+                    'gelatin_free','kiwi_free','macadamia_nut_free','mackerel_free','milk_free',
+                    'orange_free','peach_free','peanut_free','pistachio_free','pork_free',
+                    'salmon_free','salmon_roe_free','sesame_free','shrimp_free','soybean_free',
+                    'squid_free','walnut_free','wheat_free','yam_free'],
                   fn_allergen_safe_tag_vocabulary()::text);
 
-  -- Canonicalisation. Every alias names the SAME ingredient as its member, so mapping preserves
-  -- the requirement; this is the exact input the live model produced.
-  perform t_check('the Japanese the model actually returned maps onto the crustacean member',
-                  fn_allergen_canonical_allergens(array['えび','かに','海老','蟹','カニ','甲殻類'])
-                    = array['shellfish'],
+  perform t_check('Japanese shrimp and crab stay separate official allergens',
+                  fn_allergen_canonical_allergens(array['えび','かに','海老','蟹','カニ'])
+                    = array['crab','shrimp'],
                   fn_allergen_canonical_allergens(array['えび','かに'])::text);
-  perform t_check('and so do the other five 特定原材料 spellings',
-                  fn_allergen_canonical_allergens(array['卵','たまご','玉子','鶏卵'])
-                    = array['egg']
-                  and fn_allergen_canonical_allergens(array['乳','牛乳','ミルク','乳製品'])
-                    = array['milk']
-                  and fn_allergen_canonical_allergens(array['落花生','ピーナッツ'])
-                    = array['peanut']
-                  and fn_allergen_canonical_allergens(array['小麦','こむぎ']) = array['wheat']
-                  and fn_allergen_canonical_allergens(array['そば','蕎麦'])
-                    = array['buckwheat']);
+  perform t_check('the legacy crustacean collective expands without weakening it',
+                  fn_allergen_canonical_allergens(array['shellfish','甲殻類'])
+                    = array['crab','shrimp']);
+  perform t_check('the remaining mandatory spellings canonicalize',
+                  fn_allergen_canonical_allergens(array['卵','乳','落花生','小麦','そば'])
+                    = array['buckwheat','egg','milk','peanut','wheat']);
+  perform t_check('recommended allergen spellings canonicalize too',
+                  fn_allergen_canonical_allergens(
+                    array['アーモンド','あわび','いか','いくら','大豆','豚肉','りんご'])
+                    = array['abalone','almond','apple','pork','salmon_roe','soybean','squid']);
+  perform t_check('the full SQL and Edge alias catalog has canonical coverage',
+                  fn_allergen_canonical_allergens(array[
+                    'prawns','cashews','crabs','walnuts','胡桃','コムギ','そば粉','eggs','鶏卵',
+                    '乳成分','peanuts','almonds','鮑','烏賊','salmonroe','oranges','kiwi_fruit',
+                    '胡麻','サケ','サバ','soybeans','とり肉','bananas','pistachios','peaches',
+                    'yamaimo','apples','林檎','gelatine'])
+                    = array['abalone','almond','apple','banana','buckwheat','cashew_nut','chicken',
+                            'crab','egg','gelatin','kiwi','mackerel','milk','orange','peach',
+                            'peanut','pistachio','salmon','salmon_roe','sesame','shrimp','soybean','squid',
+                            'walnut','wheat','yam']);
   perform t_check('canonical allergens are deduped and sorted',
-                  fn_allergen_canonical_allergens(array['乳','卵','たまご','shellfish','えび'])
-                    = array['egg','milk','shellfish'],
+                  fn_allergen_canonical_allergens(array['乳','卵','shellfish','えび'])
+                    = array['crab','egg','milk','shrimp'],
                   fn_allergen_canonical_allergens(array['乳','卵','えび'])::text);
-  -- 貝 is molluscs and `shellfish` is the CRUSTACEAN tag (甲殻類), so folding it in would record
-  -- a WEAKER requirement than was stated. グルテン is a dietary tag, not 小麦. Both are dropped
-  -- here and preserved as the participant's own wording by llm-assist / the backfill instead.
   perform t_check('an allergen the vocabulary cannot express is dropped, never approximated',
-                  fn_allergen_canonical_allergens(array['貝','大豆','ナッツ','マンゴー','グルテン'])
+                  fn_allergen_canonical_allergens(array['貝','ナッツ','マンゴー','魚','グルテン'])
                     = '{}'::text[],
                   fn_allergen_canonical_allergens(array['貝','マンゴー'])::text);
   perform t_check('a value echoing the venue side''s _free suffix still lands on the allergen',
                   fn_allergen_canonical_allergens(array['SHELLFISH_FREE','Egg-Free'])
-                    = array['egg','shellfish'],
+                    = array['crab','egg','shrimp'],
                   fn_allergen_canonical_allergens(array['SHELLFISH_FREE'])::text);
   perform t_check('and the same rule applies to a constraint value',
                   fn_allergen_canonical_value('{"allergens":["えび","かに"]}')
-                    = array['shellfish']
+                    = array['crab','shrimp']
                   and fn_allergen_canonical_value('{"allergens":["マンゴー"]}') = '{}'::text[]
                   and fn_allergen_canonical_value('{}') = '{}'::text[]
-                  -- An unreadable value is not a satisfied one, in either direction.
                   and fn_allergen_canonical_value('{"allergens":"えび"}') = '{}'::text[]);
 
   -- dietary, the same bug one category over. For 「卵と乳製品がだめです」 the live model invented
@@ -1619,8 +1635,9 @@ begin
     (place_id, price_yen_estimate, room_type, dietary_tags, allergy_safe_tags)
   values
     ('qa0026_allergy_full', 3000, 'open', array['qa0026_allergy'],
-     array['shellfish_free','egg_free']),
-    ('qa0026_allergy_partial', 3000, 'open', array['qa0026_allergy'], array['shellfish_free']),
+     array['crab_free','egg_free','shrimp_free']),
+    ('qa0026_allergy_partial', 3000, 'open', array['qa0026_allergy'],
+     array['crab_free','shrimp_free']),
     -- No data at all: what every provider-discovered venue looks like, forever.
     ('qa0026_allergy_none', 3000, 'open', array['qa0026_allergy'], '{}'),
     -- Also over budget, so it is NOT one phone call away from being a candidate.
@@ -1661,7 +1678,7 @@ begin
   perform t_check('a legacy venue tag canonicalises onto the vocabulary',
                   fn_allergen_canonical_safe_tags(array['えび_free','shellfish_free','貝_free',
                                                         'vegan','barrier_free'])
-                    = array['shellfish_free'],
+                    = array['crab_free','shrimp_free'],
                   fn_allergen_canonical_safe_tags(array['えび_free','貝_free'])::text);
 
   insert into participant_constraints (event_id, participant_id, kind, raw_text,
@@ -1671,8 +1688,8 @@ begin
          (v_event, v_pid, 'MUST', '4000円まで', 'budget', '{"max_yen":4000}', 'PUBLIC');
   insert into participant_constraints (event_id, participant_id, kind, raw_text,
                                        normalized_type, normalized_value, visibility)
-  values (v_event, v_pid, 'MUST', 'えびと卵のアレルギーがあります',
-          'allergy', '{"allergens":["shellfish","egg"]}', 'ANONYMOUS')
+  values (v_event, v_pid, 'MUST', 'えびとかにと卵のアレルギーがあります',
+          'allergy', '{"allergens":["shrimp","crab","egg"]}', 'ANONYMOUS')
   returning id into v_allergy_id;
 
   perform t_check('an allergy MUST is MET when the recorded _free tags cover every allergen',
@@ -1682,17 +1699,17 @@ begin
   perform t_check('and no recorded tags at all is infeasible — unknown is not safe',
                   not fn_candidate_is_feasible(v_event, 'qa0026_allergy_none'));
   perform t_check('the predicate the gate and the count share agrees with the gate',
-                  fn_allergy_allergens_met(array['shellfish_free','egg_free'],
-                                           '{"allergens":["shellfish","egg"]}')
-                  and not fn_allergy_allergens_met(array['shellfish_free'],
-                                                   '{"allergens":["shellfish","egg"]}')
+                  fn_allergy_allergens_met(array['crab_free','egg_free','shrimp_free'],
+                                           '{"allergens":["shrimp","crab","egg"]}')
+                  and not fn_allergy_allergens_met(array['crab_free','shrimp_free'],
+                                                   '{"allergens":["shrimp","crab","egg"]}')
                   and not fn_allergy_allergens_met('{}'::text[],
-                                                   '{"allergens":["shellfish"]}')
+                                                   '{"allergens":["shrimp"]}')
                   -- A MUST whose own value cannot be read is never certified as met.
-                  and not fn_allergy_allergens_met(array['shellfish_free'],
+                  and not fn_allergy_allergens_met(array['shrimp_free'],
                                                    '{"allergens":[]}')
-                  and not fn_allergy_allergens_met(array['shellfish_free'],
-                                                   '{"allergens":"shellfish"}'));
+                  and not fn_allergy_allergens_met(array['shrimp_free'],
+                                                   '{"allergens":"shrimp"}'));
   perform t_check('the blocking types name allergy as the only obstacle',
                   fn_candidate_blocking_types(v_event, 'qa0026_allergy_none')
                     = array['allergy'],
@@ -1723,9 +1740,9 @@ begin
   perform t_check('an allergy MUST is never proposed for relaxation',
                   fn_propose_relaxation(v_event) is null);
   perform t_check('there is no relaxation step for it to advertise',
-                  fn_relaxed_value('allergy', '{"allergens":["shellfish"]}')
-                    = '{"allergens":["shellfish"]}'::jsonb,
-                  fn_relaxed_value('allergy', '{"allergens":["shellfish"]}')::text);
+                  fn_relaxed_value('allergy', '{"allergens":["shrimp"]}')
+                    = '{"allergens":["shrimp"]}'::jsonb,
+                  fn_relaxed_value('allergy', '{"allergens":["shrimp"]}')::text);
   perform t_check('and relaxing it would unlock nothing, so no question is ever phrased',
                   fn_count_unlocked_if_relaxed(v_event, v_allergy_id) = 0,
                   fn_count_unlocked_if_relaxed(v_event, v_allergy_id)::text);
@@ -1763,13 +1780,46 @@ begin
    where id = v_allergy_id;
   perform t_check('the backfill rewrites it to the vocabulary and keeps the wording',
                   (select normalized_value from participant_constraints where id = v_allergy_id)
-                    = '{"allergens":["shellfish"]}'::jsonb
+                    = '{"allergens":["crab","shrimp"]}'::jsonb
                   and (select semantic_remainder from participant_constraints
-                        where id = v_allergy_id) = 'えびと卵のアレルギーがあります',
+                        where id = v_allergy_id) = 'えびとかにと卵のアレルギーがあります',
                   (select normalized_value::text from participant_constraints
                     where id = v_allergy_id));
   perform t_check('and the venue is reachable again afterwards',
                   fn_candidate_is_feasible(v_event, 'qa0026_allergy_full'));
+
+  insert into participant_constraints (
+    event_id, participant_id, kind, raw_text, normalized_type, normalized_value,
+    visibility, semantic_remainder
+  ) values (
+    v_event, v_pid, 'MUST', 'shrimp and mango', 'allergy',
+    '{"allergens":["shrimp","mango"]}', 'PRIVATE', 'already preserved'
+  ) returning id into v_drop_existing;
+  insert into participant_constraints (
+    event_id, participant_id, kind, raw_text, normalized_type, normalized_value, visibility
+  ) values (
+    v_event, v_pid, 'MUST', 'soy and mango', 'allergy',
+    '{"allergens":["soybean","mango"]}', 'PRIVATE'
+  ) returning id into v_drop_raw;
+  update participant_constraints pc
+  set normalized_value = jsonb_build_object(
+        'allergens', to_jsonb(fn_allergen_canonical_value(pc.normalized_value))),
+      semantic_remainder = case when fn_allergen_value_has_unsupported(pc.normalized_value)
+        then coalesce(pc.semantic_remainder, nullif(btrim(pc.raw_text), ''))
+        else pc.semantic_remainder end
+  where pc.id in (v_drop_existing, v_drop_raw);
+  perform t_check('allergen reconciliation preserves existing remainder when a member is dropped',
+                  (select semantic_remainder = 'already preserved'
+                   from participant_constraints where id = v_drop_existing)
+                  and (select normalized_value = '{"allergens":["shrimp"]}'::jsonb
+                       from participant_constraints where id = v_drop_existing));
+  perform t_check('allergen reconciliation falls back to raw_text for unsupported members',
+                  (select semantic_remainder = 'soy and mango'
+                          and normalized_value = '{"allergens":["soybean"]}'::jsonb
+                   from participant_constraints where id = v_drop_raw)
+                  and fn_allergen_value_has_unsupported(
+                        '{"allergens":["soybean","mango"]}'));
+  delete from participant_constraints where id in (v_drop_existing, v_drop_raw);
 
   -- The row where NOTHING is expressible (「マンゴーアレルギー」, canonicalised to an empty list).
   -- It stays a GATING allergy MUST — 0022 could re-type an inexpressible accessibility need to a
@@ -1787,7 +1837,7 @@ begin
                     where id = v_allergy_id) = 'allergy'
                   and fn_propose_relaxation(v_event) is null);
 
-  update participant_constraints set normalized_value = '{"allergens":["shellfish","egg"]}'
+  update participant_constraints set normalized_value = '{"allergens":["shrimp","crab","egg"]}'
    where id = v_allergy_id;
   select array_agg(r.place_id order by r.place_id) into v_places
     from restaurants r
@@ -1802,9 +1852,9 @@ begin
                   (select normalized_value from participant_constraints
                     where event_id = '00000000-0000-0000-0000-000000000001'
                       and normalized_type = 'allergy')
-                    = '{"allergens":["shellfish"]}'::jsonb);
+                    = '{"allergens":["shrimp","crab"]}'::jsonb);
   perform t_check('and the seeded venue tags are canonical too',
-                  (select bool_and(allergy_safe_tags = array['shellfish_free'])
+                  (select bool_and(allergy_safe_tags = array['shrimp_free','crab_free'])
                      from restaurant_features
                     where place_id like 'demo_place_%'));
 end $$;
@@ -2862,7 +2912,7 @@ declare
   -- AIKanji/AIKanji/Services/*.swift), plus the four 0017 caches whose SELECT grant
   -- has to survive 0024's revoke-then-grant pass.
   v_reads text[] := array[
-    'events', 'participants', 'participant_constraints', 'negotiations',
+    'events', 'participants', 'participant_origins', 'participant_constraints', 'negotiations',
     'recommendation_runs', 'recommendation_scores', 'restaurants',
     'restaurant_features', 'event_restaurant_candidates', 'travel_matrix_cache',
     'meeting_zones', 'provider_incidents'];
@@ -3025,10 +3075,10 @@ declare
   -- restaurant-search's caller-side client forwards the caller's own token — so
   -- nothing in this app ever speaks as `anon`, and `anon` is granted nothing.
   v_all text[] := array[
-    'events', 'participants', 'participant_constraints', 'negotiations',
+    'events', 'participants', 'participant_origins', 'participant_constraints', 'negotiations',
     'recommendation_runs', 'recommendation_scores', 'restaurants',
-    'restaurant_features', 'event_restaurant_candidates', 'travel_matrix_cache',
-    'meeting_zones', 'provider_incidents', 'restaurant_source_records'];
+    'restaurant_features', 'event_restaurant_candidates', 'event_candidate_scopes',
+    'travel_matrix_cache', 'meeting_zones', 'provider_incidents', 'restaurant_source_records'];
   v_anon_errors text[] := '{}';
   v_stmt text;
   v_tbl text;
@@ -3038,10 +3088,13 @@ begin
 
   v_labels := array[
     'a client cannot read the raw provider payloads (0017/0023)',
+    'a client cannot read internal candidate-scope generations',
     'a client cannot insert a participant — fn_join_event does that (0020)',
     'a client cannot update a participant — fn_set_travel_reference does (0020)',
     'a client cannot delete a participant (0020)',
-    'a client cannot delete a constraint: there is no client delete path at all',
+    'a client cannot insert an origin outside the definer RPCs',
+    'a client cannot update an origin outside the definer RPCs',
+    'a client cannot delete an origin outside the definer RPCs',
     'a client cannot create an event outside fn_create_event',
     'a client cannot rewrite an event: status, choice and close are all RPCs',
     'a client cannot forge a negotiation for itself',
@@ -3053,11 +3106,16 @@ begin
     'and TRUNCATE, which no policy could have contained, is gone as well'];
   v_stmts := array[
     'select 1 from public.restaurant_source_records',
+    'select 1 from public.event_candidate_scopes',
     format('insert into public.participants (event_id, auth_user_id, display_name) '
            'select %L, %L, ''forged'' where false', v_event, v_uid),
     'update public.participants set display_name = display_name where false',
     'delete from public.participants where false',
-    'delete from public.participant_constraints where false',
+    format('insert into public.participant_origins '
+           '(participant_id, label, latitude, longitude) '
+           'select %L, ''forged'', 0, 0 where false', v_pid),
+    'update public.participant_origins set label = label where false',
+    'delete from public.participant_origins where false',
     'insert into public.events (name) select ''forged'' where false',
     'update public.events set status = status where false',
     format('insert into public.negotiations (event_id, constraint_id, participant_id, '
@@ -3152,9 +3210,9 @@ declare
   -- constraints, llm-assist reads the run, its scores and the venue's features, and the
   -- fixture script reads whatever it PATCHes because it sends return=representation.
   v_reads text[] := array[
-    'events', 'participants', 'participant_constraints', 'recommendation_runs',
-    'recommendation_scores', 'restaurants', 'restaurant_features',
-    'restaurant_source_records', 'event_restaurant_candidates',
+    'events', 'participants', 'participant_origins', 'participant_constraints',
+    'recommendation_runs', 'recommendation_scores', 'restaurants', 'restaurant_features',
+    'restaurant_source_records', 'event_restaurant_candidates', 'event_candidate_scopes',
     'travel_matrix_cache', 'meeting_zones', 'provider_incidents'];
   v_read_errors text[] := '{}';
   v_write_errors text[] := '{}';
@@ -3222,8 +3280,10 @@ begin
     'events|authenticated|SELECT',
     'participants|anon|',
     'participants|authenticated|SELECT',
+    'participant_origins|anon|',
+    'participant_origins|authenticated|SELECT',
     'participant_constraints|anon|',
-    'participant_constraints|authenticated|SELECT,INSERT,UPDATE',
+    'participant_constraints|authenticated|SELECT,INSERT,UPDATE,DELETE',
     'negotiations|anon|',
     'negotiations|authenticated|SELECT',
     'recommendation_runs|anon|',
@@ -3233,7 +3293,9 @@ begin
     'restaurants|anon|',
     'restaurants|authenticated|SELECT',
     'restaurant_features|anon|',
-    'restaurant_features|authenticated|SELECT'];
+    'restaurant_features|authenticated|SELECT',
+    'event_candidate_scopes|anon|',
+    'event_candidate_scopes|authenticated|'];
   select array_agg(t || '|' || r || '|' ||
                    coalesce((select string_agg(p, ',' order by ord)
                                from unnest(array['SELECT','INSERT','UPDATE','DELETE',
@@ -3242,9 +3304,11 @@ begin
                               where has_table_privilege(r, 'public.' || t, p)), '')
                    order by tord, rord)
     into v_actual
-    from unnest(array['events','participants','participant_constraints','negotiations',
-                      'recommendation_runs','recommendation_scores','restaurants',
-                      'restaurant_features']) with ordinality as tab(t, tord)
+    from unnest(array['events','participants','participant_origins',
+                      'participant_constraints','negotiations','recommendation_runs',
+                      'recommendation_scores','restaurants','restaurant_features',
+                      'event_candidate_scopes'])
+         with ordinality as tab(t, tord)
     cross join unnest(array['anon','authenticated']) with ordinality as rl(r, rord);
   perform t_check('the client roles hold exactly the privileges 0024 states, no more',
                   v_actual = v_expected,
@@ -3262,6 +3326,14 @@ begin
                                        'restaurant_source_records',
                                        'provider_incidents']) t
                      cross join unnest(array['SELECT','INSERT','UPDATE','DELETE']) p));
+  perform t_check('candidate scope state is service-readable but writable only through its RPC',
+                  has_table_privilege('service_role', 'public.event_candidate_scopes', 'SELECT')
+                  and not has_table_privilege(
+                    'service_role', 'public.event_candidate_scopes', 'INSERT')
+                  and not has_table_privilege(
+                    'service_role', 'public.event_candidate_scopes', 'UPDATE')
+                  and not has_table_privilege(
+                    'service_role', 'public.event_candidate_scopes', 'DELETE'));
 
   -- No sequence may be reachable by an INSERT the role is allowed to make and still be
   -- unusable. Restricted to the RLS-protected app tables, so the harness's own
@@ -3358,6 +3430,15 @@ begin
                   (select chosen_place_id = 'qa_choose_venue' and chosen_at is not null
                           and status = 'closed'
                    from events where id = v_event));
+  perform t_check('event_decided carries the exact persisted chosen_at timestamp',
+                  exists (select 1
+                          from realtime.messages m
+                          join events e on e.id = v_event
+                          where m.topic = 'event-' || v_event::text
+                            and m.event = 'event_decided'
+                            and m.payload->>'chosen_place_id' = e.chosen_place_id
+                            and (m.payload->>'chosen_at')::timestamptz = e.chosen_at
+                            and (select count(*) from jsonb_object_keys(m.payload)) = 2));
 
   -- 4. An event that does not exist. Asserted from a direct session on purpose: to an API
   -- caller there is no organizer of a nonexistent event, so the 0014 guard answers first and
@@ -3581,6 +3662,447 @@ begin
                     where id = '00000000-0000-0000-0000-000000000001'));
 
   perform t_as_admin();
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0030: v2 event flow, private coordinate supplements, aggregate progress, and CRUD
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_org_uid uuid := '29000000-0000-0000-0000-000000000001';
+  v_guest_uid uuid := '29000000-0000-0000-0000-000000000002';
+  v_outsider_uid uuid := '29000000-0000-0000-0000-000000000003';
+  v_created jsonb;
+  v_event uuid;
+  v_code text;
+  v_org_pid uuid;
+  v_guest_pid uuid;
+  v_temp_pid uuid := '29000000-0000-0000-0000-0000000000ff';
+  v_schedule timestamptz := now() + interval '30 days';
+  v_shared uuid;
+  v_private uuid;
+  v_closed uuid;
+  v_latest_run uuid := '29000000-0000-0000-0000-0000000000f2';
+  v_run_at timestamptz := now() + interval '1 second';
+  v_raised boolean;
+  v_updated int;
+  v_deleted int;
+  v_before int;
+begin
+  perform t_as_api_user(v_org_uid);
+  v_created := fn_create_event_v2(
+    p_name => 'Stage 3 reconciliation',
+    p_display_name => 'Organizer',
+    p_scheduled_at => v_schedule,
+    p_origin_label => 'Shinjuku Station',
+    p_origin_latitude => 35.6901,
+    p_origin_longitude => 139.7003,
+    p_objective => 'cost',
+    p_travel_reference => 'station',
+    p_travel_reference_place_id => 'canonical-origin-place');
+  v_event := (v_created->>'event_id')::uuid;
+  v_code := v_created->>'invite_code';
+  v_org_pid := (v_created->>'participant_id')::uuid;
+
+  perform t_as_admin();
+  perform t_check('fn_create_event_v2 preserves canonical objective and travel fields',
+                  (select objective = 'cost' and scheduled_at = v_schedule from events
+                    where id = v_event)
+                  and (select travel_reference = 'station'
+                              and travel_reference_place_id = 'canonical-origin-place'
+                       from participants where id = v_org_pid));
+  perform t_check('fn_create_event_v2 stores the private coordinate supplement',
+                  (select label = 'Shinjuku Station' and latitude = 35.6901
+                          and longitude = 139.7003
+                   from participant_origins where participant_id = v_org_pid));
+
+  perform t_as_api_user(v_outsider_uid);
+  perform t_check('fn_preview_event_v2 reveals only the narrow invite preview',
+                  (select count(*) = 1
+                          and min(name) = 'Stage 3 reconciliation'
+                          and min(participant_count) = 1
+                          and min(organizer_display_name) = 'Organizer'
+                          and min(scheduled_at) = v_schedule
+                   from fn_preview_event_v2(v_code)));
+  perform t_check('fn_preview_event_v2 returns no row for an unknown code',
+                  (select count(*) from fn_preview_event_v2('not-a-code')) = 0);
+
+  perform t_as_api_user(v_guest_uid);
+  v_guest_pid := fn_join_event_v2(
+    v_code, 'Guest', 'Ikebukuro Station', 35.7289, 139.7100, 'home', null);
+  perform t_check('fn_join_event_v2 is idempotent',
+                  fn_join_event_v2(
+                    v_code, 'Guest renamed', 'Ikebukuro Station', 35.7289, 139.7100,
+                    'home', null) = v_guest_pid);
+
+  perform t_as_admin();
+  perform t_check('the v2 join writes one participant and its canonical travel fields',
+                  (select count(*) from participants
+                    where event_id = v_event and auth_user_id = v_guest_uid) = 1
+                  and (select display_name = 'Guest renamed' and travel_reference = 'home'
+                              and travel_reference_place_id is null
+                       from participants where id = v_guest_pid));
+
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values (v_temp_pid, v_event, gen_random_uuid(), 'Temporary', 'participant', 'station');
+  delete from participants where id = v_temp_pid;
+  perform t_check('participant insert and delete broadcast aggregate progress invalidations',
+                  exists (select 1 from realtime.messages
+                          where topic = 'event-' || v_event::text
+                            and event = 'event_progress_updated'
+                            and payload = '{"participant_count":3,"completed_count":0}'::jsonb)
+                  and exists (select 1 from realtime.messages
+                              where topic = 'event-' || v_event::text
+                                and event = 'event_progress_updated'
+                                and payload = '{"participant_count":2,"completed_count":0}'::jsonb));
+  perform t_check('progress broadcasts contain no identity or caller-specific fields',
+                  not exists (select 1 from realtime.messages
+                              where topic = 'event-' || v_event::text
+                                and event = 'event_progress_updated'
+                                and ((select count(*) from jsonb_object_keys(payload)) <> 2
+                                     or payload ? 'participant_id'
+                                     or payload ? 'display_name'
+                                     or payload ? 'input_completed')));
+
+  insert into restaurants (place_id) values ('qa0030_cache_place');
+  insert into restaurant_features (place_id, travel_minutes_by_participant)
+  values ('qa0030_cache_place', jsonb_build_object(v_guest_pid::text, 12));
+  insert into travel_matrix_cache (event_id, participant_id, place_id, minutes)
+  values (v_event, v_guest_pid, 'qa0030_cache_place', 12);
+  insert into recommendation_runs (id, event_id, run_at, feasible_count, input_snapshot)
+  values ('29000000-0000-0000-0000-0000000000f1', v_event, v_run_at, 1, '{}'),
+         (v_latest_run, v_event, v_run_at, 2, '{}');
+
+  perform t_as_api_user(v_org_uid);
+  perform t_check('participant_origins RLS exposes only the caller''s own row',
+                  (select count(*) from participant_origins) = 1
+                  and (select participant_id from participant_origins) = v_org_pid);
+  perform t_check('aggregate progress starts without naming participant completion',
+                  (select participant_count = 2 and completed_count = 0 and not input_completed
+                   from fn_get_event_progress_v2(v_event))
+                  and pg_catalog.to_regprocedure('public.fn_get_organizer_progress_v2(uuid)')
+                        is null);
+
+  insert into participant_constraints (
+    event_id, participant_id, kind, raw_text, normalized_type, normalized_value, visibility
+  ) values (
+    v_event, v_org_pid, 'WANT', 'quiet', 'atmosphere', '{"tags":["quiet"]}', 'PUBLIC'
+  ) returning id into v_shared;
+
+  perform t_check('my-events v2 returns aggregate completion and deterministic latest run data',
+                  (select participant_count = 2 and completed_count = 1 and input_completed
+                          and scheduled_at = v_schedule and role = 'organizer'
+                          and latest_run_id = v_latest_run
+                          and latest_run_at = v_run_at and feasible_count = 2
+                   from fn_get_my_events_v2() where event_id = v_event));
+
+  perform t_as_api_user(v_guest_uid);
+  perform t_check('progress exposes only counts plus the caller''s own completion bit',
+                  (select participant_count = 2 and completed_count = 1 and not input_completed
+                   from fn_get_event_progress_v2(v_event)));
+  delete from participant_constraints where id = v_shared;
+  get diagnostics v_deleted = row_count;
+  perform t_check('a participant cannot delete another participant''s constraint',
+                  v_deleted = 0);
+
+  perform * from fn_set_travel_reference_v2(
+    v_guest_pid, 'home', null, 'Ikebukuro West', 35.7295, 139.7088);
+  perform t_as_admin();
+  perform t_check('a coordinate change invalidates the event-scoped travel cache',
+                  not exists (select 1 from travel_matrix_cache
+                              where event_id = v_event and participant_id = v_guest_pid));
+  perform t_check('a coordinate change also removes the legacy travel JSON key',
+                  not (select travel_minutes_by_participant ? v_guest_pid::text
+                       from restaurant_features where place_id = 'qa0030_cache_place'));
+
+  perform t_as_api_user(v_guest_uid);
+  perform * from fn_set_travel_reference(v_guest_pid, 'station', 'new-canonical-origin');
+  perform t_as_admin();
+  perform t_check('a canonical origin change without coordinates deletes the stale fallback',
+                  not exists (select 1 from participant_origins
+                              where participant_id = v_guest_pid));
+
+  perform t_as_api_user(v_guest_uid);
+  perform * from fn_set_travel_reference_v2(
+    v_guest_pid, 'doesnt_matter', 'ignored-place',
+    'Coordinates remain private', 35.73, 139.71);
+  perform t_as_admin();
+  perform t_check('doesnt_matter remains canonical even when coordinates exist',
+                  (select travel_reference = 'doesnt_matter'
+                          and travel_reference_place_id is null
+                   from participants where id = v_guest_pid)
+                  and exists (select 1 from participant_origins
+                              where participant_id = v_guest_pid));
+
+  select count(*) into v_before from events;
+  perform t_as_api_user(v_outsider_uid);
+  v_raised := false;
+  begin
+    perform fn_create_event_v2('Bad schedule', 'Outsider', now() - interval '1 hour');
+  exception when others then
+    v_raised := sqlerrm = 'scheduled date must be in the future and within 5 years';
+  end;
+  perform t_as_admin();
+  perform t_check('fn_create_event_v2 rejects a past schedule atomically',
+                  v_raised and (select count(*) from events) = v_before);
+
+  perform t_as_api_user(v_outsider_uid);
+  v_raised := false;
+  begin
+    perform fn_join_event_v2(v_code, 'Partial origin', 'Only a label');
+  exception when others then
+    v_raised := sqlerrm = 'origin label, latitude, and longitude must be provided together';
+  end;
+  perform t_check('v2 coordinate payloads are all-or-none', v_raised);
+
+  perform t_as_api_user(v_org_uid);
+  update participant_constraints
+  set visibility = 'ANONYMOUS', normalized_value = '{"tags":["quiet","casual"]}'
+  where id = v_shared;
+  update participant_constraints set visibility = 'PRIVATE' where id = v_shared;
+  update participant_constraints set visibility = 'PUBLIC' where id = v_shared;
+
+  insert into participant_constraints (
+    event_id, participant_id, kind, raw_text, normalized_type, normalized_value, visibility
+  ) values (
+    v_event, v_org_pid, 'WANT', 'PRIVATE_RAW_SENTINEL', 'other',
+    '{"private":"PRIVATE_VALUE_SENTINEL"}', 'PRIVATE'
+  ) returning id into v_private;
+  delete from participant_constraints where id = v_private;
+
+  perform t_as_admin();
+  perform t_check('constraint_added includes created_at and updated_at but no private text',
+                  exists (select 1 from realtime.messages
+                          where topic = 'event-' || v_event::text
+                            and event = 'constraint_added'
+                            and payload->>'id' = v_shared::text
+                            and payload ? 'created_at' and payload ? 'updated_at'
+                            and not (payload ? 'raw_text')
+                            and not (payload ? 'semantic_remainder')));
+  perform t_check('visible constraint edits keep the compatible updated broadcast',
+                  exists (select 1 from realtime.messages
+                          where topic = 'event-' || v_event::text
+                            and event = 'constraint_updated'
+                            and payload->>'id' = v_shared::text
+                            and payload->>'visibility' = 'ANONYMOUS'
+                            and payload->>'display_name' is null
+                            and payload ? 'updated_at'
+                            and not (payload ? 'raw_text')
+                            and not (payload ? 'semantic_remainder')));
+  perform t_check('shared-to-private removal broadcasts only a deletion invalidation',
+                  exists (select 1 from realtime.messages
+                          where topic = 'event-' || v_event::text
+                            and event = 'constraint_deleted'
+                            and payload->>'id' = v_shared::text
+                            and payload ? 'changed_at'
+                            and (select count(*) from jsonb_object_keys(payload)) = 2));
+  perform t_check('private constraint content never enters a broadcast payload',
+                  not exists (select 1 from realtime.messages
+                              where payload::text like '%PRIVATE_RAW_SENTINEL%'
+                                 or payload::text like '%PRIVATE_VALUE_SENTINEL%'));
+
+  perform t_as_api_user(v_org_uid);
+  perform t_check('sanitized feed history exposes updated_at without private fields',
+                  (select updated_at is not null from fn_get_sanitized_feed(v_event)
+                   where id = v_shared));
+  delete from participant_constraints where id = v_shared;
+  get diagnostics v_deleted = row_count;
+  perform t_check('an owner may delete a constraint while preferences are open', v_deleted = 1);
+
+  insert into participant_constraints (
+    event_id, participant_id, kind, raw_text, normalized_type, normalized_value, visibility
+  ) values (
+    v_event, v_org_pid, 'WANT', 'frozen after close', 'other', '{}', 'PUBLIC'
+  ) returning id into v_closed;
+  perform * from fn_close_preferences(v_event);
+  update participant_constraints set raw_text = 'must not change' where id = v_closed;
+  get diagnostics v_updated = row_count;
+  delete from participant_constraints where id = v_closed;
+  get diagnostics v_deleted = row_count;
+  perform t_check('constraint edit and delete are both frozen after preferences close',
+                  v_updated = 0 and v_deleted = 0);
+
+  perform t_as_admin();
+  perform t_check('the frozen constraint remains unchanged',
+                  (select raw_text = 'frozen after close' from participant_constraints
+                    where id = v_closed));
+  perform t_check('constraint insert, update, and delete all emit aggregate progress invalidations',
+                  exists (select 1 from realtime.messages
+                          where topic = 'event-' || v_event::text
+                            and event = 'event_progress_updated'
+                            and payload = '{"participant_count":2,"completed_count":0}'::jsonb)
+                  and (select count(*) from realtime.messages
+                       where topic = 'event-' || v_event::text
+                         and event = 'event_progress_updated'
+                         and payload = '{"participant_count":2,"completed_count":1}'::jsonb) >= 3);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- 0031: fail-closed budgets and durable event candidate scopes
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '30000000-0000-0000-0000-000000000001';
+  v_legacy_event uuid := '30000000-0000-0000-0000-000000000002';
+  v_pid uuid := '30000000-0000-0000-0000-0000000000a1';
+  v_legacy_pid uuid := '30000000-0000-0000-0000-0000000000a2';
+  v_uid uuid := '30000000-0000-0000-0000-0000000000f1';
+  v_result jsonb;
+  v_run uuid;
+  v_neg uuid;
+  v_budget_id uuid;
+  v_before_generation uuid;
+  v_after_generation uuid;
+begin
+  perform t_as_admin();
+  insert into events (id, name, objective, status) values
+    (v_event, 'Scoped candidates', 'experience', 'collecting'),
+    (v_legacy_event, 'Legacy candidate fallback', 'experience', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference)
+  values
+    (v_pid, v_event, v_uid, 'Scoped', 'organizer', 'station'),
+    (v_legacy_pid, v_legacy_event, gen_random_uuid(), 'Legacy', 'organizer', 'station');
+  update events set organizer_participant_id = v_pid where id = v_event;
+  update events set organizer_participant_id = v_legacy_pid where id = v_legacy_event;
+
+  insert into restaurants (place_id) values
+    ('qa0031_below_min'), ('qa0031_in_range'), ('qa0031_above_max'), ('qa0031_foreign');
+  insert into restaurant_features (
+    place_id, price_yen_estimate, room_type, dietary_tags, rating, user_rating_count
+  ) values
+    ('qa0031_below_min', 2000, 'open', array['qa0031_scope'], 4.0, 100),
+    ('qa0031_in_range', 4000, 'open', array['qa0031_scope'], 4.2, 100),
+    ('qa0031_above_max', 5200, 'open', array['qa0031_scope'], 4.1, 100),
+    ('qa0031_foreign', 3500, 'open', array['qa0031_scope'], 5.0, 1000);
+
+  insert into participant_constraints (
+    event_id, participant_id, kind, raw_text, normalized_type, normalized_value, visibility
+  ) values
+    (v_event, v_pid, 'MUST', 'scope gate', 'dietary',
+     '{"tags":["qa0031_scope"]}', 'ANONYMOUS'),
+    (v_event, v_pid, 'MUST', '3000 to 5000 yen', 'budget',
+     '{"min_yen":3000,"max_yen":5000,"currency":"JPY"}', 'PUBLIC'),
+    (v_legacy_event, v_legacy_pid, 'MUST', 'legacy scope gate', 'dietary',
+     '{"tags":["qa0031_scope"]}', 'ANONYMOUS');
+  select id into v_budget_id
+  from participant_constraints
+  where event_id = v_event and normalized_type = 'budget';
+
+  insert into event_restaurant_candidates (event_id, place_id) values
+    (v_event, 'qa0031_below_min'),
+    (v_event, 'qa0031_in_range'),
+    (v_event, 'qa0031_above_max');
+  perform fn_replace_event_candidate_scope(
+    v_event, array['qa0031_below_min','qa0031_in_range','qa0031_above_max']);
+  select generation into v_before_generation
+  from event_candidate_scopes where event_id = v_event;
+  perform fn_record_provider_candidates_v2(v_event, jsonb_build_array(jsonb_build_object(
+    'place_id', 'qa0031_staged',
+    'name', 'Staged provider candidate',
+    'price_yen_estimate', 4500,
+    'room_type', 'open',
+    'cuisine_tags', '[]'::jsonb,
+    'dietary_tags', '["qa0031_scope"]'::jsonb,
+    'allergy_safe_tags', '[]'::jsonb,
+    'atmosphere_tags', '[]'::jsonb)));
+  perform t_check('provider recording stages new IDs outside the active generation',
+                  (select scope_generation is null
+                   from event_restaurant_candidates
+                   where event_id = v_event and place_id = 'qa0031_staged')
+                  and not exists (select 1 from fn_event_candidate_place_ids(v_event)
+                                  where place_id = 'qa0031_staged'));
+
+  perform t_check('the final feasibility wrapper delegates to the reconciled blocker',
+                  fn_candidate_blocking_types(v_event, 'qa0031_below_min') = array['budget']
+                  and not fn_candidate_is_feasible(v_event, 'qa0031_below_min')
+                  and fn_candidate_is_feasible(v_event, 'qa0031_in_range'));
+  perform t_check('budget validation requires a positive max and ordered nonnegative min',
+                  fn_budget_value_is_valid('{"max_yen":5000}')
+                  and fn_budget_value_is_valid('{"min_yen":0,"max_yen":5000}')
+                  and not fn_budget_value_is_valid('{}')
+                  and not fn_budget_value_is_valid('{"max_yen":0}')
+                  and not fn_budget_value_is_valid('{"min_yen":5000,"max_yen":5000}')
+                  and not fn_budget_value_is_valid('{"min_yen":-1,"max_yen":5000}'));
+  perform t_check('missing, nonpositive, and inverted budget overrides all fail closed',
+                  fn_candidate_blocking_types(
+                    v_event, 'qa0031_in_range', v_budget_id, '{}'::jsonb) @> array['budget']
+                  and fn_candidate_blocking_types(
+                    v_event, 'qa0031_in_range', v_budget_id,
+                    '{"max_yen":0}'::jsonb) @> array['budget']
+                  and fn_candidate_blocking_types(
+                    v_event, 'qa0031_in_range', v_budget_id,
+                    '{"min_yen":5000,"max_yen":4000}'::jsonb) @> array['budget']);
+
+  v_result := fn_recompute_feasibility(v_event);
+  v_run := (v_result->>'run_id')::uuid;
+  perform t_check('recompute uses only this event''s initialized candidate scope',
+                  (v_result->>'feasible_count')::int = 1, v_result::text);
+  perform t_check('final scoring cannot admit a high-quality foreign candidate',
+                  (select array_agg(restaurant_place_id order by restaurant_place_id)
+                   from recommendation_scores where run_id = v_run)
+                    = array['qa0031_in_range']);
+  perform t_check('remote objective/provider score breakdown remains intact',
+                  (select score_breakdown->>'objective' = 'experience'
+                          and score_breakdown->'quality'->>'method' is not null
+                   from recommendation_scores where run_id = v_run));
+
+  perform t_check('budget relaxation preserves min_yen and unrelated normalized fields',
+                  fn_relaxed_value('budget',
+                    '{"min_yen":3000,"max_yen":5000,"currency":"JPY"}')
+                    = '{"min_yen":3000,"max_yen":5500,"currency":"JPY"}'::jsonb);
+  v_neg := fn_propose_relaxation(v_event);
+  perform t_check('the range proposal changes max_yen only',
+                  (select proposed_value
+                   from negotiations where id = v_neg)
+                    = '{"min_yen":3000,"max_yen":5500,"currency":"JPY"}'::jsonb);
+  perform t_as_user(v_uid);
+  v_result := fn_respond_negotiation(v_neg, true);
+  perform t_check('accepting a range proposal keeps the minimum and unlocks only the upper bound',
+                  (v_result->>'feasible_count')::int = 2
+                  and (select normalized_value
+                       from participant_constraints
+                       where event_id = v_event and normalized_type = 'budget')
+                        = '{"min_yen":3000,"max_yen":5500,"currency":"JPY"}'::jsonb,
+                  v_result::text);
+  perform t_as_admin();
+
+  perform fn_replace_event_candidate_scope(v_event, array['qa0031_foreign']);
+  select generation into v_after_generation
+  from event_candidate_scopes where event_id = v_event;
+  perform t_check('scope replacement advances generation and removes stale associations',
+                  v_after_generation is distinct from v_before_generation
+                  and (select array_agg(place_id order by place_id)
+                       from event_restaurant_candidates where event_id = v_event)
+                        = array['qa0031_foreign']
+                  and (select bool_and(scope_generation = v_after_generation)
+                       from event_restaurant_candidates where event_id = v_event)
+                  and exists (select 1 from restaurants where place_id = 'qa0031_staged')
+                  and exists (select 1 from restaurant_features
+                              where place_id = 'qa0031_staged'));
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('replacement scope, not retained provider cache rows, drives recompute',
+                  (v_result->>'feasible_count')::int = 1, v_result::text);
+
+  perform fn_replace_event_candidate_scope(v_event, '{}'::text[]);
+  perform t_check('an initialized empty scope is durable and never falls back globally',
+                  exists (select 1 from event_candidate_scopes where event_id = v_event)
+                  and not exists (select 1 from event_restaurant_candidates
+                                  where event_id = v_event)
+                  and (select count(*) from fn_event_candidate_place_ids(v_event)) = 0);
+  v_result := fn_recompute_feasibility(v_event);
+  perform t_check('recompute respects an initialized empty scope',
+                  (v_result->>'feasible_count')::int = 0, v_result::text);
+
+  v_result := fn_recompute_feasibility(v_legacy_event);
+  perform t_check('only explicitly uninitialized legacy events use the global fallback',
+                  not exists (select 1 from event_candidate_scopes
+                              where event_id = v_legacy_event)
+                  and (v_result->>'feasible_count')::int = 5, v_result::text);
+  perform t_check('unknown allergen evidence still fails closed under the expanded catalog',
+                  not fn_allergy_allergens_met('{}'::text[],
+                                               '{"allergens":["soybean"]}'::jsonb)
+                  and fn_allergy_allergens_met(array['soybean_free'],
+                                               '{"allergens":["soybean"]}'::jsonb));
 end $$;
 
 \set QUIET off

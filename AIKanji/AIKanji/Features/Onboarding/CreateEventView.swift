@@ -1,40 +1,43 @@
 import Combine
 import CoreImage.CIFilterBuiltins
+import MapKit
 import SwiftUI
 
 struct CreateEventView: View {
+    private struct CreatedDestination: Hashable {
+        let eventId: UUID
+        let participantId: UUID
+        let inviteCode: String
+    }
+
     private let service = EventService()
     @State private var name = ""
     @State private var displayName = ""
-    @State private var objective: EventObjective = .balanced
-    @State private var travelReference: TravelReference = .office
-    @State private var travelPlace: PlaceSuggestion?
+    @State private var includesDate = false
+    @State private var scheduledAt = Date().addingTimeInterval(24 * 60 * 60)
+    @State private var origin: OriginSelection? = OriginSelection.uiTestDefault
+    @State private var isLocationSearchPresented = false
     @State private var inviteCode: String?
     @State private var created: (eventId: UUID, participantId: UUID)?
+    @State private var destination: CreatedDestination?
     @State private var isSubmitting = false
     @State private var errorMessage: String?
     @State private var didCopy = false
     @State private var isKeyboardVisible = false
 
+    private var latestAllowedDate: Date {
+        Calendar.current.date(byAdding: .year, value: 5, to: Date()) ?? .distantFuture
+    }
+
     private var isFormVisible: Bool { inviteCode == nil || created == nil }
 
     private var canSubmit: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            origin != nil &&
+            (!includesDate || (scheduledAt > Date() && scheduledAt <= latestAllowedDate))
     }
 
-    // 集まりを作成 cannot simply be the last row of the form. This form is taller than a short
-    // phone: on a 402x874 screen the button sat at y=862.7 with a height of 62, so its centre
-    // was below the bottom of the screen, and the software keyboard covered everything past
-    // y=539 as well.
-    //
-    // Pinning it in a bottom bar is not enough either. With the keyboard up there are only
-    // 75.7 points between the 「あなたの名前」 field's centre (y=463.3) and the top of the
-    // keyboard, and the button alone is 62 — a pinned bar lands on that field and swallows the
-    // taps meant for it. So while a keyboard is on screen the action moves into the keyboard's
-    // own accessory band, which costs the form no height at all, and it returns to a pinned bar
-    // only once there is no keyboard to sit above. With a hardware keyboard the accessory band
-    // is still what iOS draws, so the action stays reachable there too.
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: AppSpacing.xl) {
@@ -50,12 +53,11 @@ struct CreateEventView: View {
             .padding(.horizontal, AppSpacing.lg)
             .padding(.bottom, AppSpacing.xxl)
         }
+        .scrollDismissesKeyboard(.interactively)
         .background(AppColors.background)
         .safeAreaInset(edge: .bottom) {
             if isFormVisible && !isKeyboardVisible {
                 submitControl
-                    // Neither a safe-area inset nor a toolbar item proposes a width, so the
-                    // button would otherwise shrink to its title and float as a small pill.
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, AppSpacing.lg)
                     .padding(.top, AppSpacing.sm)
@@ -81,16 +83,24 @@ struct CreateEventView: View {
         }
         .navigationTitle("集まりを作る")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(item: $destination) { destination in
+            EventHomeView(
+                eventId: destination.eventId,
+                participantId: destination.participantId,
+                inviteCode: destination.inviteCode
+            )
+        }
+        .sheet(isPresented: $isLocationSearchPresented) {
+            LocationSearchSheet { selection in origin = selection }
+        }
     }
 
-    /// One definition, rendered in exactly one place at a time — the keyboard accessory or the
-    /// pinned bar, never both, so `create-submit` is never ambiguous.
     private var submitControl: some View {
         PrimaryButton(title: "集まりを作成", isLoading: isSubmitting) {
             Task { await create() }
         }
         .accessibilityIdentifier("create-submit")
-        .disabled(!canSubmit)
+        .disabled(!canSubmit || isSubmitting)
     }
 
     private var formView: some View {
@@ -102,11 +112,22 @@ struct CreateEventView: View {
                     .accessibilityIdentifier("event-name")
             }
             VStack(alignment: .leading, spacing: AppSpacing.sm) {
-                Text("目的").font(AppTypography.section)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: AppSpacing.xs) {
-                    ForEach(EventObjective.allCases) { value in
-                        SelectionChip(title: value.label, isSelected: objective == value) { objective = value }
-                    }
+                Toggle("日時を設定する", isOn: $includesDate)
+                    .font(AppTypography.section)
+                    .accessibilityIdentifier("include-date")
+                if includesDate {
+                    DatePicker(
+                        "集まりの日時",
+                        selection: $scheduledAt,
+                        in: Date()...latestAllowedDate,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .datePickerStyle(.compact)
+                    .accessibilityIdentifier("scheduled-at")
+                    Text("これからの日時を選んでください。")
+                        .font(AppTypography.caption)
+                        .foregroundStyle(AppColors.ink.opacity(0.72))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Divider().overlay(AppColors.border)
@@ -116,20 +137,44 @@ struct CreateEventView: View {
                     .appInputFieldStyle()
                     .accessibilityIdentifier("display-name")
             }
-            TravelReferenceField(
-                reference: $travelReference,
-                place: $travelPlace,
-                identifierPrefix: "travel"
-            )
+            locationSection
+        }
+    }
+
+    private var locationSection: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.xs) {
+            Text("出発地").font(AppTypography.section)
+            Button {
+                isLocationSearchPresented = true
+            } label: {
+                HStack(spacing: AppSpacing.sm) {
+                    Image(systemName: origin == nil ? "magnifyingglass" : "checkmark.circle.fill")
+                        .foregroundStyle(AppColors.accent)
+                    Text(origin?.label ?? "駅やエリアを検索")
+                        .foregroundStyle(AppColors.ink)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(origin == nil ? "設定" : "変更")
+                        .font(AppTypography.caption.weight(.bold))
+                        .foregroundStyle(AppColors.accent)
+                }
+                .padding(.horizontal, AppSpacing.md)
+                .frame(minHeight: 48)
+                .background(AppColors.card)
+                .clipShape(RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: AppRadius.field).stroke(AppColors.border))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("origin-search")
+            Text("移動時間の計算に使います。ほかの参加者には表示されません。")
+                .font(AppTypography.caption)
+                .foregroundStyle(AppColors.ink.opacity(0.72))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func doneView(inviteCode: String, created: (eventId: UUID, participantId: UUID)) -> some View {
-        // PRD §3: invite "by link/QR". The QR encodes the link so scanning it opens the join
-        // flow with the code already filled in, rather than yielding a bare code to retype.
-        // With no invite domain configured there is no link, and the bare code is shared.
         let link = InviteLink.url(code: inviteCode)
-        let shared = link?.absoluteString ?? inviteCode
+        let shared = InviteLink.shareText(code: inviteCode)
         return VStack(alignment: .center, spacing: AppSpacing.lg) {
             Text(InviteCopy.title).font(AppTypography.title)
             Text(inviteCode)
@@ -169,72 +214,75 @@ struct CreateEventView: View {
                     .clipShape(RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous))
                     .accessibilityIdentifier("inviteLink")
             }
-            HStack {
-                if let link {
-                    ShareLink(item: link) {
-                        Label(InviteCopy.share, systemImage: "square.and.arrow.up")
-                    }
-                    .frame(minHeight: 44)
-                    .accessibilityIdentifier("share-invite")
-                } else {
-                    ShareLink(item: inviteCode) {
-                        Label(InviteCopy.share, systemImage: "square.and.arrow.up")
-                    }
-                    .frame(minHeight: 44)
-                    .accessibilityIdentifier("share-invite")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: AppSpacing.lg) {
+                    shareLink(inviteCode: inviteCode)
+                    copyButton(shared: shared, hasLink: link != nil)
                 }
-                Button {
-                    UIPasteboard.general.string = shared
-                    didCopy = true
-                    Task {
-                        try? await Task.sleep(nanoseconds: 1_800_000_000)
-                        didCopy = false
-                    }
-                } label: {
-                    Label(copyTitle(hasLink: link != nil), systemImage: "doc.on.doc")
+                VStack(spacing: AppSpacing.xs) {
+                    shareLink(inviteCode: inviteCode)
+                    copyButton(shared: shared, hasLink: link != nil)
                 }
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("copy-invite")
             }
             .foregroundStyle(AppColors.accent)
-            NavigationLink {
-                EventHomeView(eventId: created.eventId, participantId: created.participantId, inviteCode: inviteCode)
-            } label: {
-                Text(AppCopy.continueAction).frame(maxWidth: .infinity).frame(minHeight: 48)
+            PrimaryButton(title: AppCopy.continueAction) {
+                destination = CreatedDestination(
+                    eventId: created.eventId,
+                    participantId: created.participantId,
+                    inviteCode: inviteCode
+                )
             }
-            .buttonStyle(.borderedProminent)
-            .tint(AppColors.accent)
-            .clipShape(Capsule())
             .accessibilityIdentifier("continue-event")
         }
     }
 
-    private func copyTitle(hasLink: Bool) -> String {
-        if didCopy { return InviteCopy.copied }
-        return hasLink ? InviteCopy.copyLink : InviteCopy.copyCode
+    private func shareLink(inviteCode: String) -> some View {
+        var lines = ["まとメシ「\(name)」への招待"]
+        if includesDate {
+            lines.append("日時：\(scheduledAt.formatted(date: .abbreviated, time: .shortened))")
+        }
+        lines.append("招待：\(InviteLink.shareText(code: inviteCode))")
+        return ShareLink(item: lines.joined(separator: "\n")) {
+            Label(InviteCopy.share, systemImage: "square.and.arrow.up")
+                .frame(minHeight: 44)
+        }
+        .accessibilityIdentifier("share-invite")
     }
 
+    private func copyButton(shared: String, hasLink: Bool) -> some View {
+        Button {
+            UIPasteboard.general.string = shared
+            didCopy = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.8))
+                didCopy = false
+            }
+        } label: {
+            Label(didCopy ? InviteCopy.copied : hasLink ? InviteCopy.copyLink : InviteCopy.copyCode, systemImage: "doc.on.doc")
+                .frame(minHeight: 44)
+        }
+        .accessibilityIdentifier("copy-invite")
+    }
+
+    @MainActor
     private func create() async {
-        guard !isSubmitting else { return }
+        guard !isSubmitting, canSubmit, let origin else { return }
         isSubmitting = true
         errorMessage = nil
+        defer { isSubmitting = false }
         do {
             let event = try await service.createEvent(
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines),
                 displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
-                travelReference: travelReference,
-                // The organizer is a participant too, so their origin is only real if they
-                // picked a place. Nil is a valid answer: the backend reports them as
-                // unresolved instead of inventing a location.
-                travelReferencePlaceId: travelPlace?.placeId,
-                objective: objective
+                scheduledAt: includesDate ? scheduledAt : nil,
+                origin: origin,
+                objective: .balanced
             )
             created = (event.eventId, event.participantId)
             inviteCode = event.inviteCode
         } catch {
-            errorMessage = AppCopy.networkError
+            errorMessage = AppCopy.errorMessage(for: error)
         }
-        isSubmitting = false
     }
 
     static func qrImage(for text: String, scale: CGFloat = 10) -> UIImage? {
@@ -248,215 +296,124 @@ struct CreateEventView: View {
     }
 }
 
-// MARK: - Travel reference
+@MainActor
+final class LocationSearchModel: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
+    @Published var query = "" {
+        didSet { completer.queryFragment = query }
+    }
+    @Published var completions: [MKLocalSearchCompletion] = []
+    @Published var isResolving = false
+    @Published var errorMessage: String?
 
-/// 移動の基準 — the category AND the place it stands for.
-///
-/// `participants.travel_reference` is a CHECK-constrained UI category, so a participant who
-/// only answers 「会社」 gives the recommendation engine nothing to measure travel from: the
-/// backend used to geocode the literal word and quietly score everyone against a fictional
-/// origin. The place id collected here is the real origin.
-///
-/// Shared by CreateEventView and JoinEventView rather than living in the design system,
-/// which is a library of primitives — this is product logic.
-struct TravelReferenceField: View {
-    @Binding var reference: TravelReference
-    @Binding var place: PlaceSuggestion?
-    /// Both onboarding screens render this, so their identifiers stay distinguishable.
-    let identifierPrefix: String
+    private let completer = MKLocalSearchCompleter()
+    private let region = MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 35.6812, longitude: 139.7671),
+        span: MKCoordinateSpan(latitudeDelta: 4, longitudeDelta: 4)
+    )
 
-    private let service = EventService()
-    @State private var query = ""
-    @State private var results: [PlaceSuggestion] = []
-    @State private var status: SearchStatus = .idle
-    /// Bumped by 「もう一度試す」 so a retry re-runs the lookup for an unchanged query.
-    @State private var attempt = 0
-
-    private enum SearchStatus: Equatable {
-        case idle, searching, empty, failed
+    override init() {
+        super.init()
+        completer.delegate = self
+        completer.region = region
+        completer.resultTypes = [.address, .pointOfInterest]
     }
 
-    /// Long enough that a burst of typing is one lookup, short enough to feel live.
-    private static let debounceNanoseconds: UInt64 = 350_000_000
-    /// Matches the Edge Function's own minimum, so a too-short query never leaves the device.
-    private static let minQueryCharacters = 2
-    private static let maxQueryCharacters = 120
-
-    private var trimmedQuery: String {
-        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
+        completions = Array(completer.results.prefix(12))
+        errorMessage = nil
     }
 
-    private var shouldSearch: Bool {
-        reference.needsPlace && place == nil && trimmedQuery.count >= Self.minQueryCharacters
+    func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
+        completions = []
+        errorMessage = "場所を検索できませんでした。"
     }
+
+    func resolve(_ completion: MKLocalSearchCompletion) async -> OriginSelection? {
+        guard !isResolving else { return nil }
+        isResolving = true
+        errorMessage = nil
+        defer { isResolving = false }
+        do {
+            let request = MKLocalSearch.Request(completion: completion)
+            request.region = region
+            guard let item = try await MKLocalSearch(request: request).start().mapItems.first else {
+                errorMessage = "場所を確認できませんでした。"
+                return nil
+            }
+            let subtitle = completion.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            let label = subtitle.isEmpty ? completion.title : "\(completion.title)、\(subtitle)"
+            return OriginSelection(
+                label: label,
+                latitude: item.placemark.coordinate.latitude,
+                longitude: item.placemark.coordinate.longitude
+            )
+        } catch {
+            errorMessage = "場所を確認できませんでした。"
+            return nil
+        }
+    }
+}
+
+struct LocationSearchSheet: View {
+    let onSelect: (OriginSelection) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var model = LocationSearchModel()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text(TravelCopy.sectionTitle).font(AppTypography.section)
-            Text(TravelCopy.sectionHelp)
-                .font(AppTypography.caption)
-                .foregroundStyle(AppColors.ink.opacity(0.72))
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 90))], spacing: AppSpacing.xs) {
-                ForEach(TravelReference.allCases) { value in
-                    SelectionChip(title: value.label, isSelected: reference == value) {
-                        select(value)
-                    }
-                    .accessibilityIdentifier("\(identifierPrefix)-reference-\(value.rawValue)")
-                }
-            }
-            if reference.needsPlace {
-                if let place {
-                    selectedPlaceCard(place)
+        NavigationStack {
+            List {
+                if model.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("駅名やエリア名を入力して、候補から選んでください。")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.ink.opacity(0.72))
+                } else if model.completions.isEmpty && !model.isResolving {
+                    Text(model.errorMessage ?? "候補を探しています…")
+                        .font(AppTypography.body)
+                        .foregroundStyle(AppColors.ink.opacity(0.72))
                 } else {
-                    searchField
-                }
-            }
-            // Skipping the place is allowed, but never silent: travel fairness is the
-            // product's whole "no one carries a disproportionate burden" promise.
-            if place == nil || !reference.needsPlace {
-                Text(reference.needsPlace ? TravelCopy.missingPlace : TravelCopy.unconstrained)
-                    .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.ink)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, AppSpacing.sm)
-                    .padding(.vertical, AppSpacing.xs)
-                    .background(AppColors.greenSoft)
-                    .clipShape(RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous))
-                    .accessibilityIdentifier("\(identifierPrefix)-place-note")
-            }
-        }
-        // One provider call per pause in typing, never one per keystroke: a new query (or a
-        // retry) cancels the pending sleep and drops the in-flight answer, so a slow early
-        // request cannot overwrite the results of a later, narrower one.
-        .task(id: "\(attempt)-\(trimmedQuery)-\(reference.rawValue)-\(place?.placeId ?? "")") {
-            guard shouldSearch else {
-                results = []
-                status = .idle
-                return
-            }
-            status = .searching
-            try? await Task.sleep(nanoseconds: Self.debounceNanoseconds)
-            if Task.isCancelled { return }
-            do {
-                let found = try await service.searchPlaces(query: trimmedQuery)
-                if Task.isCancelled { return }
-                results = found
-                status = found.isEmpty ? .empty : .idle
-            } catch {
-                // A dead provider must not look like "no such place".
-                if Task.isCancelled { return }
-                results = []
-                status = .failed
-            }
-        }
-    }
-
-    private func selectedPlaceCard(_ place: PlaceSuggestion) -> some View {
-        AppCard {
-            HStack(spacing: AppSpacing.sm) {
-                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                    Text(place.name).font(AppTypography.body.weight(.semibold))
-                    if let address = place.address {
-                        Text(address)
-                            .font(AppTypography.caption)
-                            .foregroundStyle(AppColors.ink.opacity(0.72))
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityIdentifier("\(identifierPrefix)-place-selected")
-                Button(TravelCopy.change) {
-                    self.place = nil
-                }
-                .font(AppTypography.body.weight(.semibold))
-                .foregroundStyle(AppColors.accent)
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("\(identifierPrefix)-place-clear")
-            }
-        }
-    }
-
-    private var searchField: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xs) {
-            Text(reference.placeLabel).font(AppTypography.caption)
-            TextField(TravelCopy.searchPlaceholder, text: $query)
-                .appInputFieldStyle()
-                .autocorrectionDisabled()
-                .accessibilityIdentifier("\(identifierPrefix)-place-query")
-                .onChange(of: query) { _, value in
-                    query = String(value.prefix(Self.maxQueryCharacters))
-                }
-            if let statusText {
-                Text(statusText)
-                    .font(AppTypography.caption)
-                    .foregroundStyle(AppColors.ink.opacity(0.72))
-                    .accessibilityIdentifier("\(identifierPrefix)-place-status")
-            }
-            if status == .failed {
-                Button(AppCopy.retry) { attempt += 1 }
-                    .font(AppTypography.body.weight(.bold))
-                    .foregroundStyle(AppColors.accent)
-                    .frame(minHeight: 44)
-                    .accessibilityIdentifier("\(identifierPrefix)-place-retry")
-            }
-            if !results.isEmpty {
-                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                    ForEach(Array(results.enumerated()), id: \.element.placeId) { pair in
+                    ForEach(Array(model.completions.enumerated()), id: \.offset) { _, completion in
                         Button {
-                            query = ""
-                            results = []
-                            status = .idle
-                            place = pair.element
-                        } label: {
-                            HStack(spacing: AppSpacing.sm) {
-                                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                                    Text(pair.element.name).font(AppTypography.body)
-                                    if let address = pair.element.address {
-                                        Text(address)
-                                            .font(AppTypography.caption)
-                                            .foregroundStyle(AppColors.ink.opacity(0.72))
-                                    }
+                            Task {
+                                if let selection = await model.resolve(completion) {
+                                    onSelect(selection)
+                                    dismiss()
                                 }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                // Distinguishes a tappable candidate from the text field above.
-                                Image(systemName: "arrow.right").foregroundStyle(AppColors.accent)
                             }
-                            .padding(.horizontal, AppSpacing.sm)
-                            .padding(.vertical, AppSpacing.xs)
+                        } label: {
+                            VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                                Text(completion.title)
+                                    .font(AppTypography.body)
+                                    .foregroundStyle(AppColors.ink)
+                                if !completion.subtitle.isEmpty {
+                                    Text(completion.subtitle)
+                                        .font(AppTypography.caption)
+                                        .foregroundStyle(AppColors.ink.opacity(0.72))
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .frame(minHeight: 44)
-                            .background(AppColors.card)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous)
-                                    .strokeBorder(AppColors.border)
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: AppRadius.field, style: .continuous))
                         }
                         .buttonStyle(.plain)
-                        .foregroundStyle(AppColors.ink)
-                        .accessibilityIdentifier("\(identifierPrefix)-place-option-\(pair.offset)")
                     }
                 }
-                .accessibilityIdentifier("\(identifierPrefix)-place-results")
+            }
+            .searchable(text: $model.query, prompt: "駅名・エリア名")
+            .navigationTitle("出発地を選ぶ")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(AppCopy.cancel) { dismiss() }
+                }
+            }
+            .overlay {
+                if model.isResolving {
+                    ProgressView("場所を確認しています…")
+                        .padding(AppSpacing.lg)
+                        .background(AppColors.card)
+                        .clipShape(RoundedRectangle(cornerRadius: AppRadius.card))
+                }
             }
         }
-    }
-
-    private var statusText: String? {
-        switch status {
-        case .idle: return nil
-        case .searching: return TravelCopy.searching
-        case .empty: return TravelCopy.noResults
-        case .failed: return TravelCopy.searchFailed
-        }
-    }
-
-    private func select(_ next: TravelReference) {
-        query = ""
-        results = []
-        status = .idle
-        reference = next
-        // どこでも carries no location by definition; the other three keep the place so
-        // relabelling 会社 as 駅 does not throw away a correct origin.
-        if !next.needsPlace { place = nil }
     }
 }
 

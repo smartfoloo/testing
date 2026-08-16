@@ -23,7 +23,7 @@ struct RecommendationService {
             // photo_url is selected because a column the client cannot read is a column it
             // cannot display; the web client's features() selects the same set.
             .select(
-                "place_id, name, price_yen_estimate, room_type, cuisine_tags, atmosphere_tags, photo_url"
+                "place_id, name, price_yen_estimate, room_type, cuisine_tags, atmosphere_tags, provider_attributions, photo_url"
             )
             .in("place_id", values: placeIds)
             .execute()

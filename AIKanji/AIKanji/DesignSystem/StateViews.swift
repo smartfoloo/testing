@@ -9,18 +9,20 @@ struct LoadingStateView: View {
             RoundedRectangle(cornerRadius: 8).fill(AppColors.ink.opacity(0.06)).frame(height: 14)
         }
         .redacted(reason: .placeholder)
+        .accessibilityHidden(true)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(AppSpacing.md)
         .background(AppColors.card)
         .clipShape(RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous))
         .overlay(alignment: .bottomLeading) {
-            Text(title)
+            ProgressView(title)
                 .font(AppTypography.caption)
                 .foregroundStyle(AppColors.ink.opacity(0.72))
+                .tint(AppColors.accent)
                 .padding(.horizontal, AppSpacing.md)
                 .padding(.bottom, AppSpacing.md)
+                .accessibilityLabel(title)
         }
-        .accessibilityLabel(title)
     }
 }
 
@@ -39,6 +41,7 @@ struct EmptyStateView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, AppSpacing.xxl)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -50,6 +53,7 @@ struct InlineErrorView: View {
             Label(message, systemImage: "exclamationmark.circle")
                 .font(AppTypography.body)
                 .foregroundStyle(AppColors.ink)
+                .accessibilityLabel("エラー、\(message)")
             Button(AppCopy.retry, action: retry)
                 .font(AppTypography.body.weight(.bold))
                 .foregroundStyle(AppColors.accent)

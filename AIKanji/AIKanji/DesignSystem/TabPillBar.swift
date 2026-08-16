@@ -2,27 +2,34 @@ import SwiftUI
 
 enum HomeTab: Hashable {
     case requirements
-    case group
-    case organizer
+    case status
+    case candidates
 }
 
 struct TabPillBar: View {
     @Binding var selection: HomeTab
-    let showsOrganizer: Bool
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        HStack(spacing: AppSpacing.xs) {
-            tab(.requirements, title: AppCopy.homeRequirements, icon: "checklist")
-            tab(.group, title: AppCopy.homeGroup, icon: "person.2")
-            if showsOrganizer {
-                tab(.organizer, title: AppCopy.homeOrganizer, icon: "slider.horizontal.3")
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: AppSpacing.xs) { tabs }
+            } else {
+                HStack(spacing: AppSpacing.xs) { tabs }
             }
         }
         .padding(6)
         .background(AppColors.card)
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous))
         .shadow(color: AppColors.ink.opacity(0.08), radius: 10, y: 3)
         .padding(.horizontal, AppSpacing.lg)
+    }
+
+    @ViewBuilder
+    private var tabs: some View {
+        tab(.requirements, title: AppCopy.tabRequirements, icon: "checklist")
+        tab(.status, title: AppCopy.tabStatus, icon: "person.2")
+        tab(.candidates, title: AppCopy.tabCandidates, icon: "fork.knife")
     }
 
     private func tab(_ tab: HomeTab, title: String, icon: String) -> some View {
@@ -31,14 +38,24 @@ struct TabPillBar: View {
         } label: {
             Label(title, systemImage: icon)
                 .font(AppTypography.caption.weight(.semibold))
-                .foregroundStyle(selection == tab ? Color.white : AppColors.ink)
+                .foregroundStyle(selection == tab ? AppColors.accentForeground : AppColors.ink)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: 44)
                 .background(selection == tab ? AppColors.accent : Color.clear)
                 .clipShape(Capsule())
         }
         .accessibilityLabel(title)
-        .accessibilityIdentifier("tab-\(tab == .requirements ? "requirements" : tab == .group ? "group" : "organizer")")
+        .accessibilityIdentifier("tab-\(identifier(for: tab))")
         .accessibilityAddTraits(selection == tab ? .isSelected : [])
+    }
+
+    private func identifier(for tab: HomeTab) -> String {
+        switch tab {
+        case .requirements: return "requirements"
+        case .status: return "status"
+        case .candidates: return "candidates"
+        }
     }
 }

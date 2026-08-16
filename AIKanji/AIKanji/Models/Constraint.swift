@@ -28,6 +28,15 @@ enum NormalizedType: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var label: String { AppCopy.normalizedType(self) }
+
+    var compatibleKind: ConstraintKind {
+        switch self {
+        case .budget, .dietary, .allergy, .smoking, .room, .travelTime, .accessibility:
+            return .must
+        case .cuisine, .atmosphere, .other:
+            return .want
+        }
+    }
 }
 
 enum ConstraintVisibility: String, Codable, CaseIterable, Identifiable {
@@ -38,6 +47,126 @@ enum ConstraintVisibility: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var label: String { AppCopy.visibility(self) }
+}
+
+struct ConstraintOption: Identifiable, Hashable {
+    let key: String
+    let label: String
+    let canonicalKey: String?
+
+    init(key: String, label: String, canonicalKey: String? = nil) {
+        self.key = key
+        self.label = label
+        self.canonicalKey = canonicalKey
+    }
+
+    var id: String { key }
+}
+
+enum ConstraintCatalog {
+    static let structuredCategories: [NormalizedType] = [
+        .budget, .cuisine, .allergy, .dietary, .room, .travelTime, .other,
+    ]
+
+    static let normalizedTypes = NormalizedType.allCases
+
+    static let mandatoryAllergens: [ConstraintOption] = [
+        .init(key: "shrimp", label: "えび", canonicalKey: "shrimp"),
+        .init(key: "cashew_nut", label: "カシューナッツ", canonicalKey: "cashew_nut"),
+        .init(key: "crab", label: "かに", canonicalKey: "crab"),
+        .init(key: "walnut", label: "くるみ", canonicalKey: "walnut"),
+        .init(key: "wheat", label: "小麦", canonicalKey: "wheat"),
+        .init(key: "buckwheat", label: "そば", canonicalKey: "buckwheat"),
+        .init(key: "egg", label: "卵", canonicalKey: "egg"),
+        .init(key: "milk", label: "乳", canonicalKey: "milk"),
+        .init(key: "peanut", label: "落花生（ピーナッツ）", canonicalKey: "peanut"),
+    ]
+
+    static let recommendedAllergens: [ConstraintOption] = [
+        .init(key: "almond", label: "アーモンド", canonicalKey: "almond"),
+        .init(key: "abalone", label: "あわび", canonicalKey: "abalone"),
+        .init(key: "squid", label: "いか", canonicalKey: "squid"),
+        .init(key: "salmon_roe", label: "いくら", canonicalKey: "salmon_roe"),
+        .init(key: "orange", label: "オレンジ", canonicalKey: "orange"),
+        .init(key: "kiwi", label: "キウイフルーツ", canonicalKey: "kiwi"),
+        .init(key: "beef", label: "牛肉", canonicalKey: "beef"),
+        .init(key: "sesame", label: "ごま", canonicalKey: "sesame"),
+        .init(key: "salmon", label: "さけ", canonicalKey: "salmon"),
+        .init(key: "mackerel", label: "さば", canonicalKey: "mackerel"),
+        .init(key: "soybean", label: "大豆", canonicalKey: "soybean"),
+        .init(key: "chicken", label: "鶏肉", canonicalKey: "chicken"),
+        .init(key: "banana", label: "バナナ", canonicalKey: "banana"),
+        .init(key: "pistachio", label: "ピスタチオ", canonicalKey: "pistachio"),
+        .init(key: "pork", label: "豚肉", canonicalKey: "pork"),
+        .init(key: "macadamia_nut", label: "マカダミアナッツ", canonicalKey: "macadamia_nut"),
+        .init(key: "peach", label: "もも", canonicalKey: "peach"),
+        .init(key: "yam", label: "やまいも", canonicalKey: "yam"),
+        .init(key: "apple", label: "りんご", canonicalKey: "apple"),
+        .init(key: "gelatin", label: "ゼラチン", canonicalKey: "gelatin"),
+    ]
+
+    static var allergens: [ConstraintOption] {
+        mandatoryAllergens + recommendedAllergens
+    }
+
+    static let dietary: [ConstraintOption] = [
+        .init(key: "vegetarian", label: "ベジタリアン"),
+        .init(key: "vegan", label: "ヴィーガン"),
+        .init(key: "halal", label: "ハラール"),
+        .init(key: "gluten_free", label: "グルテンフリー"),
+    ]
+
+    static let cuisines: [ConstraintOption] = [
+        .init(key: "japanese", label: "和食"),
+        .init(key: "sushi", label: "寿司"),
+        .init(key: "yakiniku", label: "焼肉"),
+        .init(key: "izakaya", label: "居酒屋"),
+        .init(key: "italian", label: "イタリアン"),
+        .init(key: "french", label: "フレンチ"),
+        .init(key: "chinese", label: "中華"),
+        .init(key: "korean", label: "韓国料理"),
+        .init(key: "curry", label: "カレー"),
+        .init(key: "ramen", label: "ラーメン"),
+    ]
+
+    static let rooms: [ConstraintOption] = [
+        .init(key: "private", label: "個室"),
+        .init(key: "semi_private", label: "半個室"),
+        .init(key: "open", label: "オープン席"),
+    ]
+
+    static func allergenLabel(for key: String) -> String {
+        AppCopy.allergen(key) ?? allergens.first { $0.key == key }?.label ?? key
+    }
+
+    static func dietaryLabel(for key: String) -> String {
+        dietary.first { $0.key == key }?.label ?? AppCopy.dietary(key) ?? key
+    }
+
+    static func canonicalAllergens(for selection: Set<String>) -> [String] {
+        let knownKeys = Set(allergens.map(\.key))
+        guard selection.isSubset(of: knownKeys) else { return [] }
+        return Array(Set(allergens.filter { selection.contains($0.key) }.compactMap(\.canonicalKey))).sorted()
+    }
+
+    static func unsupportedAllergenLabels(for selection: Set<String>) -> [String] {
+        let knownKeys = Set(allergens.map(\.key))
+        return selection.subtracting(knownKeys).sorted()
+    }
+
+    static func selectedAllergenKeys(
+        canonicalKeys: [String],
+        rawText: String,
+        semanticRemainder: String?
+    ) -> Set<String> {
+        let expanded = canonicalKeys.flatMap { $0 == "shellfish" ? ["shrimp", "crab"] : [$0] }
+        let wording = rawText + " " + (semanticRemainder ?? "")
+        var selected = Set(allergens.filter { wording.contains($0.label) }.map(\.key))
+        selected.formUnion(allergens.filter { option in
+            expanded.contains(option.canonicalKey ?? "")
+        }.map(\.key))
+        return selected
+    }
 }
 
 /// How sensitive a requirement is. Advisory metadata assigned server-side from
@@ -146,6 +275,21 @@ extension JSONValue {
             return []
         }
     }
+
+    var integerValue: Int? {
+        guard case .number(let value) = self else { return nil }
+        return Int(value)
+    }
+
+    var stringValue: String? {
+        guard case .string(let value) = self else { return nil }
+        return value
+    }
+
+    var stringValues: [String]? {
+        guard case .array(let values) = self else { return nil }
+        return values.compactMap(\.stringValue)
+    }
 }
 
 enum ConstraintFormatter {
@@ -157,7 +301,11 @@ enum ConstraintFormatter {
                 return "\(type.label)：\(label)"
             }
         case .budget:
-            if let amount = value["max_yen"]?.displayText { return "\(type.label)：\(amount)円まで" }
+            let minimum = value["min_yen"]?.integerValue
+            let maximum = value["max_yen"]?.integerValue
+            if let minimum, let maximum { return "\(type.label)：\(yen(minimum))〜\(yen(maximum))" }
+            if let maximum { return "\(type.label)：\(yen(maximum))まで" }
+            if let minimum { return "\(type.label)：\(yen(minimum))以上" }
         case .travelTime:
             if let minutes = value["max_minutes"]?.displayText { return "\(type.label)：\(minutes)分以内" }
         case .cuisine:
@@ -186,6 +334,14 @@ enum ConstraintFormatter {
     /// web/src/models/format.ts.
     private static func labelled(_ tags: [String], _ label: (String) -> String?) -> String {
         tags.map { label($0) ?? $0 }.joined(separator: "・")
+    }
+
+    static func yen(_ amount: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return "¥\(formatter.string(from: NSNumber(value: amount)) ?? String(amount))"
     }
 
     static func feedLine(_ item: FeedItem) -> String {

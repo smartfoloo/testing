@@ -51,13 +51,24 @@ failure.
 The hosted project is not required for development. `supabase start` gives a full local
 stack whose anon key is the public `supabase-demo` JWT.
 
-From `AIKanji/`:
+From the repository root, create and load the sole hand-maintained local environment, then start
+the stack and generate both client configurations:
 
 ```
+cp .env.example .env
+set -a
+. ./.env
+set +a
+cd AIKanji
 supabase start
-supabase db reset     # applies the 19 migrations in order, then seed.sql
-supabase status -o env
+supabase db reset     # applies all migrations in order, then seed.sql
+cd ..
+node scripts/sync-local-secrets.mjs
+node scripts/sync-local-secrets.mjs --check
 ```
+
+Leave `SUPABASE_URL` and `SUPABASE_ANON_KEY` blank in root `.env` to let the sync script discover
+the running local stack.
 
 `supabase/config.toml` is gitignored-adjacent local config created with `supabase init`,
 with these deliberate deviations from the defaults:
@@ -70,16 +81,16 @@ with these deliberate deviations from the defaults:
 
 ### Client configuration
 
-`Secrets.xcconfig` (gitignored) overrides the placeholders in `Config.xcconfig` via its
-trailing `#include?`, and the values reach `SupabaseConfig` through `Info.plist`.
+Root `.env` is the only hand-maintained local source. `scripts/sync-local-secrets.mjs` writes
+only `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `INVITE_LINK_BASE_URL` to the gitignored
+`Secrets.xcconfig`, which overrides the placeholders in `Config.xcconfig` via its trailing
+`#include?`. The same run writes only `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` to the
+gitignored `web/.env.local`.
 
-xcconfig treats `//` as a comment, so a local `http://` URL cannot be written literally —
-it silently truncates to `http:`. Carry the slashes in a variable instead:
-
-```
-SLASH = /
-SUPABASE_URL = http:$(SLASH)$(SLASH)127.0.0.1:54321
-```
+xcconfig treats `//` as a comment, so the generator carries URL slashes through a `SLASH = /`
+variable instead of writing a literal `http://`. Never hand-edit either generated file.
+Supabase anon keys are publishable; service-role, provider, and test credentials are not and must
+never enter `Secrets.xcconfig` or a `VITE_*` value.
 
 Verify what actually shipped rather than trusting the xcconfig:
 
@@ -93,14 +104,17 @@ appearing on launch. Do not add an ATS entry for this.
 
 ### Edge Function keys
 
-`[edge_runtime.secrets]` in `config.toml` reads the provider keys from the shell, so no
-key is ever committed. Export them before starting:
+`[edge_runtime.secrets]` in `config.toml` reads provider settings from the shell. Load the
+ignored root `.env` with `set -a; . ./.env; set +a` before `supabase start`; do not maintain a
+second env file under `AIKanji/supabase`. For hosted functions, register each configured provider
+variable from that environment with `supabase secrets set NAME="$NAME"`; Supabase keeps those
+values in its encrypted secret store. Do not set provider or service-role values in either client.
+
+Confirm presence without printing a value:
 
 ```
-LLM_API_KEY=... GOOGLE_PLACES_API_KEY=... HOTPEPPER_API_KEY=... supabase start
+docker exec supabase_edge_runtime_AIKanji sh -c 'test -n "$LLM_API_KEY" && echo "LLM_API_KEY is set"'
 ```
-
-Confirm they landed: `docker exec supabase_edge_runtime_AIKanji env | grep LLM_API_KEY`.
 
 Without `LLM_API_KEY`, `llm-assist` returns its fail-closed fallback
 (`normalized_type: "other"`, `needs_clarification: true`). The app then asks for
@@ -111,8 +125,9 @@ cannot pass — it needs a real key. The other three UI tests pass without any p
 
 `AIKanjiDomainTests` skip themselves unless `TEST_RUNNER_SUPABASE_URL`,
 `TEST_RUNNER_SUPABASE_ANON_KEY`, `TEST_RUNNER_SUPABASE_SERVICE_ROLE_KEY` and
-`TEST_RUNNER_AIKANJI_TEST_PASSWORD` are set, and they additionally need the five
-`<persona>@aikanji.demo` Auth users wired to the seeded participant IDs (see
+`TEST_RUNNER_AIKANJI_TEST_PASSWORD` are set. Root `.env.example` maps those names to the generic
+values; shell-source the copied root `.env` before `xcodebuild` so the references expand. The tests
+also need the five `<persona>@aikanji.demo` Auth users wired to the seeded participant IDs (see
 `AIKanji/README.md`). A bare local stack has none of these, so they skip.
 
 ## Docker (Colima)

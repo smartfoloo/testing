@@ -264,6 +264,40 @@ Devin の API キー（v3 のサービスユーザーキー）と Organization I
 └── .github/workflows/ci.yml  自動テスト
 ```
 
+## 開発環境の設定
+
+ローカル設定は、リポジトリ直下の gitignored `.env` だけを手で管理します。
+
+```bash
+cp .env.example .env
+# .env に必要な値を設定
+node scripts/sync-local-secrets.mjs
+node scripts/sync-local-secrets.mjs --check
+```
+
+同期スクリプトは、公開可能な `SUPABASE_URL`、`SUPABASE_ANON_KEY`、
+`INVITE_LINK_BASE_URL` だけを iOS の `AIKanji/Secrets.xcconfig` に書き、Web の
+`web/.env.local` には対応する2つの `VITE_*` 値だけを書きます。どちらも生成物であり
+gitignored なので、直接編集しません。Supabase の anon key はクライアント配布を前提とした
+公開可能なキーですが、アクセス制御は必ず RLS で行います。
+
+サービスロール、LLM、Google、Hot Pepper のキーとテスト用パスワードはサーバー専用です。
+これらを `Secrets.xcconfig` や `VITE_*` へ入れてはいけません。Edge Functions を公開する際は
+`.env` をシェル環境へ読み込み、使用する変数を `supabase secrets set NAME="$NAME"` で
+Supabase の暗号化された secret store に登録してから function を deploy します。
+
+```bash
+set -a
+. ./.env
+set +a
+cd AIKanji
+supabase secrets set LLM_API_KEY="$LLM_API_KEY"  # 使用する provider 変数ごとに登録
+supabase functions deploy llm-assist
+```
+
+`SUPABASE_SERVICE_ROLE_KEY` は Supabase が Edge Runtime に提供するもので、クライアントへ
+渡しません。
+
 ## すぐにデモを試す
 
 外部サービスの認証情報がなくても、ブラウザから一連の流れを確認できます。

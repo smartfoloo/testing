@@ -1,16 +1,11 @@
-// Supabase project credentials. `//` must be escaped in xcconfig URLs, hence
-// SUPABASE_URL is written without the scheme; SupabaseConfig prepends https://.
-// Override locally by creating Secrets.xcconfig (gitignored) with the real values.
+// Compile-safe placeholders only. For local or hosted development, copy the repository-root
+// .env.example to .env and run `node scripts/sync-local-secrets.mjs` from the repository root.
+// The generated, gitignored Secrets.xcconfig overrides these values.
 SUPABASE_URL = your-project.supabase.co
-SUPABASE_ANON_KEY = your-anon-key
+SUPABASE_ANON_KEY = your-publishable-anon-key
 
-// Host the invite links are built against, e.g. INVITE_LINK_BASE_URL = matomeshi.example.com
-// (no scheme, for the same reason as SUPABASE_URL — InviteLink prepends https://).
-// Deliberately EMPTY here rather than pointing at a domain nobody owns: with no value the
-// QR code and the share sheet fall back to the bare 6-character invite code, which is what
-// the app did before invite links existed. Set it in Secrets.xcconfig — an https invite link
-// also needs the Associated Domains entitlement plus an apple-app-site-association file on
-// that host before iOS will open it in the app.
+// Empty means QR codes and sharing fall back to the bare invite code. A configured HTTPS host
+// also needs the Associated Domains entitlement and an apple-app-site-association file.
 INVITE_LINK_BASE_URL =
 
 #include? "Secrets.xcconfig"

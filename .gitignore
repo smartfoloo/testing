@@ -3,7 +3,12 @@ build/
 DerivedData/
 *.xcuserstate
 xcuserdata/
-AIKanji/Secrets.xcconfig
+
+# Local environment source and generated client configuration
+/.env
+/AIKanji/Secrets.xcconfig
+/web/.env.local
+
 AIKanji/AIKanji.xcodeproj/project.xcworkspace/
 
 # Local build/test artifacts

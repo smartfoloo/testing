@@ -66,16 +66,10 @@
 //   * TABELOG'S TERMS OF USE FORBID REPRODUCING ITS CONTENT WITHOUT PRIOR WRITTEN
 //     CONSENT, and bar commercial use. We do not have that consent. This code
 //     exists for a NON-COMMERCIAL HACKATHON DEMO and for nothing else.
-//   * IT IS ON BY DEFAULT, AND THAT IS A DELIBERATE PROJECT DECISION. Set the
-//     secret TABELOG_ENRICHMENT_ENABLED to exactly "false" to turn it off; any
-//     other value, including unset, leaves it ON. It was off by default until the
-//     owner decided that a demo which collects this data should use it.
-//     WHAT THAT MEANS FOR YOU: a fresh clone that starts the stack begins scraping
-//     tabelog.com on the first search that reaches the enrichment step, without
-//     anybody choosing it. If this repository ever becomes something shipped,
-//     public, or run by people who have not read this header, flip the default in
-//     the constant below back to opt-in FIRST — it is one operator, `!==` to
-//     `===`, and the whole rest of this section is written to make that safe.
+//   * IT IS OFF BY DEFAULT. Set the secret TABELOG_ENRICHMENT_ENABLED to exactly
+//     "true" to opt in; every other value, including unset, leaves it OFF. A fresh
+//     clone therefore makes no request to tabelog.com unless an operator has made
+//     that explicit choice.
 //   * THE LEGITIMATE ROUTE IS A PARTNER AGREEMENT WITH KAKAKU.COM. If a product
 //     ever wants this data, that is the change to make — not a bigger scraper.
 //   * NO REVIEW TEXT IS EVER TAKEN OR STORED. Review text is the content those
@@ -104,24 +98,14 @@ const GOOGLE_ROUTES_API_KEY = Deno.env.get("GOOGLE_ROUTES_API_KEY") ??
   GOOGLE_PLACES_API_KEY;
 const HOTPEPPER_API_KEY = Deno.env.get("HOTPEPPER_API_KEY") ?? "";
 /**
- * The Tabelog scraper's switch. ON unless the value is exactly "false".
- *
- * It was `=== "true"` — opt-in — until the project owner decided that a demo which goes to the
- * trouble of collecting this data should be using it, which is a fair reading of a hackathon
- * build. The comparison is kept exact in the same way, just inverted: only the literal "false"
- * disables it, so a misspelt, empty, "0" or "no" value does NOT silently disable a feature
- * somebody is relying on, exactly as a stray value previously could not silently enable one.
- *
- * The single line below is the entire opt-in/opt-out decision. Changing `!==` back to `===`
- * restores default-off, and nothing else in this file needs to move: every limit, the
- * robots.txt guard and the review refusals apply identically either way.
+ * The Tabelog scraper's switch. OFF unless the value is exactly "true".
  *
  * Read once at module load — the edge runtime only sees what config.toml's
  * [edge_runtime.secrets] declares, so changing it is a config change plus a stack restart,
  * never a request header.
  */
 const TABELOG_ENRICHMENT_ENABLED =
-  Deno.env.get("TABELOG_ENRICHMENT_ENABLED") !== "false";
+  Deno.env.get("TABELOG_ENRICHMENT_ENABLED") === "true";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -240,6 +224,12 @@ interface ParticipantRow {
   id: string;
   travel_reference: string | null;
   travel_reference_place_id: string | null;
+}
+
+interface ParticipantOriginRow {
+  participant_id: string;
+  latitude: number;
+  longitude: number;
 }
 
 interface Candidate {
@@ -1911,6 +1901,12 @@ Deno.serve(async (req: Request) => {
     return json({ error: "not a participant of this event" }, 403);
   }
 
+  const { data: participantOrigins, error: originErr } = await supabase
+    .from("participant_origins")
+    .select("participant_id, latitude, longitude")
+    .in("participant_id", participants.map((participant) => participant.id));
+  if (originErr) return json({ error: originErr.message }, 500);
+
   // The Places key is NOT checked here. It used to be, and that made a fully cached
   // event fail for want of something it never uses: the read-through cache below can
   // answer with no provider call at all, which is exactly what the seeded demo relies
@@ -1985,15 +1981,24 @@ Deno.serve(async (req: Request) => {
 
   // 1. Resolve each participant's travel reference to a location.
   //
-  // `travel_reference` is a UI CATEGORY ('office'|'home'|'station'|
-  // 'doesnt_matter'), not an address. Geocoding the word — the old
-  // `geocodeText("office Tokyo")` path — invented a location somewhere in Tokyo
-  // for every participant and made the whole travel-fairness story fiction, so
-  // an unresolvable participant is now reported instead of guessed.
+  // The canonical travel_reference/place-id pair is tried first. The private coordinate
+  // supplement is a fallback when no place id was supplied or Places cannot resolve it; it
+  // never overrides the canonical fields. `doesnt_matter` opts out before either source is
+  // considered, even if a coordinate row still exists.
   const origins: Origin[] = [];
   const unresolved: { participant_id: string; reason: string }[] = [];
   const unconstrained: string[] = [];
   const locationByPlaceId = new Map<string, LatLng | null>();
+  const coordinateByParticipant = new Map<string, LatLng>();
+  for (const row of (participantOrigins ?? []) as ParticipantOriginRow[]) {
+    if (!Number.isFinite(row.latitude) || !Number.isFinite(row.longitude)) {
+      continue;
+    }
+    coordinateByParticipant.set(row.participant_id, {
+      lat: row.latitude,
+      lng: row.longitude,
+    });
+  }
   for (const p of participants as ParticipantRow[]) {
     if (p.travel_reference === "doesnt_matter") {
       // No travel constraint by definition: they are not an origin, and their
@@ -2002,29 +2007,33 @@ Deno.serve(async (req: Request) => {
       continue;
     }
     const referencePlaceId = p.travel_reference_place_id;
-    if (!referencePlaceId) {
-      unresolved.push({
-        participant_id: p.id,
-        reason: "travel_reference_place_id_missing",
-      });
+    if (referencePlaceId) {
+      // Colleagues share an office: one Places lookup per distinct place id.
+      if (!locationByPlaceId.has(referencePlaceId)) {
+        locationByPlaceId.set(
+          referencePlaceId,
+          await placeLocation(referencePlaceId, incidents),
+        );
+      }
+      const canonicalLocation = locationByPlaceId.get(referencePlaceId) ?? null;
+      if (canonicalLocation) {
+        origins.push({ participantId: p.id, location: canonicalLocation });
+        continue;
+      }
+    }
+
+    const coordinateFallback = coordinateByParticipant.get(p.id);
+    if (coordinateFallback) {
+      origins.push({ participantId: p.id, location: coordinateFallback });
       continue;
     }
-    // Colleagues share an office: one Places lookup per distinct place id.
-    if (!locationByPlaceId.has(referencePlaceId)) {
-      locationByPlaceId.set(
-        referencePlaceId,
-        await placeLocation(referencePlaceId, incidents),
-      );
-    }
-    const loc = locationByPlaceId.get(referencePlaceId) ?? null;
-    if (!loc) {
-      unresolved.push({
-        participant_id: p.id,
-        reason: "travel_reference_place_lookup_failed",
-      });
-      continue;
-    }
-    origins.push({ participantId: p.id, location: loc });
+
+    unresolved.push({
+      participant_id: p.id,
+      reason: referencePlaceId
+        ? "travel_reference_place_lookup_failed"
+        : "travel_reference_place_id_missing",
+    });
   }
   // Deliberately NO blanket origin precondition here. An origin buys exactly two
   // things — the meeting areas provider discovery searches around, and the travel
@@ -2047,10 +2056,24 @@ Deno.serve(async (req: Request) => {
   // 3. Read-through cache: which of this event's candidates are still fresh?
   const discoveryCutoffMs = minutesAgoMs(DISCOVERY_TTL_MINUTES);
   const travelCutoffMs = minutesAgoMs(TRAVEL_TTL_MINUTES);
-  const { data: cachedCandidateRows, error: ccErr } = await supabase
+  const { data: candidateScope, error: scopeReadErr } = await supabase
+    .from("event_candidate_scopes")
+    .select("generation")
+    .eq("event_id", eventId)
+    .maybeSingle();
+  if (scopeReadErr) return json({ error: scopeReadErr.message }, 500);
+  let cachedCandidateQuery = supabase
     .from("event_restaurant_candidates")
     .select("place_id, discovered_at")
     .eq("event_id", eventId);
+  if (typeof candidateScope?.generation === "string") {
+    cachedCandidateQuery = cachedCandidateQuery.eq(
+      "scope_generation",
+      candidateScope.generation,
+    );
+  }
+  const { data: cachedCandidateRows, error: ccErr } =
+    await cachedCandidateQuery;
   if (ccErr) return json({ error: ccErr.message }, 500);
   const allCandidateIds = (cachedCandidateRows ?? []).map((row) =>
     row.place_id as string
@@ -2257,7 +2280,7 @@ Deno.serve(async (req: Request) => {
       ...(c.hotpepper_id === null ? {} : { photo_url: c.photo_url }),
     }));
     const { error: recordErr } = await supabase.rpc(
-      "fn_record_provider_candidates",
+      "fn_record_provider_candidates_v2",
       { p_event_id: eventId, p_candidates: candidatePayload },
     );
     if (recordErr) return json({ error: recordErr.message }, 500);
@@ -2334,9 +2357,18 @@ Deno.serve(async (req: Request) => {
       .gt("rank", areas.length);
   }
 
+  // A provider refresh replaces the previous active set; a cache-served run republishes the
+  // resolved cached set. The recorder RPC above intentionally preserves provider records, while
+  // this narrow scope RPC atomically advances one generation and removes stale associations.
   const activePlaceIds = [
-    ...new Set([...cachedPlaceIds, ...byPlaceId.keys()]),
+    ...new Set(discoveryNeeded ? byPlaceId.keys() : cachedPlaceIds),
   ];
+  const { error: scopeErr } = await supabase.rpc(
+    "fn_replace_event_candidate_scope",
+    { p_event_id: eventId, p_place_ids: activePlaceIds },
+  );
+  if (scopeErr) return json({ error: scopeErr.message }, 500);
+
   if (activePlaceIds.length === 0) {
     await persistSourceRecords(sourceRecords);
     await persistIncidents();

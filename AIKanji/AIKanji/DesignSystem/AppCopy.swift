@@ -18,17 +18,29 @@ enum AppCopy {
     static let save = "保存する"
     static let cancel = "キャンセル"
     static let continueAction = "続ける"
+    static let currentEvents = "進行中の集まり"
+    static let decidedEvents = "決定した集まり"
+    static let tabRequirements = "希望"
+    static let tabStatus = "みんな"
+    static let tabCandidates = "候補"
     static let homeRequirements = "あなたの希望"
-    static let homeGroup = "みんなの状況"
+    static let homeGroup = "みんなの希望"
     static let homeOrganizer = "幹事"
-    static let must = "絶対に必要"
-    static let want = "できれば欲しい"
+    static let management = "管理"
+    static let must = "必須"
+    static let want = "できれば"
+    static let hiddenFromGroup = "グループには非表示"
+    static let preferenceCategory = "希望の種類"
+    static let preferenceCategoryPrompt = "種類を選ぶと、入力項目が表示されます。"
+    static let allergySafety = "アレルギー対応は保証されません。必ずお店に直接確認してください。"
+    static let dietarySafety = "対応状況はお店によって異なります。必ずお店に直接確認してください。"
+    static let preferencesClosedError = "希望の受付は締め切られています。保存・編集・削除はできません。"
     static let findRestaurants = "条件に合うお店を探す"
     static let recommendations = "おすすめのお店"
     static let negotiationAccept = "変更しても大丈夫"
     static let negotiationDecline = "この条件を変えない"
-    static let showName = "名前を表示"
-    static let anonymous = "匿名で共有"
+    static let showName = "名前付き"
+    static let anonymous = "匿名"
     static let chosen = "このお店に決まりました"
     static let noResults = "まだ条件に合うお店がありません。"
     static let loading = "読み込み中…"
@@ -89,7 +101,7 @@ enum AppCopy {
         switch visibility {
         case .publicToGroup: return showName
         case .anonymous: return anonymous
-        case .privateToSelf: return "自分だけ"
+        case .privateToSelf: return hiddenFromGroup
         }
     }
 
@@ -123,14 +135,17 @@ enum AppCopy {
         {
             return invalidCredentialsError
         }
-        // `violates row-level security` is what PostgREST answers when RLS refuses a write —
-        // e.g. adding a requirement after collection closed. It fell through to the network
-        // message, which told the participant to try again later for a refusal that was
-        // deliberate and permanent. Kept identical to errorMessage() in web/src/design/copy.ts.
+        if description.contains("preferences are closed")
+            || description.contains("preference collection is closed")
+            || description.contains("preferences closed")
+            || description.contains("constraint unavailable")
+            || description.contains("violates row-level security")
+        {
+            return preferencesClosedError
+        }
         if description.contains("only the organizer")
             || description.contains("not permitted")
             || description.contains("permission")
-            || description.contains("violates row-level security")
         {
             return permissionError
         }
@@ -193,24 +208,40 @@ enum AppCopy {
         }
     }
 
-    /// `ALLERGEN_WORDS` in mock.ts, labelled with the terms Japanese food labelling uses
-    /// (消費者庁の特定原材料: 卵・乳・小麦・そば・落花生), so the word on screen is the word on a
-    /// menu rather than an approximation of one.
-    ///
-    /// `shellfish` is the CRUSTACEAN member of the closed allergen vocabulary (0026) — えび
-    /// and かに — so 甲殻類 is exact rather than an approximation. 貝 is deliberately outside
-    /// it: a venue that has confirmed itself `shellfish_free` has said nothing about oysters
-    /// or clams, so folding molluscs in would record a weaker requirement than the participant
-    /// stated. Since 0026, 「貝アレルギー」 keeps the writer's wording in `semantic_remainder`
-    /// and asks, rather than being silently mapped here.
+    /// Backend canonical keys for the official 9 mandatory and 20 recommended allergen items.
+    /// `shellfish` remains readable for constraints stored before shrimp and crab were split.
     static func allergen(_ value: String) -> String? {
         switch value {
         case "shellfish": return "甲殻類"
+        case "shrimp": return "えび"
+        case "cashew_nut": return "カシューナッツ"
+        case "crab": return "かに"
+        case "walnut": return "くるみ"
         case "egg": return "卵"
         case "milk": return "乳"
         case "peanut": return "落花生（ピーナッツ）"
         case "wheat": return "小麦"
         case "buckwheat": return "そば"
+        case "almond": return "アーモンド"
+        case "abalone": return "あわび"
+        case "squid": return "いか"
+        case "salmon_roe": return "いくら"
+        case "orange": return "オレンジ"
+        case "kiwi": return "キウイフルーツ"
+        case "beef": return "牛肉"
+        case "sesame": return "ごま"
+        case "salmon": return "さけ"
+        case "mackerel": return "さば"
+        case "soybean": return "大豆"
+        case "chicken": return "鶏肉"
+        case "banana": return "バナナ"
+        case "pistachio": return "ピスタチオ"
+        case "pork": return "豚肉"
+        case "macadamia_nut": return "マカダミアナッツ"
+        case "peach": return "もも"
+        case "yam": return "やまいも"
+        case "apple": return "りんご"
+        case "gelatin": return "ゼラチン"
         default: return nil
         }
     }
@@ -238,6 +269,7 @@ enum AppCopy {
         case "yakiniku": return "焼肉"
         case "ramen": return "ラーメン"
         case "italian": return "イタリアン"
+        case "french": return "フレンチ"
         case "chinese": return "中華"
         case "korean": return "韓国料理"
         case "curry": return "カレー"
@@ -395,9 +427,17 @@ enum AppCopy {
             if quality.method == .atmosphereTagProxy {
                 return "口コミ評価が取れていないため、雰囲気タグ\(quality.atmosphereTags)件からの暫定値です。低い評価という意味ではありません。"
             }
-            let rating = quality.rating.map { number($0) } ?? "—"
-            let count = quality.userRatingCount.map { String($0) } ?? "—"
-            return "口コミ\(rating)（\(count)件）をもとに、件数の少なさを補正して見ています。"
+            let googleRating = quality.rating.map(number) ?? "—"
+            let googleCount = quality.userRatingCount.map(String.init) ?? "—"
+            let tabelogRating = quality.tabelogRating.map(number) ?? "—"
+            let tabelogCount = quality.tabelogReviewCount.map(String.init) ?? "—"
+            if quality.method == .googleAndTabelog {
+                return "Google の口コミ\(googleRating)（\(googleCount)件）と、食べログ\(tabelogRating)（\(tabelogCount)件）を、それぞれの評価の付き方の違いをふまえて見ています。"
+            }
+            if quality.method == .tabelogOnly {
+                return "Google の口コミ評価がないため、食べログ\(tabelogRating)（\(tabelogCount)件）をもとに、件数の少なさを補正して見ています。"
+            }
+            return "口コミ\(googleRating)（\(googleCount)件）をもとに、件数の少なさを補正して見ています。"
         case .costFit:
             guard let priceYen = cost.priceYen else {
                 return "価格が取れていないため、負担\(scorePercent(cost.burden))のいちばん厳しい見立てにしています。"

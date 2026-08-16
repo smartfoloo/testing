@@ -110,10 +110,30 @@ struct NegotiationService {
             .select("id, event_id, run_at, feasible_count")
             .eq("event_id", value: eventId)
             .order("run_at", ascending: false)
+            .order("id", ascending: false)
             .limit(1)
             .execute()
             .value
         return rows.first
+    }
+
+    private struct FeasibilityStaleRow: Decodable {
+        let feasibilityStaleAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case feasibilityStaleAt = "feasibility_stale_at"
+        }
+    }
+
+    func feasibilityStaleAt(eventId: UUID) async throws -> Date? {
+        let row: FeasibilityStaleRow = try await client
+            .from("events")
+            .select("feasibility_stale_at")
+            .eq("id", value: eventId)
+            .single()
+            .execute()
+            .value
+        return CollectionReadiness.timestamp(row.feasibilityStaleAt)
     }
 
     private struct SearchRequest: Encodable {
@@ -148,14 +168,6 @@ struct NegotiationService {
             .value
     }
 
-    /// Postgres renders `timestamptz` with a variable number of fractional digits and a
-    /// numeric offset, which `ISO8601DateFormatter` rejects unless told to expect them.
-    private static let staleFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-
     // MARK: - Live run updates
 
     /// Subscribes to `run_updated` on the private `event-{id}` topic, so the dashboard's
@@ -179,7 +191,7 @@ struct NegotiationService {
                 for await message in broadcasts {
                     guard let payload = message["payload"]?.objectValue,
                           let data = try? JSONEncoder().encode(payload),
-                          let update = try? JSONDecoder().decode(RunUpdate.self, from: data)
+                          let update = try? Self.runUpdateDecoder.decode(RunUpdate.self, from: data)
                     else { continue }
                     continuation.yield(update)
                 }
@@ -191,22 +203,8 @@ struct NegotiationService {
         return (subscription, stream)
     }
 
-    /// Subscribes to `feasibility_stale` (0029) — a bare notification that somebody's
-    /// requirement changed, so the displayed feasible count is out of date.
-    ///
-    /// It is NOT a recompute and carries no result: the payload is `{event_id, stale_at}` and
-    /// names nobody. The trigger deliberately does not recompute, because recompute writes a
-    /// `recommendation_runs` row and every row broadcasts `run_updated` — one run and one push
-    /// per submitted requirement would make `latestRun()` mean "the last thing anyone typed".
-    /// So the decision of WHEN to recompute belongs to the client, which can coalesce a burst
-    /// of five people submitting into one call. See OrganizerDashboardView for that debounce.
-    ///
-    /// Yields the change's `stale_at`, which the caller needs and must not display: it is what
-    /// lets the dashboard ignore a change the run on screen already counted. Realtime replays
-    /// whatever is in the topic, so a screen that has just joined can be handed a mark older
-    /// than its own run (0025 documents that hazard for `run_updated`); without the timestamp
-    /// there is no way to tell that apart from a change that just happened, and the only safe
-    /// reading would be to recompute for both.
+    /// Subscribes to 0029's aggregate-only staleness mark. The payload is exactly
+    /// `{event_id, stale_at}` and carries no participant or requirement fields.
     func feasibilityStaleSignals(eventId: UUID) async throws
         -> (channel: RealtimeTopicSubscription, stream: AsyncStream<Date>)
     {
@@ -219,17 +217,38 @@ struct NegotiationService {
         let stream = AsyncStream<Date> { continuation in
             let task = Task {
                 for await message in broadcasts {
-                    // An unreadable or absent stamp yields `now`, i.e. "treat this as newer
-                    // than anything on screen". Failing toward freshness costs one redundant
-                    // recompute; failing the other way would silently drop a real change.
                     let raw = message["payload"]?.objectValue?["stale_at"]?.stringValue
-                    continuation.yield(raw.flatMap(Self.staleFormatter.date(from:)) ?? Date())
+                    continuation.yield(CollectionReadiness.timestamp(raw) ?? Date())
                 }
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
-
         return (subscription, stream)
     }
+
+    private static let runUpdateDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let text = try container.decode(String.self)
+            if let date = fractionalFormatter.date(from: text) ?? plainFormatter.date(from: text) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unrecognized timestamp: \(text)")
+        }
+        return decoder
+    }()
+
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let plainFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 }

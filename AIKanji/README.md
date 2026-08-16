@@ -7,47 +7,63 @@ the data foundation (schema + RLS + RPC) and the create/join flow.
 
 ```
 AIKanji.xcodeproj          Xcode project (SPM dependency on supabase-swift)
-Config.xcconfig            SUPABASE_URL / SUPABASE_ANON_KEY (override in Secrets.xcconfig)
+Config.xcconfig            Compile-safe placeholders; generated Secrets.xcconfig overrides them
 AIKanji/                   App sources
-supabase/migrations/       0001_init.sql … 0007_security_hardening.sql
-supabase/functions/        llm-assist (parse), restaurant-search Edge Functions
+supabase/migrations/       0001_init.sql … 0028_provider_display_fields_and_quality_percentiles.sql
+supabase/functions/        llm-assist, restaurant-search, and place-search Edge Functions
 supabase/seed.sql          Deterministic demo fixture for the feasibility engine
 project.yml                XcodeGen spec, kept in sync with the checked-in project
 ```
 
 ## Setup
 
-1. Apply the migrations in order to a Supabase project (`supabase db push`, or paste them into the
+1. From the repository root, create the single local environment file and generate both client
+   configurations:
+
+   ```bash
+   cp .env.example .env
+   # Fill only the values needed for this environment.
+   node scripts/sync-local-secrets.mjs
+   node scripts/sync-local-secrets.mjs --check
+   ```
+
+   Root `.env` is gitignored and is the only hand-maintained local source. The script writes the
+   publishable Supabase URL/anon key and optional invite-link base to the gitignored
+   `AIKanji/Secrets.xcconfig`; it writes only the corresponding two `VITE_*` values for Web. If
+   both Supabase client values are blank, it can discover a running local stack. The Supabase anon
+   key is publishable, but authorization must still be enforced by RLS.
+2. Apply all migrations in order to a Supabase project (`supabase db push`, or paste them into the
    SQL editor). `postgis` and `vector` extensions must be available.
-2. Enable **Anonymous sign-ins** in Authentication → Providers, and disable *Allow public access*
+3. Enable **Anonymous sign-ins** in Authentication → Providers, and disable *Allow public access*
    in Realtime Settings so the `event-{id}` topics are private.
-3. Deploy the Edge Function and set its secret (the LLM key never reaches the client):
+4. Load the root environment and register each configured provider setting in Supabase's encrypted
+   Edge Function secret store before deploying the functions:
 
-   ```
-   supabase secrets set LLM_API_KEY=sk-...   # optional: LLM_MODEL, LLM_BASE_URL
-   supabase functions deploy llm-assist
-   ```
-4. Create `Config.xcconfig`-adjacent `Secrets.xcconfig` (gitignored):
-
-   ```
-   SUPABASE_URL = abcdefgh.supabase.co
-   SUPABASE_ANON_KEY = ey...
+   ```bash
+   set -a
+   . ./.env
+   set +a
+   cd AIKanji
+   supabase secrets set LLM_API_KEY="$LLM_API_KEY"  # repeat for configured provider variables
+   supabase functions deploy
    ```
 
-   The scheme is omitted because `//` starts a comment in xcconfig; `SupabaseConfig` prepends
-   `https://`.
+   `SUPABASE_SERVICE_ROLE_KEY`, provider keys, and hosted-test passwords are server/test-only. They
+   must never be added to `Secrets.xcconfig` or any `VITE_*` variable. Supabase supplies its service
+   role to the hosted Edge Runtime; do not bundle it in either client.
 5. Open `AIKanji.xcodeproj` and run on an iOS 17+ simulator. Xcode resolves `supabase-swift` on
    first build.
 
 ### Hosted domain-test personas
 
 The hosted domain suite signs in five test personas (`alice`, `bob`, `charlie`, `david`, and
-`emma`) using the password supplied through `AIKANJI_TEST_PASSWORD`; never put that password in
-this repository. Create the five users in Supabase Authentication → Users with addresses
+`emma`) using the password supplied through `AIKANJI_TEST_PASSWORD`. Keep that password only in
+the ignored root `.env`. Create the five users in Supabase Authentication → Users with addresses
 `<persona>@aikanji.demo`, then update the seeded participant rows so each `auth_user_id` points
 to the corresponding Auth user UUID. The rows are identified by their stable participant IDs in
-`supabase/seed.sql`. Export `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and
-`AIKANJI_TEST_PASSWORD` before running the hosted suite.
+`supabase/seed.sql`. Before invoking `xcodebuild`, shell-source root `.env`; its `TEST_RUNNER_*`
+references forward the Supabase URL, anon key, service-role key, and test password to the test
+process without placing them in the app bundle.
 
 ## Security boundary
 

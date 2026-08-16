@@ -1,68 +1,85 @@
 #!/usr/bin/env node
 /**
- * One place to put credentials; both clients generated from it.
+ * Generate both client configuration files from the ignored root .env.
  *
- * The two clients need the SAME backend but want it in different, mutually hostile formats:
- *
- *   web    web/.env.local          VITE_SUPABASE_URL=http://127.0.0.1:54321
- *   iOS    AIKanji/Secrets.xcconfig SUPABASE_URL = 127.0.0.1:54321
- *
- * and keeping them in step by hand is how a demo ends up pointed at two different projects.
- * xcconfig is the awkward one: `//` begins a COMMENT there, so writing a URL with its scheme
- * silently truncates `http://127.0.0.1:54321` to `http:`. That is why `Config.xcconfig` asks
- * for a bare host and `SupabaseConfig` prepends `https://` — which works for a hosted project
- * but cannot express a LOCAL http stack. This script emits the xcconfig form that can:
- * `$(SUPABASE_SCHEME)$(SLASHES)host`, built from variables so no literal `//` ever appears.
- *
- * Provider keys are deliberately NOT copied into either client. They belong to the Edge
- * Functions, both clients reach them only by calling those functions, and a Places or LLM key
- * in web/.env.local would be compiled into the browser bundle and shipped to every visitor.
- * This script refuses to write one, rather than trusting everyone to remember.
+ * Only the publishable Supabase URL/anon key reach clients. Provider credentials,
+ * the service-role key, and hosted-test credentials remain server/test-only even
+ * when they are present in the source file.
  *
  * Usage:
- *   node scripts/sync-local-secrets.mjs            # write both client configs
- *   node scripts/sync-local-secrets.mjs --check    # verify they agree, write nothing
- *
- * Source of truth: AIKanji/supabase/.env.local (gitignored). SUPABASE_URL / SUPABASE_ANON_KEY
- * may be omitted, in which case they are read from the running local stack.
+ *   node scripts/sync-local-secrets.mjs
+ *   node scripts/sync-local-secrets.mjs --check
  */
 
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const SOURCE = join(repo, 'AIKanji/supabase/.env.local')
+const SOURCE = join(repo, '.env')
 const WEB_ENV = join(repo, 'web/.env.local')
 const XCCONFIG = join(repo, 'AIKanji/Secrets.xcconfig')
-const checkOnly = process.argv.includes('--check')
+const args = new Set(process.argv.slice(2))
+const checkOnly = args.delete('--check')
 
-/** Keys that must never reach a client: they are the Edge Functions' alone. */
+if (args.size > 0) {
+  console.error(`unknown option(s): ${[...args].join(', ')}`)
+  process.exit(2)
+}
+
+/** Keys that must never be emitted into either client configuration. */
 const SERVER_ONLY = [
-  'GOOGLE_PLACES_API_KEY',
-  'GOOGLE_ROUTES_API_KEY',
-  'HOTPEPPER_API_KEY',
+  'SUPABASE_SERVICE_ROLE_KEY',
   'LLM_API_KEY',
   'LLM_BASE_URL',
   'LLM_MODEL',
+  'GOOGLE_PLACES_API_KEY',
+  'GOOGLE_ROUTES_API_KEY',
+  'HOTPEPPER_API_KEY',
+  'TABELOG_ENRICHMENT_ENABLED',
+  'AIKANJI_TEST_PASSWORD',
+  'TEST_RUNNER_SUPABASE_URL',
+  'TEST_RUNNER_SUPABASE_ANON_KEY',
+  'TEST_RUNNER_SUPABASE_SERVICE_ROLE_KEY',
+  'TEST_RUNNER_AIKANJI_TEST_PASSWORD',
+]
+
+/** Secret values that must also be rejected if reused under a publishable client name. */
+const SENSITIVE_SERVER_ONLY = [
   'SUPABASE_SERVICE_ROLE_KEY',
+  'LLM_API_KEY',
+  'GOOGLE_PLACES_API_KEY',
+  'GOOGLE_ROUTES_API_KEY',
+  'HOTPEPPER_API_KEY',
+  'AIKANJI_TEST_PASSWORD',
+  'TEST_RUNNER_SUPABASE_SERVICE_ROLE_KEY',
+  'TEST_RUNNER_AIKANJI_TEST_PASSWORD',
 ]
 
 function parseEnv(text) {
   const out = {}
-  for (const line of text.split('\n')) {
+  for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith('#')) continue
-    const eq = trimmed.indexOf('=')
-    if (eq === -1) continue
-    const value = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '')
-    if (value) out[trimmed.slice(0, eq).trim()] = value
+
+    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(trimmed)
+    if (!match) continue
+
+    let value = match[2].trim()
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1)
+    }
+    out[match[1]] = value
   }
   return out
 }
 
-/** Falls back to the running local stack, so a local setup needs no URL or key written down. */
+/** Falls back to the running local stack when both client values are blank. */
 function fromLocalStack() {
   try {
     const env = execFileSync('supabase', ['status', '-o', 'env'], {
@@ -84,84 +101,169 @@ function dockerHost() {
   return existsSync(colima) ? `unix://${colima}` : ''
 }
 
-function write(path, contents) {
+function normalizeHTTPURL(value, label) {
+  let parsed
+  try {
+    parsed = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`)
+  } catch {
+    throw new Error(`${label} is not a valid HTTP(S) URL`)
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error(`${label} must be an HTTP(S) URL without embedded credentials`)
+  }
+  return parsed.origin
+}
+
+function serviceRoleReason(anonKey, configuredServiceRole) {
+  if (configuredServiceRole && anonKey === configuredServiceRole) {
+    return 'it matches SUPABASE_SERVICE_ROLE_KEY'
+  }
+  if (/^sb_secret_/i.test(anonKey)) return 'it uses the server-only sb_secret_ format'
+
+  try {
+    const payload = JSON.parse(Buffer.from(anonKey.split('.')[1] ?? '', 'base64url').toString('utf8'))
+    if (payload.role === 'service_role') return 'its JWT role is service_role'
+  } catch {
+    // Modern publishable keys are opaque rather than JWTs.
+  }
+  return null
+}
+
+function xcconfigURL(url) {
+  return url.replace('://', ':$(SLASH)$(SLASH)')
+}
+
+function assertClientOnly(contents) {
+  for (const key of SERVER_ONLY) {
+    if (new RegExp(`^${key}\\s*=`, 'm').test(contents)) {
+      throw new Error(`internal safety check failed: attempted to emit server-only setting ${key}`)
+    }
+  }
+}
+
+function writeGenerated(path, contents) {
   if (checkOnly) {
     const current = existsSync(path) ? readFileSync(path, 'utf8') : ''
     const same = current.trim() === contents.trim()
     console.log(`${same ? '  ok   ' : '  STALE'} ${path.replace(`${repo}/`, '')}`)
     return same
   }
+
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, contents)
+  writeFileSync(path, contents, { mode: 0o600 })
+  chmodSync(path, 0o600)
   console.log(`  wrote ${path.replace(`${repo}/`, '')}`)
   return true
 }
 
 if (!existsSync(SOURCE)) {
-  console.error(`missing ${SOURCE.replace(`${repo}/`, '')} — create it and put the keys there.`)
+  console.error('missing root .env — copy .env.example to .env and fill the values you need.')
   process.exit(1)
 }
 
 const source = parseEnv(readFileSync(SOURCE, 'utf8'))
-const fallback = source.SUPABASE_URL && source.SUPABASE_ANON_KEY ? {} : fromLocalStack()
-const url = source.SUPABASE_URL ?? fallback.url
-const anonKey = source.SUPABASE_ANON_KEY ?? fallback.anonKey
+const hasURL = Boolean(source.SUPABASE_URL)
+const hasAnonKey = Boolean(source.SUPABASE_ANON_KEY)
 
-if (!url || !anonKey) {
+if (hasURL !== hasAnonKey) {
   console.error(
-    'no SUPABASE_URL / SUPABASE_ANON_KEY in AIKanji/supabase/.env.local, and no local stack\n' +
-      'is running to read them from. Either start it (cd AIKanji && supabase start) or add the\n' +
-      'two values to that file for a hosted project.',
+    'SUPABASE_URL and SUPABASE_ANON_KEY must either both be set or both be blank for local-stack discovery.',
   )
   process.exit(1)
 }
 
-// A client key that is actually a service-role key would hand every visitor RLS bypass.
-if (/service_role/.test(Buffer.from(anonKey.split('.')[1] ?? '', 'base64').toString('utf8'))) {
-  console.error('SUPABASE_ANON_KEY looks like a SERVICE ROLE key. Refusing to write it to a client.')
+const fallback = hasURL ? {} : fromLocalStack()
+const rawURL = source.SUPABASE_URL || fallback.url
+const anonKey = source.SUPABASE_ANON_KEY || fallback.anonKey
+
+if (!rawURL || !anonKey) {
+  console.error(
+    'no publishable Supabase URL/anon key found in root .env, and no running local stack was discovered.',
+  )
   process.exit(1)
 }
 
-const leaked = SERVER_ONLY.filter((key) => key in source && source[key])
-const parsed = new URL(url.startsWith('http') ? url : `https://${url}`)
-
-console.log(`backend: ${parsed.origin}`)
-if (leaked.length > 0) {
-  console.log(`  (${leaked.length} server-only key(s) present and deliberately not copied)`)
+let supabaseURL
+let inviteLinkBaseURL = ''
+try {
+  supabaseURL = normalizeHTTPURL(rawURL, 'SUPABASE_URL')
+  if (source.INVITE_LINK_BASE_URL) {
+    inviteLinkBaseURL = normalizeHTTPURL(source.INVITE_LINK_BASE_URL, 'INVITE_LINK_BASE_URL')
+  }
+} catch (error) {
+  console.error(error instanceof Error ? error.message : 'invalid client URL configuration')
+  process.exit(1)
 }
 
-const web = `# GENERATED by scripts/sync-local-secrets.mjs — edit AIKanji/supabase/.env.local instead.
-# Only these two values may live here: this file is compiled into the browser bundle, so a
-# provider key placed here would be shipped to every visitor.
-VITE_SUPABASE_URL=${parsed.origin}
+if (!/^[A-Za-z0-9._-]+$/.test(anonKey)) {
+  console.error('SUPABASE_ANON_KEY has an invalid format; refusing to write client files.')
+  process.exit(1)
+}
+
+const roleReason = serviceRoleReason(anonKey, source.SUPABASE_SERVICE_ROLE_KEY)
+if (roleReason) {
+  console.error(`SUPABASE_ANON_KEY is not publishable (${roleReason}); refusing to write client files.`)
+  process.exit(1)
+}
+
+const selectedClientValues = new Set([
+  source.SUPABASE_URL,
+  source.SUPABASE_ANON_KEY,
+  source.INVITE_LINK_BASE_URL,
+])
+const serverOnlyCollision = SENSITIVE_SERVER_ONLY.find(
+  (key) => source[key] && selectedClientValues.has(source[key]),
+)
+if (serverOnlyCollision) {
+  console.error(
+    `${serverOnlyCollision} matches a publishable client setting; refusing to write client files.`,
+  )
+  process.exit(1)
+}
+
+const configuredServerOnly = SERVER_ONLY.filter((key) => {
+  const value = source[key]
+  return value && !/^\$\{[A-Z][A-Z0-9_]*\}$/.test(value)
+})
+if (configuredServerOnly.length > 0) {
+  console.log(
+    `  omitted ${configuredServerOnly.length} configured server/test-only setting(s) from client outputs`,
+  )
+}
+
+const web = `# GENERATED by scripts/sync-local-secrets.mjs from the root .env — do not edit.
+# This Vite file contains publishable client configuration only.
+VITE_SUPABASE_URL=${supabaseURL}
 VITE_SUPABASE_ANON_KEY=${anonKey}
 `
 
-// `//` starts a comment in xcconfig, so the scheme is assembled from variables and the literal
-// never appears. SupabaseConfig passes through anything starting with "http".
-const hostAndPort = `${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}`
-const xcconfig = `// GENERATED by scripts/sync-local-secrets.mjs — edit AIKanji/supabase/.env.local instead.
-// The scheme is assembled from SLASH because a literal // starts a COMMENT in xcconfig and
-// would silently truncate the URL. Note \`SLASHES = //\` does not work either — that line is
-// itself a comment, so the variable comes out empty and you get "http:host" with no slashes,
-// which URL(string:) still parses, so nothing complains until every request fails. A single
-// slash is not a comment, so two of them are concatenated instead. Verified with
-// \`xcodebuild -showBuildSettings\`. SupabaseConfig uses the value as-is when it starts "http".
+// xcconfig treats a literal double slash as a comment, so URL slashes are assembled at build time.
+const xcconfig = `// GENERATED by scripts/sync-local-secrets.mjs from the root .env — do not edit.
+// This file contains publishable client configuration only.
 SLASH = /
-SUPABASE_SCHEME = ${parsed.protocol}
-SUPABASE_URL = $(SUPABASE_SCHEME)$(SLASH)$(SLASH)${hostAndPort}
+SUPABASE_URL = ${xcconfigURL(supabaseURL)}
 SUPABASE_ANON_KEY = ${anonKey}
-${source.INVITE_LINK_BASE_URL ? `INVITE_LINK_BASE_URL = ${source.INVITE_LINK_BASE_URL}\n` : ''}`
+INVITE_LINK_BASE_URL = ${inviteLinkBaseURL ? xcconfigURL(inviteLinkBaseURL) : ''}
+`
 
-const results = [write(WEB_ENV, web), write(XCCONFIG, xcconfig)]
-
-if (checkOnly && results.includes(false)) {
-  console.error('\nclient configs are stale — run without --check to regenerate.')
+try {
+  assertClientOnly(web)
+  assertClientOnly(xcconfig)
+} catch (error) {
+  console.error(error instanceof Error ? error.message : 'client-output safety check failed')
   process.exit(1)
 }
+
+const results = [writeGenerated(WEB_ENV, web), writeGenerated(XCCONFIG, xcconfig)]
+
+if (checkOnly && results.includes(false)) {
+  console.error('\nclient configs are stale — run the sync script without --check to regenerate them.')
+  process.exit(1)
+}
+
 console.log(
   checkOnly
-    ? '\nboth clients agree with the source of truth.'
-    : '\nboth clients now point at the same backend. Rebuild the iOS app for xcconfig changes;\n' +
-        'Vite picks up web/.env.local on its own.',
+    ? '\nclient configs match the root .env.'
+    : '\nclient configs generated. Rebuild iOS for xcconfig changes; Vite reads web/.env.local automatically.',
 )

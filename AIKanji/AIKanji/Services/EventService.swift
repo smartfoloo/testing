@@ -10,37 +10,100 @@ struct EventService {
 
     private struct CreateEventParams: Encodable {
         let p_name: String
-        let p_objective: String
         let p_display_name: String
+        let p_scheduled_at: Date?
+        let p_origin_label: String
+        let p_origin_latitude: Double
+        let p_origin_longitude: Double
+        let p_objective: String
         let p_travel_reference: String
         let p_travel_reference_place_id: String?
+    }
+
+    private struct InviteCodeParams: Encodable {
+        let p_invite_code: String
     }
 
     private struct JoinEventParams: Encodable {
         let p_invite_code: String
         let p_display_name: String
+        let p_origin_label: String
+        let p_origin_latitude: Double
+        let p_origin_longitude: Double
         let p_travel_reference: String
         let p_travel_reference_place_id: String?
     }
 
-    /// Creates the event and its organizer participant in a single transaction.
+    private struct EventParams: Encodable {
+        let p_event_id: UUID
+    }
+
     func createEvent(
         name: String,
         displayName: String,
-        travelReference: TravelReference,
-        travelReferencePlaceId: String? = nil,
+        scheduledAt: Date?,
+        origin: OriginSelection,
         objective: EventObjective = .balanced
     ) async throws -> CreatedEvent {
-        try await client
-            .rpc("fn_create_event", params: CreateEventParams(
+        let response = try await client
+            .rpc("fn_create_event_v2", params: CreateEventParams(
                 p_name: name,
-                p_objective: objective.rawValue,
                 p_display_name: displayName,
-                p_travel_reference: travelReference.rawValue,
-                p_travel_reference_place_id: travelReferencePlaceId
+                p_scheduled_at: scheduledAt,
+                p_origin_label: origin.label,
+                p_origin_latitude: origin.latitude,
+                p_origin_longitude: origin.longitude,
+                p_objective: objective.rawValue,
+                p_travel_reference: TravelReference.station.rawValue,
+                p_travel_reference_place_id: nil
+            ))
+            .execute()
+        return try Self.decodeSingle(CreatedEvent.self, from: response.data)
+    }
+
+    func previewEvent(inviteCode: String) async throws -> EventPreview {
+        let response = try await client
+            .rpc("fn_preview_event_v2", params: InviteCodeParams(p_invite_code: inviteCode))
+            .execute()
+        return try Self.decodeSingle(EventPreview.self, from: response.data)
+    }
+
+    func joinEvent(inviteCode: String, displayName: String, origin: OriginSelection) async throws -> UUID {
+        try await client
+            .rpc("fn_join_event_v2", params: JoinEventParams(
+                p_invite_code: inviteCode,
+                p_display_name: displayName,
+                p_origin_label: origin.label,
+                p_origin_latitude: origin.latitude,
+                p_origin_longitude: origin.longitude,
+                p_travel_reference: TravelReference.station.rawValue,
+                p_travel_reference_place_id: nil
             ))
             .execute()
             .value
+    }
+
+    func myEvents() async throws -> [MemberEvent] {
+        let response = try await client
+            .rpc("fn_get_my_events_v2")
+            .execute()
+        return try Self.rpcDecoder.decode([MemberEvent].self, from: response.data)
+    }
+
+    func memberEvent(eventId: UUID) async throws -> MemberEvent {
+        guard let event = try await myEvents().first(where: { $0.eventId == eventId }) else {
+            throw NSError(domain: "EventService", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "event is not available to this member"
+            ])
+        }
+        return event
+    }
+
+    func eventProgress(eventId: UUID) async throws -> EventProgress {
+        let response = try await client
+            .rpc("fn_get_event_progress_v2", params: EventParams(p_event_id: eventId))
+            .execute()
+        return try Self.decodeSingle(EventProgress.self, from: response.data)
     }
 
     private struct PlaceSearchRequest: Encodable {
@@ -51,11 +114,6 @@ struct EventService {
         let places: [PlaceSuggestion]
     }
 
-    /// Turns what the participant typed into a real place, so their travel reference can be
-    /// stored as `participants.travel_reference_place_id`. The lookup happens server-side in
-    /// the `place-search` Edge Function because the Places key lives only in function
-    /// secrets; a provider failure answers 502, which the SDK surfaces as a thrown error so
-    /// the picker can say "could not search" instead of "no such place".
     func searchPlaces(query: String) async throws -> [PlaceSuggestion] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
@@ -66,7 +124,6 @@ struct EventService {
         return response.places
     }
 
-    /// Readable only once the caller is a participant of the event (RLS on `events`).
     func event(inviteCode: String) async throws -> Event {
         try await client
             .from("events")
@@ -137,20 +194,112 @@ struct EventService {
         return row.role
     }
 
-    func joinEvent(
-        inviteCode: String,
-        displayName: String,
-        travelReference: TravelReference,
-        travelReferencePlaceId: String? = nil
-    ) async throws -> UUID {
-        try await client
-            .rpc("fn_join_event", params: JoinEventParams(
-                p_invite_code: inviteCode,
-                p_display_name: displayName,
-                p_travel_reference: travelReference.rawValue,
-                p_travel_reference_place_id: travelReferencePlaceId
-            ))
-            .execute()
-            .value
+    func progressUpdates(
+        eventId: UUID
+    ) async throws -> (channel: RealtimeTopicSubscription, stream: AsyncStream<Void>) {
+        let (subscription, broadcasts) = try await RealtimeTopicRegistry.shared.subscribe(
+            topic: RealtimeTopicRegistry.eventTopic(eventId: eventId),
+            event: .eventProgressUpdated,
+            client: client
+        )
+        return (subscription, invalidationStream(broadcasts))
     }
+
+    func decisionUpdates(
+        eventId: UUID
+    ) async throws -> (channel: RealtimeTopicSubscription, stream: AsyncStream<EventDecision>) {
+        let (subscription, broadcasts) = try await RealtimeTopicRegistry.shared.subscribe(
+            topic: RealtimeTopicRegistry.eventTopic(eventId: eventId),
+            event: .eventDecided,
+            client: client
+        )
+        return (subscription, decodeStream(broadcasts, as: EventDecision.self))
+    }
+
+    func preferencesClosedUpdates(
+        eventId: UUID
+    ) async throws -> (channel: RealtimeTopicSubscription, stream: AsyncStream<Void>) {
+        let (subscription, broadcasts) = try await RealtimeTopicRegistry.shared.subscribe(
+            topic: RealtimeTopicRegistry.eventTopic(eventId: eventId),
+            event: .preferencesClosed,
+            client: client
+        )
+        return (subscription, invalidationStream(broadcasts))
+    }
+
+    private func invalidationStream(
+        _ broadcasts: AsyncStream<[String: AnyJSON]>
+    ) -> AsyncStream<Void> {
+        AsyncStream<Void> { continuation in
+            let task = Task {
+                for await _ in broadcasts { continuation.yield(()) }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func decodeStream<Value: Decodable & Sendable>(
+        _ broadcasts: AsyncStream<[String: AnyJSON]>,
+        as type: Value.Type
+    ) -> AsyncStream<Value> {
+        AsyncStream<Value> { continuation in
+            let task = Task {
+                for await message in broadcasts {
+                    guard let payload = message["payload"]?.objectValue,
+                          let update = try? Self.decodeBroadcast(type, from: payload)
+                    else { continue }
+                    continuation.yield(update)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private static func decodeSingle<Value: Decodable>(_ type: Value.Type, from data: Data) throws -> Value {
+        if let value = try? rpcDecoder.decode(Value.self, from: data) {
+            return value
+        }
+        let rows = try rpcDecoder.decode([Value].self, from: data)
+        guard let value = rows.first else {
+            throw NSError(domain: "EventService", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "empty RPC response"
+            ])
+        }
+        return value
+    }
+
+    private static func decodeBroadcast<Value: Decodable>(
+        _ type: Value.Type,
+        from payload: [String: AnyJSON]
+    ) throws -> Value {
+        let data = try JSONEncoder().encode(payload)
+        return try rpcDecoder.decode(Value.self, from: data)
+    }
+
+    private static let rpcDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let text = try container.decode(String.self)
+            if let date = fractionalFormatter.date(from: text) ?? plainFormatter.date(from: text) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unrecognized timestamp: \(text)")
+        }
+        return decoder
+    }()
+
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let plainFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 }
