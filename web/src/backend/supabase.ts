@@ -666,7 +666,9 @@ export class SupabaseBackend implements Backend {
   async explanation(runId: string, restaurantPlaceId: string): Promise<string> {
     const { data, error } = await this.client.functions.invoke<{ explanation: string }>(
       'llm-assist',
-      { body: { mode: 'explain', run_id: runId, restaurant_place_id: restaurantPlaceId } },
+      // `language` stated, not left to the server's default — this client is Japanese-first,
+      // the same as the parse call. Mirrors ExplainRequest in RecommendationService.swift.
+      { body: { mode: 'explain', language: 'ja', run_id: runId, restaurant_place_id: restaurantPlaceId } },
     )
     if (error) throw new Error(error.message)
     return data?.explanation ?? ''
