@@ -46,6 +46,7 @@ import type {
   Event as EventModel,
   EventDecision,
   FeasibilityResult,
+  FeasibilityStale,
   FeedItem,
   NormalizedType,
   NormalizedValue,
@@ -795,7 +796,12 @@ export function parseConstraintText(rawText: string, kind: ConstraintKind = 'WAN
 /* -------------------------------------------------------------------------- */
 
 type Topic = `event-${string}`
-type BroadcastEvent = 'constraint_added' | 'run_updated' | 'event_decided' | 'preferences_closed'
+type BroadcastEvent =
+  | 'constraint_added'
+  | 'run_updated'
+  | 'event_decided'
+  | 'preferences_closed'
+  | 'feasibility_stale'
 
 export class MockBackend implements Backend {
   readonly mode = 'mock' as const
@@ -875,6 +881,23 @@ export class MockBackend implements Backend {
 
   private emit(topic: Topic, event: BroadcastEvent, payload: unknown): void {
     this.listeners.get(`${topic}:${event}`)?.forEach((handler) => handler(payload))
+  }
+
+  /**
+   * fn_mark_feasibility_stale (0029). Stamps the event and announces that much, and — exactly like
+   * the trigger — does NOT recompute: the whole reason the mark exists is that the recompute
+   * belongs somewhere a burst of answers can be coalesced into one run.
+   *
+   * The stamp is kept on the event row as well as broadcast, because a broadcast is only heard by
+   * whoever is listening; `feasibility_stale_at` is the durable answer to "is what I am showing
+   * current?" for a client that was closed at the time.
+   */
+  private markFeasibilityStale(eventId: string): void {
+    const staleAt = this.now()
+    const event = this.db.events.find((row) => row.id === eventId)
+    if (!event) return
+    event.feasibility_stale_at = staleAt
+    this.emit(`event-${eventId}`, 'feasibility_stale', { event_id: eventId, stale_at: staleAt })
   }
 
   private subscribe(
@@ -1184,6 +1207,11 @@ export class MockBackend implements Backend {
       updated_at: this.now(),
     }
     this.db.constraints.push(row)
+    // trg_mark_feasibility_stale_insert (0029). BEFORE the PRIVATE early-return below, and that
+    // ordering is the contract, not an accident: the sanitized feed refuses a PRIVATE row, but the
+    // event's feasibility changed all the same, so the organizer's dashboard is told that much and
+    // nothing more. The payload is the event and the instant — no participant, no wording.
+    this.markFeasibilityStale(input.eventId)
     this.persist()
 
     // fn_broadcast_constraint_change: PRIVATE rows are never broadcast, full stop.
@@ -1271,6 +1299,11 @@ export class MockBackend implements Backend {
       if (constraint) {
         constraint.normalized_value = negotiation.proposed_value
         constraint.updated_at = this.now()
+        // fn_respond_negotiation rewrites a participant_constraints row, so 0029's UPDATE trigger
+        // fires here too — before the recompute, in that order, exactly as the SQL does. Any
+        // dashboard watching learns of the change and of the run that already covers it, which is
+        // why it must compare the two timestamps rather than recompute on hearing the first.
+        this.markFeasibilityStale(negotiation.event_id)
       }
       negotiation.status = 'ACCEPTED'
       negotiation.responded_at = this.now()
@@ -1488,6 +1521,10 @@ export class MockBackend implements Backend {
     this.emit(`event-${eventId}`, 'run_updated', {
       run_id: result.run_id,
       feasible_count: result.feasible_count,
+      // The run's own timestamp, as 0025 puts on the wire. A subscriber compares it against the
+      // `stale_at` of a change it heard about, so leaving it out here would make mock mode the one
+      // place where a change already covered by a run still looks outstanding.
+      run_at: this.db.runs.find((row) => row.id === result.run_id)?.run_at ?? null,
     })
     return result
   }
@@ -1516,6 +1553,18 @@ export class MockBackend implements Backend {
   async subscribeRuns(eventId: string, onUpdate: (update: RunUpdate) => void) {
     return this.subscribe(`event-${eventId}`, 'run_updated', (payload) =>
       onUpdate(payload as RunUpdate),
+    )
+  }
+
+  /**
+   * The same method the real backend has, so mock mode behaves the same way: the organizer's
+   * dashboard recomputes on its own here too. The "broadcast" is the in-page emitter, and the only
+   * possible writer is this same page — which is why a delivery claim needs a hosted run
+   * (web/scripts/realtime-delivery.mjs) and why mock mode can only show that the wiring is there.
+   */
+  async subscribeFeasibilityStale(eventId: string, onStale: (stale: FeasibilityStale) => void) {
+    return this.subscribe(`event-${eventId}`, 'feasibility_stale', (payload) =>
+      onStale(payload as FeasibilityStale),
     )
   }
 

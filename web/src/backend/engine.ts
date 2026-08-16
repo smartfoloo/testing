@@ -88,6 +88,15 @@ export interface EventRow {
   chosen_at: string | null
   /** Set by fn_close_preferences (0018). Non-null means constraint writes are refused. */
   preferences_closed_at: string | null
+  /**
+   * Stamped by fn_mark_feasibility_stale (0029) whenever the event's requirements change: the
+   * instant of the most recent change, for comparing against the `run_at` of the run on screen.
+   *
+   * Optional because nothing in this file reads it — it is bookkeeping for the notification, not
+   * an input to feasibility — so the engine's own fixtures (`web/scripts/verify-engine.ts`) stay a
+   * description of what the engine actually consumes.
+   */
+  feasibility_stale_at?: string | null
 }
 
 export interface ParticipantRow {

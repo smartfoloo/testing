@@ -3377,6 +3377,212 @@ begin
   perform t_as_admin();
 end $$;
 
+-- ---------------------------------------------------------------------------
+-- 0029: the dashboard goes live without a button — mark stale, never recompute
+--
+-- The gap 0029 closes is that nothing recomputed feasibility except a person pressing a button, so
+-- PRD §12's live dashboard was a promise made only when somebody remembered to press it. The fix
+-- deliberately does NOT recompute from a trigger (four reasons in the migration header), so what
+-- there is to assert here is the shape of the notification, not a number:
+--
+--   1. ONE statement of N rows leaves ONE stamp and ONE message. That is the transition tables
+--      doing their job; a row-level trigger would leave N of each, and N run rows once a client
+--      acted on each one.
+--   2. A PRIVATE row marks the event stale and broadcasts — a PRIVATE MUST changes what is
+--      feasible exactly as much as a public one — and the payload names NOBODY. This is the one
+--      place a PRIVATE row legitimately causes an observable event, so the key set is pinned to
+--      exactly {event_id, stale_at}: no participant, no wording, no type, no visibility. 0004's
+--      sanitized feed must still refuse the row itself.
+--   3. UPDATE and DELETE mark too. A negotiation consent is an UPDATE, and a requirement that goes
+--      away loosens the MUSTs — a dashboard that ignored either would be confidently wrong.
+--   4. NOT ONE of those statements writes a `recommendation_runs` row. That is the whole design:
+--      the run stays a deliberate act so `latestRun()` keeps meaning "the last real computation".
+--   5. One statement spanning two events stamps each once, on its own topic — an event never hears
+--      about another event's requirements.
+--   6. The shape `seed.sql` uses (requirements inserted directly, no recompute anywhere in the
+--      file) leaves the event marked and run-free, so `supabase db reset` cannot manufacture a
+--      shortlist for an event nobody has searched.
+-- ---------------------------------------------------------------------------
+do $$
+declare
+  v_event uuid := '00290000-0000-0000-0000-00000000a000';
+  v_other uuid := '00290000-0000-0000-0000-00000000a001';
+  v_seed  uuid := '00290000-0000-0000-0000-00000000a002';
+  v_pid uuid := '00290000-0000-0000-0000-00000000a0a1';
+  v_other_pid uuid := '00290000-0000-0000-0000-00000000a0b1';
+  v_seed_pid uuid := '00290000-0000-0000-0000-00000000a0c1';
+  v_uid uuid := 'a9000000-0000-0000-0000-0000000000a1';
+  v_other_uid uuid := 'a9000000-0000-0000-0000-0000000000b1';
+  v_seed_uid uuid := 'a9000000-0000-0000-0000-0000000000c1';
+  v_stamp timestamptz;
+  v_other_stamp timestamptz;
+  v_private_id uuid;
+  v_budget_id uuid;
+  v_payload jsonb;
+  v_keys text[];
+begin
+  perform t_as_admin();
+  insert into events (id, name, objective, status) values
+    (v_event, 'QA 0029 staleness', 'balanced', 'collecting'),
+    (v_other, 'QA 0029 second event', 'balanced', 'collecting'),
+    (v_seed,  'QA 0029 seed shape', 'balanced', 'collecting');
+  insert into participants (id, event_id, auth_user_id, display_name, role, travel_reference) values
+    (v_pid, v_event, v_uid, 'Stale QA', 'organizer', 'office'),
+    (v_other_pid, v_other, v_other_uid, 'Other QA', 'organizer', 'office'),
+    (v_seed_pid, v_seed, v_seed_uid, 'Seed QA', 'organizer', 'office');
+
+  perform t_check('an event with no requirements has nothing pending',
+                  (select feasibility_stale_at is null from events where id = v_event));
+
+  -- The trigger's own shape, asserted rather than assumed: three statement-level triggers (one per
+  -- operation, because transition tables forbid combining them), and not one of them row-level.
+  -- tgtype bit 0 is TRIGGER_TYPE_ROW, so `& 1 = 0` is "per statement".
+  perform t_check('the marker is per STATEMENT for insert, update and delete alike',
+                  (select count(*) from pg_trigger t
+                     join pg_class c on c.oid = t.tgrelid
+                     join pg_proc p on p.oid = t.tgfoid
+                    where c.relname = 'participant_constraints'
+                      and p.proname = 'fn_mark_feasibility_stale'
+                      and not t.tgisinternal
+                      and (t.tgtype & 1) = 0) = 3,
+                  (select string_agg(t.tgname || ':' || (t.tgtype & 1)::text, ' ')
+                     from pg_trigger t
+                     join pg_class c on c.oid = t.tgrelid
+                     join pg_proc p on p.oid = t.tgfoid
+                    where c.relname = 'participant_constraints'
+                      and p.proname = 'fn_mark_feasibility_stale' and not t.tgisinternal));
+
+  -- 1. ONE statement, THREE rows. This is the check that fails the moment somebody "simplifies"
+  -- the trigger to `for each row`: it would leave three stamps and three messages, and a client
+  -- acting on each would produce three runs for one person's submission.
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility) values
+    (v_event, v_pid, 'MUST', 'QA 0029 予算は4000円まで', 'budget', '{"max_yen":4000}', 'PUBLIC'),
+    (v_event, v_pid, 'WANT', 'QA 0029 焼き鳥がいい', 'cuisine',
+     '{"include":["yakitori"],"exclude":[]}', 'PUBLIC'),
+    (v_event, v_pid, 'WANT', 'QA 0029 静かな店がいい', 'atmosphere', '{"tags":["quiet"]}', 'ANONYMOUS');
+
+  perform t_check('one statement of three requirements announces staleness exactly once',
+                  (select count(*) from realtime.messages
+                    where topic = 'event-' || v_event::text
+                      and event = 'feasibility_stale') = 1,
+                  (select count(*)::text from realtime.messages
+                    where topic = 'event-' || v_event::text and event = 'feasibility_stale'));
+  select feasibility_stale_at into v_stamp from events where id = v_event;
+  perform t_check('and the row now carries the instant it announced',
+                  v_stamp is not null
+                  and (select (payload->>'stale_at')::timestamptz = v_stamp
+                         from realtime.messages
+                        where topic = 'event-' || v_event::text
+                          and event = 'feasibility_stale'),
+                  v_stamp::text);
+
+  -- 2. PRIVATE. The row itself never reaches the group (0004), but the fact that feasibility moved
+  -- does — otherwise the organizer's count would quietly ignore whoever was least willing to
+  -- explain themselves, which is the one participant this product exists for.
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility)
+  values (v_event, v_pid, 'MUST', 'QA 0029 誰にも言いたくない事情があります',
+          'room', '{"room":"private"}', 'PRIVATE')
+  returning id into v_private_id;
+
+  perform t_check('a PRIVATE MUST marks the event stale — it changes feasibility like any other',
+                  (select count(*) from realtime.messages
+                    where topic = 'event-' || v_event::text
+                      and event = 'feasibility_stale') = 2);
+  select payload into v_payload from realtime.messages
+   where topic = 'event-' || v_event::text and event = 'feasibility_stale'
+   order by id desc limit 1;
+  select array_agg(k order by k) into v_keys from jsonb_object_keys(v_payload) k;
+  -- What the trigger builds, which is what this migration controls. (Hosted `realtime.send` also
+  -- stamps an `id` on a payload that has none — a message identifier for de-duplication, seen on a
+  -- real stack but not produced by harness.sql's stand-in. It names a message, not a participant.)
+  perform t_check('and the payload it broadcasts is the event and the instant, and nothing else',
+                  v_keys = array['event_id', 'stale_at'], v_payload::text);
+  perform t_check('so it names no participant, no wording, no type and no visibility',
+                  v_payload->>'event_id' = v_event::text
+                  and position(v_pid::text in v_payload::text) = 0
+                  and position('誰にも言いたくない' in v_payload::text) = 0
+                  and not (v_payload ? 'participant_id')
+                  and not (v_payload ? 'raw_text')
+                  and not (v_payload ? 'normalized_type')
+                  and not (v_payload ? 'normalized_value')
+                  and not (v_payload ? 'visibility'),
+                  v_payload::text);
+  perform t_check('and 0004 still refuses to put the PRIVATE row itself on any topic',
+                  not exists (select 1 from realtime.messages
+                               where payload->>'id' = v_private_id::text));
+
+  -- 3. UPDATE (what a negotiation consent is) and DELETE (what loosening the MUSTs looks like).
+  select id into v_budget_id from participant_constraints
+   where event_id = v_event and normalized_type = 'budget';
+  update participant_constraints set normalized_value = '{"max_yen":6000}' where id = v_budget_id;
+  perform t_check('an UPDATE marks stale too, which is what a negotiation consent is',
+                  (select count(*) from realtime.messages
+                    where topic = 'event-' || v_event::text
+                      and event = 'feasibility_stale') = 3);
+  delete from participant_constraints where id = v_private_id;
+  perform t_check('and so does a DELETE, which can only ever unlock candidates',
+                  (select count(*) from realtime.messages
+                    where topic = 'event-' || v_event::text
+                      and event = 'feasibility_stale') = 4);
+
+  -- 4. The point of the whole design.
+  perform t_check('not one of those four statements wrote a recommendation run',
+                  (select count(*) from recommendation_runs where event_id = v_event) = 0,
+                  (select count(*)::text from recommendation_runs where event_id = v_event));
+
+  -- 5. Two events in one statement. Each gets its own stamp on its own topic: the loop is over
+  -- DISTINCT event_ids, not over rows, so this is one message per event and not one per row.
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility) values
+    (v_event, v_pid, 'WANT', 'QA 0029 個室希望', 'other', '{"note":"qa0029-a"}', 'PUBLIC'),
+    (v_event, v_pid, 'WANT', 'QA 0029 日本酒', 'other', '{"note":"qa0029-b"}', 'PUBLIC'),
+    (v_other, v_other_pid, 'WANT', 'QA 0029 別イベント', 'other', '{"note":"qa0029-c"}', 'PUBLIC');
+  perform t_check('one statement spanning two events stamps each of them exactly once',
+                  (select count(*) from realtime.messages
+                    where topic = 'event-' || v_event::text
+                      and event = 'feasibility_stale') = 5
+                  and (select count(*) from realtime.messages
+                        where topic = 'event-' || v_other::text
+                          and event = 'feasibility_stale') = 1);
+  select feasibility_stale_at into v_other_stamp from events where id = v_other;
+  perform t_check('each on its own topic, naming its own event and nobody else''s',
+                  (select payload->>'event_id' = v_other::text from realtime.messages
+                    where topic = 'event-' || v_other::text
+                      and event = 'feasibility_stale')
+                  and v_other_stamp is not null,
+                  v_other_stamp::text);
+  perform t_check('and still no run anywhere near either of them',
+                  (select count(*) from recommendation_runs
+                    where event_id in (v_event, v_other)) = 0);
+
+  -- 6. Seeding. `seed.sql` inserts ten requirements in one statement and never calls
+  -- fn_recompute_feasibility, so `supabase db reset` must leave the demo event marked and run-free.
+  -- Asserted against an event built the same shape rather than against the demo event's run count,
+  -- because the blocks above this one recompute the demo event on purpose and that count is theirs.
+  insert into participant_constraints (event_id, participant_id, kind, raw_text,
+                                       normalized_type, normalized_value, visibility) values
+    (v_seed, v_seed_pid, 'MUST', 'QA 0029 seed 予算', 'budget', '{"max_yen":4000}', 'PUBLIC'),
+    (v_seed, v_seed_pid, 'MUST', 'QA 0029 seed 個室', 'room', '{"room":"private"}', 'PUBLIC'),
+    (v_seed, v_seed_pid, 'MUST', 'QA 0029 seed ベジタリアン', 'dietary',
+     '{"tags":["vegetarian"]}', 'ANONYMOUS'),
+    (v_seed, v_seed_pid, 'WANT', 'QA 0029 seed 静か', 'atmosphere', '{"tags":["quiet"]}', 'PUBLIC');
+  perform t_check('seeding requirements directly marks the event and writes no run at all',
+                  (select feasibility_stale_at is not null from events where id = v_seed)
+                  and (select count(*) from realtime.messages
+                        where topic = 'event-' || v_seed::text
+                          and event = 'feasibility_stale') = 1
+                  and (select count(*) from recommendation_runs where event_id = v_seed) = 0);
+  -- And the real fixture: the demo event came out of seed.sql marked, which is what lets a client
+  -- that was closed at the time compare `stale_at` against the run it is showing.
+  perform t_check('the seeded demo event carries a staleness mark of its own',
+                  (select feasibility_stale_at is not null from events
+                    where id = '00000000-0000-0000-0000-000000000001'));
+
+  perform t_as_admin();
+end $$;
+
 \set QUIET off
 \pset border 2
 select seq, case when passed then 'PASS' else 'FAIL' end as result, name, detail

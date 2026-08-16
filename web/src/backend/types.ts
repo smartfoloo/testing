@@ -18,6 +18,7 @@ import type {
   EventDecision,
   EventObjective,
   FeasibilityResult,
+  FeasibilityStale,
   FeedItem,
   NormalizedType,
   NormalizedValue,
@@ -237,6 +238,21 @@ export interface Backend {
   recomputeFeasibility(eventId: string): Promise<FeasibilityResult>
   proposeRelaxation(eventId: string): Promise<string | null>
   subscribeRuns(eventId: string, onUpdate: (update: RunUpdate) => void): Promise<Unsubscribe>
+
+  /**
+   * `feasibility_stale` (0029): the event's requirements changed, so whatever feasible count is
+   * on screen may no longer be right. It is NOT a recompute — the trigger deliberately writes no
+   * run, so that a burst of answers can be coalesced into one — and it carries no participant and
+   * no requirement, because it fires for PRIVATE rows too.
+   *
+   * Only the organizer dashboard subscribes, and what it does with a stale mark (debounce, then
+   * recompute once, and only when it already has a run to replace) is that screen's decision:
+   * this method's job is delivery.
+   */
+  subscribeFeasibilityStale(
+    eventId: string,
+    onStale: (stale: FeasibilityStale) => void,
+  ): Promise<Unsubscribe>
 
   // MARK: - RecommendationService
   scores(runId: string): Promise<RecommendationScore[]>

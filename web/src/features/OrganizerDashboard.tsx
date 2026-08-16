@@ -11,10 +11,13 @@
  *    per participant, so it can refuse outright (HTTP 422) or succeed while measuring
  *    travel for only part of the group. Both used to be invisible, the first one behind
  *    「通信できませんでした」. Reported here in people, never in names.
+ *  - the live count PRD §12 implies: `feasibility_stale` (0029) arrives whenever anybody's
+ *    requirements change, and this screen turns a burst of those into ONE recompute. See
+ *    「Auto-recompute」 below for what gates it and why.
  * Keep OrganizerDashboardView.swift in step when this changes.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useBackend } from '../backend'
 import { NoTravelOriginError, type TravelOriginCoverage } from '../backend/types'
 import {
@@ -48,6 +51,36 @@ interface OrganizerDashboardProps {
   decision: EventDecision | null
   chosenRestaurantName: string | null
   onOpenRecommendations: (runId: string) => void
+}
+
+/**
+ * How long the screen waits for the group to stop typing before it recomputes.
+ *
+ * Long enough that five people answering in the same moment cost ONE recompute and ONE
+ * `recommendation_runs` row (which is the whole reason 0029's trigger marks staleness instead of
+ * recomputing), and short enough that the count still moves while the organizer is looking at it.
+ * Each new notification restarts the wait, so a burst is coalesced by its own last member rather
+ * than by a fixed window.
+ */
+const STALE_DEBOUNCE_MS = 1500
+
+/**
+ * True when a change stamped `staleAt` is not already accounted for by the run on screen.
+ *
+ * Both timestamps come from the database's own clock — `stale_at` from `now()` inside
+ * fn_mark_feasibility_stale (0029), `run_at` from the run row (0025 puts it on the wire) — so they
+ * are directly comparable, and they are parsed rather than compared as strings because the two need
+ * not be rendered with the same UTC offset. Anything unreadable, or no run at all, counts as newer:
+ * the failure this guards against is a redundant recompute, and the failure it must never cause is
+ * a change the organizer never hears about.
+ */
+function isUncounted(staleAt: string | null, computedThrough: string | null): boolean {
+  if (staleAt === null) return false
+  if (computedThrough === null) return true
+  const stale = Date.parse(staleAt)
+  const computed = Date.parse(computedThrough)
+  if (Number.isNaN(stale) || Number.isNaN(computed)) return true
+  return stale > computed
 }
 
 /**
@@ -234,6 +267,127 @@ export function OrganizerDashboard({
     void load()
   }, [load])
 
+  /* --------------------------------------------------------- Auto-recompute */
+
+  /**
+   * What the auto-recompute needs to know, held in a ref rather than passed as effect
+   * dependencies: the subscription below must not be torn down and re-established every time one
+   * of these values changes, because a re-join loses whatever is pushed while it is in flight —
+   * which is precisely the thing this screen exists to receive.
+   */
+  const autoGate = useRef({ hasRun: false, closed: false, computedThrough: null as string | null })
+  useEffect(() => {
+    autoGate.current = {
+      hasRun: latestRunId !== null,
+      closed: preferencesClosed,
+      computedThrough: latestRunAt,
+    }
+  }, [latestRunId, preferencesClosed, latestRunAt])
+
+  const staleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** The newest `stale_at` the pending timer was armed for, re-checked when it fires. */
+  const pendingStaleAt = useRef<string | null>(null)
+
+  /**
+   * Recompute, and nothing else. Deliberately not the search-and-negotiate sequence the button
+   * runs: `fn_propose_relaxation` asks a named participant to give something up, and that has to
+   * stay something the 幹事 chooses to do, never a side effect of somebody else answering. So no
+   * provider search, no relaxation proposal and no status sentence — only the count.
+   */
+  const autoRecompute = useCallback(async () => {
+    try {
+      const result = await backend.recomputeFeasibility(eventId)
+      setFeasibleCount(result.feasible_count)
+      setLatestRunId(result.run_id)
+      setLatestRunAt(new Date().toISOString())
+      const next = await refreshReadiness()
+      if (next) setRunBasis(next)
+    } catch (error) {
+      setErrorMessage(errorMessageFor(error))
+    }
+  }, [backend, eventId, refreshReadiness])
+
+  /**
+   * `feasibility_stale` (0029) — somebody's requirements changed, so the count on screen may be
+   * wrong. The trigger deliberately does not recompute (it would write a run row per submission,
+   * walk the global venue pool per insert, fire during seeding, and sit inside the participant's
+   * own INSERT), so coalescing it into one recompute is this screen's job.
+   *
+   * THREE GATES, each of which exists because ignoring it makes the screen worse than the button:
+   *
+   *  - `hasRun`: before anybody has searched there are no candidates for this event, so an
+   *    automatic recompute would render a confident 「0」 that means "nothing has been looked for"
+   *    — strictly worse than the 「—」 that says so honestly. The button stays the way to get the
+   *    first run; this only keeps an existing one current.
+   *  - `closed`: once collection is closed, PRD §12 makes the recalculation the 幹事's explicit
+   *    act (which is why `fn_close_preferences` does not recompute either, and why this screen
+   *    shows 「再計算が必要です」 instead of just doing it). Recomputing here would quietly
+   *    perform the decision that banner is asking for.
+   *  - `isUncounted`: a change already included in the run on screen needs nothing. This is what
+   *    makes a REPLAYED message harmless — Realtime hands a fresh subscriber recent history, and
+   *    an organizer opening her dashboard would otherwise recompute on arrival — and what makes a
+   *    consent quiet: `fn_respond_negotiation` updates a constraint AND recomputes in one
+   *    transaction, so the stale mark and the run that already covers it arrive together.
+   *
+   * The gate is re-checked when the timer fires, not only when it is armed, so a run computed by
+   * somebody else during the wait cancels a recompute that has become unnecessary.
+   *
+   * There is no loop to guard against: a recompute writes `recommendation_runs` and
+   * `recommendation_scores` and never touches `participant_constraints`, so it fires no stale
+   * trigger. That is asserted rather than assumed — realtime-delivery.mjs counts the recompute
+   * calls a burst produces, and one burst must produce exactly one.
+   */
+  useEffect(() => {
+    let active = true
+    let unsubscribe: (() => void) | undefined
+    void (async () => {
+      try {
+        const off = await backend.subscribeFeasibilityStale(eventId, (stale) => {
+          // This effect run is over — either it was cleaned up before its own subscribe resolved,
+          // or it is React's discarded first pass under StrictMode. Both leave a handler that
+          // shares this component's refs, so without this line an arriving mark would re-arm the
+          // timer the cleanup below has already cleared and recompute for a screen that is gone.
+          // Measured, not theorised: realtime-delivery.mjs caught exactly that.
+          if (!active) return
+          const gate = autoGate.current
+          if (!gate.hasRun || gate.closed) return
+          if (!isUncounted(stale.stale_at, gate.computedThrough)) return
+          // Keep the newest mark of the burst: that is the one the run has to be later than.
+          if (isUncounted(stale.stale_at, pendingStaleAt.current)) {
+            pendingStaleAt.current = stale.stale_at
+          }
+          // Each notification restarts the wait, so the burst is closed by its last member.
+          if (staleTimer.current !== null) clearTimeout(staleTimer.current)
+          staleTimer.current = setTimeout(() => {
+            staleTimer.current = null
+            const staleAt = pendingStaleAt.current
+            pendingStaleAt.current = null
+            const current = autoGate.current
+            if (!current.hasRun || current.closed) return
+            if (!isUncounted(staleAt, current.computedThrough)) return
+            void autoRecompute()
+          }, STALE_DEBOUNCE_MS)
+        })
+        // Releasing here rather than dropping it on the floor: the subscription is reference
+        // counted per topic (subscribeBroadcast in supabase.ts), so a registration nobody hands
+        // back would keep the channel alive for a screen that has already gone.
+        if (!active) off()
+        else unsubscribe = off
+      } catch {
+        if (active) setErrorMessage(AppCopy.networkError)
+      }
+    })()
+    return () => {
+      active = false
+      unsubscribe?.()
+      // A timer left running would recompute for an event this screen no longer shows, and would
+      // call setState on an unmounted component to do it.
+      if (staleTimer.current !== null) clearTimeout(staleTimer.current)
+      staleTimer.current = null
+      pendingStaleAt.current = null
+    }
+  }, [autoRecompute, backend, eventId])
+
   // listenForRuns(eventId:) — the feasible count is push-driven, not polled.
   useEffect(() => {
     let active = true
@@ -243,7 +397,11 @@ export function OrganizerDashboard({
         unsubscribe = await backend.subscribeRuns(eventId, (update) => {
           setFeasibleCount(update.feasible_count)
           setLatestRunId(update.run_id)
-          setLatestRunAt(new Date().toISOString())
+          // The run's OWN timestamp when the payload carries it (0025), not the moment it was
+          // received: it is compared against a `stale_at` stamped by the same database clock, and
+          // against `preferences_closed_at`, so a browser clock reading would be comparing two
+          // different clocks. Falls back to now() for a payload written before 0025.
+          setLatestRunAt(update.run_at ?? new Date().toISOString())
           void (async () => {
             try {
               setOpenNegotiations(await backend.pendingNegotiationCount(eventId))
@@ -431,6 +589,10 @@ export function OrganizerDashboard({
           </p>
         )}
 
+        {/* Unchanged, and still the only way to search for candidates at all. Since 0029 the count
+            also refreshes itself as answers arrive, which makes this the explicit refresh: the
+            first run, the post-close recalculation PRD §12 reserves for the 幹事, and the one path
+            that may propose a relaxation to a participant. */}
         <PrimaryButton
           title={AppCopy.findRestaurants}
           isLoading={isWorking}

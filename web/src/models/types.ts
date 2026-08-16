@@ -383,4 +383,26 @@ export interface RunUpdate {
   run_at?: string | null
 }
 
+/**
+ * `feasibility_stale` broadcast payload from `trg_mark_feasibility_stale_*` (0029).
+ *
+ * Two fields, and by design not one more. It says "the requirements of this event changed at this
+ * instant", which is all a dashboard needs to decide whether to recompute — and all it may be told,
+ * because the trigger is statement-level and fires for PRIVATE rows too (a PRIVATE MUST changes
+ * feasibility exactly as much as a public one). There is deliberately no participant, no wording,
+ * no type and no visibility here; the sanitized per-row feed is `constraint_added`, which refuses
+ * PRIVATE outright.
+ *
+ * `stale_at` is the database's own `now()`, so it is directly comparable with a run's `run_at`:
+ * `stale_at > run_at` means the number on screen does not include everything.
+ *
+ * A third key arrives that the trigger does not write: hosted `realtime.send` stamps a payload
+ * carrying no `id` with a random one, as a message identifier. It is not declared here because
+ * nothing reads it, and it names a message rather than a person or a requirement.
+ */
+export interface FeasibilityStale {
+  event_id: string
+  stale_at: string
+}
+
 export type HomeTab = 'requirements' | 'group' | 'organizer'

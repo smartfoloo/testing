@@ -30,6 +30,7 @@ import type {
   EventDecision,
   EventObjective,
   FeasibilityResult,
+  FeasibilityStale,
   FeedItem,
   NormalizedType,
   NormalizedValue,
@@ -119,13 +120,14 @@ async function httpFailure(
 /**
  * Every event the server broadcasts on the private `event-{event_id}` topic:
  * `constraint_added` (0004's trigger on participant_constraints), `run_updated`
- * (0006/0009, recommendation runs), `event_decided` (0015 fn_choose_restaurant) and
- * `preferences_closed` (0018 fn_close_preferences). They all land on the SAME topic, so a
+ * (0006/0009, recommendation runs), `event_decided` (0015 fn_choose_restaurant),
+ * `preferences_closed` (0018 fn_close_preferences) and `feasibility_stale` (0029's
+ * statement-level trigger on participant_constraints). They all land on the SAME topic, so a
  * client that wants two of them wants two events on one channel — never two channels.
  *
  * Listed once here because the channel binds all of them the moment it is created: a
  * broadcast binding is only a client-side filter, so binding an event nobody listens for
- * yet costs nothing, and adding a fifth event later means adding a string here plus a
+ * yet costs nothing, and adding a sixth event later means adding a string here plus a
  * `subscribeX` wrapper, not another channel on an already-joined topic.
  */
 const BROADCAST_EVENTS = [
@@ -133,6 +135,7 @@ const BROADCAST_EVENTS = [
   'run_updated',
   'event_decided',
   'preferences_closed',
+  'feasibility_stale',
 ] as const
 
 type BroadcastEvent = (typeof BROADCAST_EVENTS)[number]
@@ -601,6 +604,26 @@ export class SupabaseBackend implements Backend {
       }
       onUpdate(update)
     })
+  }
+
+  /**
+   * `feasibility_stale` (0029). Passed through as it arrives: unlike `run_updated` there is
+   * nothing here that could overwrite a screen with an older value — the worst a replayed or
+   * duplicated stale mark can do is invite a recompute — so the ordering decision belongs to the
+   * subscriber, which is the only party that knows which run it is currently showing.
+   *
+   * Shares the one channel for `event-{id}` with `subscribeConstraints`/`subscribeRuns`, through
+   * `subscribeBroadcast`. That is not a detail: Realtime keys channels by topic, so a second
+   * `channel('event-{id}')` would be handed the same underlying subscription and tearing either
+   * one down would silence the other (see subscribeBroadcast and TopicSubscription).
+   */
+  async subscribeFeasibilityStale(
+    eventId: string,
+    onStale: (stale: FeasibilityStale) => void,
+  ): Promise<Unsubscribe> {
+    return this.subscribeBroadcast(eventId, 'feasibility_stale', (payload) =>
+      onStale(payload as FeasibilityStale),
+    )
   }
 
   /* ------------------------------------------------ RecommendationService */

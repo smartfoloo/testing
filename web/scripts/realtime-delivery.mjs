@@ -11,6 +11,11 @@
  *                     in an OPEN 「みんなの状況」 feed (GroupFeed.tsx).
  *   run_updated       0006/0009's trg_broadcast_run on recommendation_runs, landing in the
  *                     organizer's 条件を満たすお店 tile (OrganizerDashboard.tsx).
+ *   feasibility_stale 0029's statement-level trg_mark_feasibility_stale_*, landing in the same
+ *                     tile — but through a recompute the SCREEN decides to make, with nobody
+ *                     pressing anything. That is the claim PRD §12 rests on and the one thing no
+ *                     suite could previously fail: before 0029 the count only ever moved because
+ *                     a human pressed 「条件に合うお店を探す」.
  *
  * The writer is a real other participant, not a privileged shortcut: node signs Charlie, Emma
  * and Bob in with the same password grant the login sheet uses and writes through PostgREST as
@@ -65,6 +70,12 @@ const RUN_TAG = `RTV${Date.now().toString(36).toUpperCase()}`
 const DELIVERY_TIMEOUT_MS = 15000
 /** How long we watch for a push that must NEVER arrive. */
 const SILENCE_MS = 6000
+/**
+ * A push that has to travel, be debounced (STALE_DEBOUNCE_MS = 1500 in OrganizerDashboard.tsx) and
+ * then complete a recompute before the tile can change. Generous on purpose: this is the one
+ * assertion whose whole point is that nobody is helping it along.
+ */
+const AUTO_RECOMPUTE_TIMEOUT_MS = 25000
 
 let checks = 0
 let failures = 0
@@ -192,6 +203,49 @@ async function instrumentation(api) {
     `JSON.stringify({ sentinel: window.__rtSentinel ?? null, refetches: window.__rtRefetches ?? null })`,
   )
   return JSON.parse(raw)
+}
+
+/**
+ * A second, independent tally of outgoing requests, keyed by substring. `instrument` above is left
+ * exactly as it was — twenty-four checks rest on what `__rtRefetches` means — so this adds counters
+ * beside it rather than generalising it.
+ *
+ * This is how phase 3 proves a negative that matters: `restaurant-search` is invoked by
+ * `findRestaurants`, which is what the 「条件に合うお店を探す」 button and nothing else calls, so a
+ * count of zero there is proof the button was not used. And counting the `fn_recompute_feasibility`
+ * calls is how "a burst of answers costs ONE recompute" stops being a claim about a timer.
+ */
+async function countCalls(api, patterns) {
+  await api.evaluate(`(() => {
+    window.__rtCountPatterns = ${JSON.stringify(patterns)}
+    window.__rtCounts = {}
+    for (const pattern of window.__rtCountPatterns) window.__rtCounts[pattern] = 0
+    if (!window.__rtCountPatched) {
+      window.__rtCountPatched = true
+      const original = window.fetch.bind(window)
+      window.fetch = (...args) => {
+        const first = args[0]
+        const url = typeof first === 'string' ? first : (first && first.url) || ''
+        for (const pattern of window.__rtCountPatterns ?? []) {
+          if (String(url).includes(pattern)) window.__rtCounts[pattern] += 1
+        }
+        return original(...args)
+      }
+    }
+    return true
+  })()`)
+}
+
+async function calls(api) {
+  return JSON.parse(await api.evaluate(`JSON.stringify(window.__rtCounts ?? {})`))
+}
+
+/** Runs on the demo event, for the log line that says how many a burst actually produced. */
+function runCount() {
+  const read = psql(
+    `select count(*) from public.recommendation_runs where event_id = '${DEMO_EVENT_ID}'`,
+  )
+  return read.ok ? Number(read.out) : null
 }
 
 async function waitForFeedRow(api, needle, timeoutMs = DELIVERY_TIMEOUT_MS) {
@@ -383,6 +437,163 @@ async function runDelivery(api) {
   await api.screenshot('/tmp/rt-2-run-push.png')
 }
 
+/**
+ * feasibility_stale, into a recompute NOBODY ASKED FOR.
+ *
+ * This is the check the whole of 0029 exists for, and the one every other suite is structurally
+ * unable to make: `golden-path.mjs` and `p0-features.mjs` move the count by clicking
+ * 「条件に合うお店を探す」, so they pass on a dashboard that is only ever right when a human
+ * remembers to refresh it. Here Alice touches nothing at all. Three of her group answer at once and
+ * her count moves; one of them widens a MUST and it moves back.
+ *
+ * What makes it more than "the number changed":
+ *   - `restaurant-search` is invoked only by `findRestaurants`, which is only reachable from the
+ *     button, so a count of ZERO there is proof the button was not pressed;
+ *   - the `fn_recompute_feasibility` calls are counted, so a burst of THREE writes has to cost
+ *     exactly ONE recompute — the debounce coalescing them, not three runs arriving in a row;
+ *   - the second beat has to cost exactly one MORE, which is how "the component's own recompute
+ *     does not retrigger it" is verified rather than assumed (a recompute writes
+ *     recommendation_runs and recommendation_scores, never participant_constraints);
+ *   - `recommendation_runs` is never re-read and the page is never reloaded, so the count on screen
+ *     came from a recompute this screen chose to make, off the back of a message on the socket;
+ *   - one of the three writes is PRIVATE. It moves the organizer's count — a PRIVATE MUST changes
+ *     feasibility like any other — while its wording and its author appear nowhere on the screen.
+ */
+async function staleDelivery(api) {
+  console.log('\n3. feasibility_stale drives a recompute nobody asked for')
+  const bob = await sessionFor('bob')
+  const charlie = await sessionFor('charlie')
+  const emma = await sessionFor('emma')
+
+  // Alice is still on the dashboard from phase 2, holding the run that phase 2's push brought.
+  // `hasRun` is the first of the screen's three gates: before a search there are no candidates, so
+  // an automatic recompute would render a meaningless 0 and this phase would be testing nothing.
+  const start = await api.text('feasible-count')
+  assertThat(
+    'the organizer is holding a real run before any of this, which is what allows an auto-recompute',
+    /^3/.test(start ?? ''),
+    `tile read: ${start}`,
+  )
+  await instrument(api, 'recommendation_runs')
+  await countCalls(api, ['rpc/fn_recompute_feasibility', 'restaurant-search'])
+  const runsBeforeBurst = runCount()
+
+  /* -- three people answer at once ----------------------------------------------------- */
+  // Sent together on purpose: this is the five-people-in-the-same-moment case, and the debounce has
+  // to close it once. Bob's revert is what moves the number (個室 is unsatisfiable in this fixture);
+  // the other two are `other` WANTs, which change no feasibility and are there to prove that the
+  // burst is coalesced rather than that three separate things each recomputed.
+  const burstStarted = Date.now()
+  await Promise.all([
+    bob.patch(`participant_constraints?participant_id=eq.${BOB}&normalized_type=eq.room`, {
+      normalized_value: { room: 'private' },
+    }),
+    charlie.insert(
+      'participant_constraints',
+      constraintRow({ participantId: CHARLIE, visibility: 'PRIVATE', suffix: 'stale-private' }),
+    ),
+    emma.insert(
+      'participant_constraints',
+      constraintRow({ participantId: EMMA, visibility: 'ANONYMOUS', suffix: 'stale-anon' }),
+    ),
+  ])
+
+  const dropped = await waitForTile(
+    api,
+    'feasible-count',
+    (text) => /^0/.test(text),
+    AUTO_RECOMPUTE_TIMEOUT_MS,
+  )
+  assertThat(
+    "requirements written by other people move the organizer's count with nobody pressing anything",
+    dropped.arrived,
+    dropped.arrived
+      ? ''
+      : `tile still reads ${dropped.read} after ${dropped.waitedMs}ms (no auto-recompute happened)`,
+  )
+  console.log(`       recomputed and rendered ${dropped.waitedMs}ms after the burst`)
+
+  // Settle past one more debounce window, so a second recompute would have to show up in the count.
+  await api.wait(3000)
+  const afterBurst = await calls(api)
+  assert(
+    'three answers in one burst cost exactly ONE recompute, not three',
+    afterBurst['rpc/fn_recompute_feasibility'],
+    1,
+  )
+  assert(
+    'and 「条件に合うお店を探す」 was never used — restaurant-search was not called at all',
+    afterBurst['restaurant-search'],
+    0,
+  )
+  const runsAfterBurst = runCount()
+  if (runsBeforeBurst !== null && runsAfterBurst !== null) {
+    console.log(`       runs on the event: ${runsBeforeBurst} -> ${runsAfterBurst}`)
+  }
+
+  const screen = await api.evaluate(`document.body.textContent.replace(/\\s+/g, ' ')`)
+  assertThat(
+    'the PRIVATE requirement that moved the count is nowhere on the screen it moved',
+    !(screen ?? '').includes(`${RUN_TAG}-stale-private`) &&
+      !(screen ?? '').includes('参加者本人の言葉') &&
+      !(screen ?? '').includes('Charlie'),
+    (screen ?? '').slice(0, 240),
+  )
+
+  /* -- and the demo's own 0-then-3 beat, unattended --------------------------------------- */
+  await bob.patch(`participant_constraints?participant_id=eq.${BOB}&normalized_type=eq.room`, {
+    normalized_value: { room: 'semi_private' },
+  })
+  const unlocked = await waitForTile(
+    api,
+    'feasible-count',
+    (text) => /^3/.test(text),
+    AUTO_RECOMPUTE_TIMEOUT_MS,
+  )
+  assertThat(
+    'the 0-then-3 beat the whole demo rests on now lands on the dashboard on its own',
+    unlocked.arrived,
+    unlocked.arrived
+      ? ''
+      : `tile still reads ${unlocked.read} after ${unlocked.waitedMs}ms`,
+  )
+  console.log(`       and back up ${unlocked.waitedMs}ms after Bob widened his MUST`)
+  await api.wait(3000)
+  const afterBeat = await calls(api)
+  assert(
+    'that is one more recompute and not a loop: a recompute writes no requirement, so it marks nothing stale',
+    afterBeat['rpc/fn_recompute_feasibility'],
+    2,
+  )
+
+  const probe = await instrumentation(api)
+  assert('the page was never reloaded during any of it', probe.sentinel, 'alive')
+  assert('and recommendation_runs was never re-read, so this was not a poll', probe.refetches, 0)
+  await api.screenshot('/tmp/rt-3-stale-recompute.png')
+  console.log(`       whole phase took ${Date.now() - burstStarted}ms`)
+
+  /* -- unmount stops it ------------------------------------------------------------------- */
+  // Leaving the dashboard has to clear the pending timer, or a recompute would run for a screen
+  // that is gone (and would call setState on it). Asserted by unmounting the component the way a
+  // person does — EventHome renders one tab at a time — and then making a real change.
+  //
+  // It is also what makes the cleanup below safe: with nobody watching, restoring the fixture
+  // cannot provoke the runs it is about to delete.
+  await api.click('tab-requirements')
+  await api.wait(500)
+  await countCalls(api, ['rpc/fn_recompute_feasibility'])
+  await bob.patch(`participant_constraints?participant_id=eq.${BOB}&normalized_type=eq.room`, {
+    normalized_value: { room: 'private' },
+  })
+  await api.wait(5000)
+  const afterUnmount = await calls(api)
+  assert(
+    'and once the organizer leaves the dashboard, a change recomputes nothing at all',
+    afterUnmount['rpc/fn_recompute_feasibility'],
+    0,
+  )
+}
+
 /* ---------------------------------------------------------------------------- */
 
 export default async function (api) {
@@ -411,6 +622,7 @@ export default async function (api) {
   try {
     await feedDelivery(api)
     await runDelivery(api)
+    await staleDelivery(api)
   } finally {
     // Leave the fixture as it was found: the extra rows would break golden-path.mjs's
     // 「all ten seeded requirements are visible」, and Bob's MUST is the 0-then-3 premise.

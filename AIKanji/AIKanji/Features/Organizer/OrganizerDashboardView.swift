@@ -94,6 +94,80 @@ final class OrganizerDashboardViewModel: ObservableObject {
         } catch { errorMessage = AppCopy.networkError }
     }
 
+    /// How long a burst of submissions is allowed to keep collapsing into one recompute.
+    /// Five people answering at once should cost one run, not five: recompute walks the whole
+    /// venue pool and writes a `recommendation_runs` row, and every row broadcasts to everybody.
+    private static let staleDebounce = Duration.milliseconds(1500)
+
+    /// Listens for 0029's `feasibility_stale` and recomputes ONCE per burst, so the dashboard
+    /// is live without anybody pressing 「もう一度計算する」.
+    ///
+    /// Each signal restarts the timer rather than queueing a recompute, so a run happens
+    /// `staleDebounce` after the LAST change, not once per change.
+    ///
+    /// GATED ON A RUN ALREADY EXISTING. Before the organizer has searched there are no
+    /// candidates for this event, so recompute would truthfully answer 0 and the dashboard
+    /// would show 「条件を満たすお店 0」 to a group that has not looked for one yet — worse than
+    /// the button it replaces. Once a run exists, keeping it current is exactly the promise.
+    func listenForStaleFeasibility(eventId: UUID) async {
+        do {
+            let (channel, stream) = try await service.feasibilityStaleSignals(eventId: eventId)
+            defer { Task { await Supa.client.removeChannel(channel) } }
+            var pending: Task<Void, Never>?
+            defer { pending?.cancel() }
+            for await staleAt in stream {
+                guard shouldAutoRecompute(staleAt: staleAt) else { continue }
+                pending?.cancel()
+                pending = Task { [weak self] in
+                    try? await Task.sleep(for: Self.staleDebounce)
+                    guard !Task.isCancelled, let self else { return }
+                    // Re-checked after the wait, not only before it: the burst that armed this
+                    // timer may have ended with the organizer closing collection, or with a
+                    // consent whose own recompute already counted the change.
+                    guard self.shouldAutoRecompute(staleAt: staleAt) else { return }
+                    await self.recomputeAfterChange(eventId: eventId)
+                }
+            }
+        } catch { errorMessage = AppCopy.networkError }
+    }
+
+    /// The three conditions under which a change is worth recomputing for on its own. Kept
+    /// identical to the web dashboard's gates, because the two clients are deliberately 1:1 and
+    /// an organizer watching on a phone must not see a different number from one watching in a
+    /// browser.
+    ///
+    ///   1. a run already exists — before the first search there are no candidates, so an
+    ///      automatic recompute would render a confident 0 meaning "nobody has looked yet";
+    ///   2. collection is still open — recalculating after the 幹事 closed it is their explicit
+    ///      act (PRD §12), which is why `fn_close_preferences` does not recompute either;
+    ///   3. the change is not already counted by the run on screen — which makes a REPLAYED
+    ///      message harmless (Realtime hands a fresh subscriber whatever is in the topic) and
+    ///      keeps a consent quiet, since `fn_respond_negotiation` marks stale and recomputes in
+    ///      the same transaction.
+    private func shouldAutoRecompute(staleAt: Date) -> Bool {
+        guard latestRunId != nil, !preferencesClosed else { return false }
+        guard let latestRunAt else { return true }
+        return staleAt > latestRunAt
+    }
+
+    /// The automatic half of `recompute`: no spinner and no status message, because nobody
+    /// asked for this and a banner appearing on its own would read as an error. The count
+    /// updates, and the `run_updated` broadcast the new run fires keeps every other screen —
+    /// including this one on another device — in step through the existing path.
+    private func recomputeAfterChange(eventId: UUID) async {
+        guard !isWorking else { return }
+        do {
+            let result = try await service.recomputeFeasibility(eventId: eventId)
+            feasibleCount = result.feasibleCount
+            latestRunId = result.runId
+            latestRunAt = Date()
+            if let next = await refreshReadiness(eventId: eventId) { runBasis = next }
+        } catch {
+            // Deliberately silent. A background refresh that failed is not something the
+            // organizer did, and the button is still there to try again on purpose.
+        }
+    }
+
     func findRestaurants(eventId: UUID) async {
         guard !isWorking else { return }
         isWorking = true
@@ -245,6 +319,10 @@ struct OrganizerDashboardView: View {
         .sheet(isPresented: $viewModel.isConfirmingClose) { closeSheet }
         .task { await viewModel.load(eventId: eventId) }
         .task { await viewModel.listenForRuns(eventId: eventId) }
+        // A separate .task, not a branch inside listenForRuns: the two consume different
+        // broadcast events off the same shared channel, and SwiftUI cancels each with the
+        // view. RealtimeTopicRegistry multiplexes them onto one topic subscription.
+        .task { await viewModel.listenForStaleFeasibility(eventId: eventId) }
     }
 
     private var header: some View {
