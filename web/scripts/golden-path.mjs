@@ -55,6 +55,61 @@ async function actAs(api, authUserId) {
   await actAsPersona(api, authUserId.replace(/^demo-user-/, ''), BASE)
 }
 
+/**
+ * Poll a reading until it satisfies `ok`, then hand back whatever was read.
+ *
+ * This replaces the fixed sleeps that used to sit in front of these assertions. A sleep long
+ * enough on an idle laptop is not long enough on a loaded one, and the failure it produces is
+ * actively misleading: an A6 run once reported `three alternatives are shown []` with
+ * `breakdowns=0`, immediately after A5 had asserted the three candidates existed. Nothing was
+ * broken — the cards had simply not painted within 3500ms.
+ *
+ * It deliberately RETURNS the last reading on timeout instead of throwing, so the assertion
+ * that follows still prints the real state (`breakdowns=0 measured=0`) rather than a bare
+ * timeout. The diagnostic is the point; the wait is just plumbing.
+ *
+ * Only ever use this for a condition that must eventually become TRUE. Polling cannot prove a
+ * negative — see the fixed wait at A4, which is asserting that a proposal never appears.
+ */
+async function settle(api, read, ok, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const value = await read()
+    if (ok(value)) return value
+    if (Date.now() >= deadline) return value
+    await api.wait(250)
+  }
+}
+
+const readFeedRows = (api) =>
+  api.evaluate(`(() => {
+    const cards = [...document.querySelectorAll('.rounded-card.bg-card')]
+    return cards.map(c => c.textContent.replace(/\\s+/g,' ').trim()).filter(Boolean)
+  })()`)
+
+const readCards = (api) =>
+  api.evaluate(`(() => {
+    const badges = [...document.querySelectorAll('.bg-yellow')].map(b => b.textContent.trim())
+    const titles = [...document.querySelectorAll('h3')].map(h => h.textContent.trim())
+    // A7 asks that every explanation be grounded in STORED score/evidence data, so assert
+    // the stored numbers reach the screen rather than grepping one backend's prose: the
+    // mock writes 「必須条件をすべて満たしています」 while llm-assist returns its own
+    // sentence, so a text match could only ever pass against the mock.
+    const breakdowns = document.querySelectorAll('[data-testid="score-breakdown"]').length
+    const measured = [...document.querySelectorAll('[data-testid^="dimension-value-"]')]
+      .map((cell) => cell.textContent.trim())
+    return {
+      badges,
+      titles,
+      breakdowns,
+      // A per-dimension figure read out of score_breakdown. 未確認 is the honest
+      // "unverified" reading, so it does not count as a grounded number.
+      // [0-9] rather than \\d: this source is a template literal, and \\d collapses to a
+      // plain 'd' before the browser ever sees it — which silently tested for the letter.
+      measuredCount: measured.filter((text) => /[0-9]/.test(text)).length,
+    }
+  })()`)
+
 export default async function (api) {
   await api.viewport()
   await api.theme(false)
@@ -68,12 +123,8 @@ export default async function (api) {
   console.log('\nA1/A2 - five seeded participants and the privacy boundary')
   await actAs(api, 'demo-user-alice')
   await api.click('tab-group')
-  await api.wait(1200)
 
-  const feed = await api.evaluate(`(() => {
-    const cards = [...document.querySelectorAll('.rounded-card.bg-card')]
-    return cards.map(c => c.textContent.replace(/\\s+/g,' ').trim()).filter(Boolean)
-  })()`)
+  const feed = await settle(api, () => readFeedRows(api), (rows) => rows.length >= 10)
   assert('all ten seeded requirements are visible', feed.length, 10)
 
   const named = feed.filter((row) => /Alice|Bob|David/.test(row)).length
@@ -98,9 +149,21 @@ export default async function (api) {
   await api.click('tab-organizer')
   await api.waitFor('find-restaurants')
   await api.click('find-restaurants')
-  await api.wait(4000)
 
-  const feasible = await api.text('feasible-count')
+  // Waits for the LATER of the two things this click sets off, not the first. The tile reads 0
+  // as soon as the recompute lands, but A4 immediately asserts 調整中, which only appears once
+  // the relaxation has also been proposed. The fixed sleep this replaced happened to be long
+  // enough to cover both; polling on the count alone returns in between them and makes A4 fail
+  // for a reason that has nothing to do with A4.
+  const searched = await settle(
+    api,
+    async () => ({
+      count: await api.text('feasible-count'),
+      adjusting: await api.evaluate(`document.body.textContent.includes('調整中')`),
+    }),
+    (s) => /^0/.test(s.count ?? '') && s.adjusting === true,
+  )
+  const feasible = searched.count
   assertThat('feasible count is zero', /^0/.test(feasible ?? ''), `tile read: ${feasible}`)
   await api.screenshot('/tmp/gp-1-zero-feasible.png')
 
@@ -120,6 +183,11 @@ export default async function (api) {
   )
 
   await actAs(api, 'demo-user-charlie')
+  // Deliberately a fixed wait, and the only one left in front of an assertion. The next check
+  // asserts that something never appears, and you cannot poll for an absence: `settle` would
+  // return the instant it read "no proposal", which is true immediately after a persona switch
+  // and would pass even if the proposal arrived a second later. The wait has to be longer than
+  // delivery could plausibly take, not shorter than it usually does.
   await api.wait(6500)
   assertThat(
     'an unaffected participant gets no proposal',
@@ -147,37 +215,19 @@ export default async function (api) {
   await actAs(api, 'demo-user-alice')
   await api.click('tab-organizer')
   await api.waitFor('feasible-count')
-  await api.wait(1200)
-  const after = await api.text('feasible-count')
+  const after = await settle(api, () => api.text('feasible-count'), (t) => /^3/.test(t ?? ''))
   assertThat('feasible count is now three', /^3/.test(after ?? ''), `tile read: ${after}`)
   await api.screenshot('/tmp/gp-3-three-feasible.png')
 
   console.log('\nA6/A7 - at least three differentiated, explained alternatives')
   await api.waitFor('recommendations')
   await api.click('recommendations')
-  await api.wait(3500)
 
-  const cards = await api.evaluate(`(() => {
-    const badges = [...document.querySelectorAll('.bg-yellow')].map(b => b.textContent.trim())
-    const titles = [...document.querySelectorAll('h3')].map(h => h.textContent.trim())
-    // A7 asks that every explanation be grounded in STORED score/evidence data, so assert
-    // the stored numbers reach the screen rather than grepping one backend's prose: the
-    // mock writes 「必須条件をすべて満たしています」 while llm-assist returns its own
-    // sentence, so a text match could only ever pass against the mock.
-    const breakdowns = document.querySelectorAll('[data-testid="score-breakdown"]').length
-    const measured = [...document.querySelectorAll('[data-testid^="dimension-value-"]')]
-      .map((cell) => cell.textContent.trim())
-    return {
-      badges,
-      titles,
-      breakdowns,
-      // A per-dimension figure read out of score_breakdown. 未確認 is the honest
-      // "unverified" reading, so it does not count as a grounded number.
-      // [0-9] rather than \\d: this source is a template literal, and \\d collapses to a
-      // plain 'd' before the browser ever sees it — which silently tested for the letter.
-      measuredCount: measured.filter((text) => /[0-9]/.test(text)).length,
-    }
-  })()`)
+  const cards = await settle(
+    api,
+    () => readCards(api),
+    (c) => c.titles.length >= 3 && c.breakdowns >= 3 && c.measuredCount >= 3,
+  )
   assertThat('three alternatives are shown', cards.titles.length >= 3, JSON.stringify(cards.titles))
   assert('every alternative has a distinct label', new Set(cards.badges).size, cards.badges.length)
   assertThat(
@@ -191,10 +241,13 @@ export default async function (api) {
   console.log('\nStep 11 - the human organizer decides')
   assertThat('the organizer can choose', await api.exists('choose-restaurant'))
   await api.click('choose-restaurant')
-  await api.wait(2000)
   assertThat(
     'the decision is recorded and shown',
-    await api.evaluate(`document.body.textContent.includes('このお店に決まりました')`),
+    await settle(
+      api,
+      () => api.evaluate(`document.body.textContent.includes('このお店に決まりました')`),
+      (shown) => shown === true,
+    ),
   )
   await api.screenshot('/tmp/gp-5-chosen.png')
 
