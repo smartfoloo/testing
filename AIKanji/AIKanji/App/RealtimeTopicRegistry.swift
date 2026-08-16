@@ -47,6 +47,12 @@ actor RealtimeTopicRegistry {
         case eventDecided = "event_decided"
         /// `fn_close_preferences` (0018).
         case preferencesClosed = "preferences_closed"
+        /// 0029's statement-level trigger on `participant_constraints`: somebody's requirement
+        /// changed, so the last feasibility result is out of date. Deliberately NOT a recompute
+        /// and deliberately not a feed item — the payload is `{event_id, stale_at}` and names
+        /// nobody, because this fires for PRIVATE rows too (a PRIVATE MUST changes what is
+        /// feasible, and that fact is not a leak; who wrote it would be).
+        case feasibilityStale = "feasibility_stale"
     }
 
     /// Must stay `event-<lowercased uuid>`: the triggers broadcast to

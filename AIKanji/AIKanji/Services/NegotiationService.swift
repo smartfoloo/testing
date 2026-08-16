@@ -148,6 +148,14 @@ struct NegotiationService {
             .value
     }
 
+    /// Postgres renders `timestamptz` with a variable number of fractional digits and a
+    /// numeric offset, which `ISO8601DateFormatter` rejects unless told to expect them.
+    private static let staleFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
     // MARK: - Live run updates
 
     /// Subscribes to `run_updated` on the private `event-{id}` topic, so the dashboard's
@@ -174,6 +182,48 @@ struct NegotiationService {
                           let update = try? JSONDecoder().decode(RunUpdate.self, from: data)
                     else { continue }
                     continuation.yield(update)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+
+        return (subscription, stream)
+    }
+
+    /// Subscribes to `feasibility_stale` (0029) — a bare notification that somebody's
+    /// requirement changed, so the displayed feasible count is out of date.
+    ///
+    /// It is NOT a recompute and carries no result: the payload is `{event_id, stale_at}` and
+    /// names nobody. The trigger deliberately does not recompute, because recompute writes a
+    /// `recommendation_runs` row and every row broadcasts `run_updated` — one run and one push
+    /// per submitted requirement would make `latestRun()` mean "the last thing anyone typed".
+    /// So the decision of WHEN to recompute belongs to the client, which can coalesce a burst
+    /// of five people submitting into one call. See OrganizerDashboardView for that debounce.
+    ///
+    /// Yields the change's `stale_at`, which the caller needs and must not display: it is what
+    /// lets the dashboard ignore a change the run on screen already counted. Realtime replays
+    /// whatever is in the topic, so a screen that has just joined can be handed a mark older
+    /// than its own run (0025 documents that hazard for `run_updated`); without the timestamp
+    /// there is no way to tell that apart from a change that just happened, and the only safe
+    /// reading would be to recompute for both.
+    func feasibilityStaleSignals(eventId: UUID) async throws
+        -> (channel: RealtimeTopicSubscription, stream: AsyncStream<Date>)
+    {
+        let (subscription, broadcasts) = try await RealtimeTopicRegistry.shared.subscribe(
+            topic: RealtimeTopicRegistry.eventTopic(eventId: eventId),
+            event: .feasibilityStale,
+            client: client
+        )
+
+        let stream = AsyncStream<Date> { continuation in
+            let task = Task {
+                for await message in broadcasts {
+                    // An unreadable or absent stamp yields `now`, i.e. "treat this as newer
+                    // than anything on screen". Failing toward freshness costs one redundant
+                    // recompute; failing the other way would silently drop a real change.
+                    let raw = message["payload"]?.objectValue?["stale_at"]?.stringValue
+                    continuation.yield(raw.flatMap(Self.staleFormatter.date(from:)) ?? Date())
                 }
                 continuation.finish()
             }
