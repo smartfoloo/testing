@@ -1657,6 +1657,13 @@ interface TravelMatrixResult {
   raw: Map<string, { participant_id: string; element: unknown }[]>;
 }
 
+type RouteMatrixRow = {
+  originIndex?: number;
+  destinationIndex?: number;
+  duration?: string;
+  condition?: string;
+};
+
 async function travelMatrix(
   origins: Origin[],
   destinations: { placeId: string; location: LatLng }[],
@@ -1664,6 +1671,98 @@ async function travelMatrix(
 ): Promise<TravelMatrixResult> {
   const result: TravelMatrixResult = { minutes: new Map(), raw: new Map() };
   if (origins.length === 0 || destinations.length === 0) return result;
+
+  const waypoint = (location: LatLng) => ({
+    waypoint: {
+      location: { latLng: { latitude: location.lat, longitude: location.lng } },
+    },
+  });
+
+  const fetchRows = async (
+    originChunk: Origin[],
+    chunk: { placeId: string; location: LatLng }[],
+    travelMode: "TRANSIT" | "WALK",
+  ): Promise<RouteMatrixRow[] | null> => {
+    try {
+      const res = await fetch(
+        "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_ROUTES_API_KEY,
+            "X-Goog-FieldMask":
+              "originIndex,destinationIndex,duration,condition",
+          },
+          body: JSON.stringify({
+            origins: originChunk.map((o) => waypoint(o.location)),
+            destinations: chunk.map((d) => waypoint(d.location)),
+            travelMode,
+          }),
+        },
+      );
+      if (!res.ok) {
+        recordIncident(
+          incidents,
+          "google_routes",
+          "routes.computeRouteMatrix",
+          res.status,
+          await bodyText(res),
+        );
+        return null;
+      }
+      const rows = await res.json();
+      return Array.isArray(rows) ? rows : [];
+    } catch (err) {
+      recordIncident(
+        incidents,
+        "google_routes",
+        "routes.computeRouteMatrix",
+        null,
+        String(err),
+      );
+      return null;
+    }
+  };
+
+  const merge = (
+    rows: RouteMatrixRow[],
+    originChunk: Origin[],
+    chunk: { placeId: string; location: LatLng }[],
+    travelMode: "TRANSIT" | "WALK",
+    onlyIfAbsent: boolean,
+  ) => {
+    for (const row of rows) {
+      // We ask for `condition` in the FieldMask, so an element that does not
+      // say ROUTE_EXISTS has no usable route (ROUTE_NOT_FOUND still carries a
+      // duration). Proto3 JSON omits enums only at their zero value, which is
+      // UNSPECIFIED — never ROUTE_EXISTS — so a missing condition is not a
+      // promise and is ignored too.
+      if (row.condition !== "ROUTE_EXISTS") continue;
+      if (typeof row.duration !== "string") continue;
+      // Proto3 JSON also omits int fields at their default, so index 0 simply
+      // is not there: treating absent as 0 stops the first origin and the
+      // first destination from being silently dropped.
+      const originIndex = row.originIndex ?? 0;
+      const destinationIndex = row.destinationIndex ?? 0;
+      const seconds = Number(row.duration.replace(/s$/, ""));
+      if (!Number.isFinite(seconds)) continue;
+      const dest = chunk[destinationIndex];
+      const origin = originChunk[originIndex];
+      if (!dest || !origin) continue;
+      const entry = result.minutes.get(dest.placeId) ?? {};
+      // A WALK fill must never overwrite a real TRANSIT leg.
+      if (onlyIfAbsent && entry[origin.participantId] !== undefined) continue;
+      entry[origin.participantId] = Math.round(seconds / 60);
+      result.minutes.set(dest.placeId, entry);
+      const rawRows = result.raw.get(dest.placeId) ?? [];
+      rawRows.push({
+        participant_id: origin.participantId,
+        element: { ...row, travelMode },
+      });
+      result.raw.set(dest.placeId, rawRows);
+    }
+  };
 
   // Batch to the TRANSIT element cap: chunk the origins first, then give each
   // origin chunk as many destinations as the remaining element budget allows.
@@ -1689,94 +1788,26 @@ async function travelMatrix(
         dOffset,
         dOffset + destinationsPerRequest,
       );
-      let rows: {
-        originIndex?: number;
-        destinationIndex?: number;
-        duration?: string;
-        condition?: string;
-      }[];
-      try {
-        const res = await fetch(
-          "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Goog-Api-Key": GOOGLE_ROUTES_API_KEY,
-              "X-Goog-FieldMask":
-                "originIndex,destinationIndex,duration,condition",
-            },
-            body: JSON.stringify({
-              origins: originChunk.map((o) => ({
-                waypoint: {
-                  location: {
-                    latLng: {
-                      latitude: o.location.lat,
-                      longitude: o.location.lng,
-                    },
-                  },
-                },
-              })),
-              destinations: chunk.map((d) => ({
-                waypoint: {
-                  location: {
-                    latLng: {
-                      latitude: d.location.lat,
-                      longitude: d.location.lng,
-                    },
-                  },
-                },
-              })),
-              travelMode: "TRANSIT",
-            }),
-          },
-        );
-        if (!res.ok) {
-          recordIncident(
-            incidents,
-            "google_routes",
-            "routes.computeRouteMatrix",
-            res.status,
-            await bodyText(res),
-          );
-          continue;
-        }
-        rows = await res.json();
-      } catch (err) {
-        recordIncident(
-          incidents,
-          "google_routes",
-          "routes.computeRouteMatrix",
-          null,
-          String(err),
-        );
-        continue;
-      }
-      for (const row of Array.isArray(rows) ? rows : []) {
-        // We ask for `condition` in the FieldMask, so an element that does not
-        // say ROUTE_EXISTS has no usable route (ROUTE_NOT_FOUND still carries a
-        // duration). Proto3 JSON omits enums only at their zero value, which is
-        // UNSPECIFIED — never ROUTE_EXISTS — so a missing condition is not a
-        // promise and is ignored too.
-        if (row.condition !== "ROUTE_EXISTS") continue;
-        if (typeof row.duration !== "string") continue;
-        // Proto3 JSON also omits int fields at their default, so index 0 simply
-        // is not there: treating absent as 0 stops the first origin and the
-        // first destination from being silently dropped.
-        const originIndex = row.originIndex ?? 0;
-        const destinationIndex = row.destinationIndex ?? 0;
-        const seconds = Number(row.duration.replace(/s$/, ""));
-        if (!Number.isFinite(seconds)) continue;
-        const dest = chunk[destinationIndex];
-        const origin = originChunk[originIndex];
-        if (!dest || !origin) continue;
-        const entry = result.minutes.get(dest.placeId) ?? {};
-        entry[origin.participantId] = Math.round(seconds / 60);
-        result.minutes.set(dest.placeId, entry);
-        const rawRows = result.raw.get(dest.placeId) ?? [];
-        rawRows.push({ participant_id: origin.participantId, element: row });
-        result.raw.set(dest.placeId, rawRows);
-      }
+      const transitRows = await fetchRows(originChunk, chunk, "TRANSIT");
+      if (transitRows) merge(transitRows, originChunk, chunk, "TRANSIT", false);
+
+      // TRANSIT-only routing has a blind spot exactly where discovery looks hardest.
+      // Candidates are found AROUND the participants' stations, and for a hop of a few
+      // hundred metres there is no train — Routes answers ROUTE_NOT_FOUND (measured:
+      // 池袋駅 to a venue 400m away). Without a fallback the leg stays unknown, the
+      // travel-time MUST fails closed, and the venues nearest the group are excluded
+      // BECAUSE they are near. So the pairs TRANSIT could not route are retried on
+      // foot, which is how a person actually covers that distance; a WALK answer for a
+      // genuinely far pair is an honest large number, which the MUST then judges
+      // honestly. The retry re-sends the whole rectangle (a missing-pairs subset is
+      // not rectangular) and merges absent legs only, so no TRANSIT leg is replaced.
+      const unfilled = chunk.some((d) => {
+        const entry = result.minutes.get(d.placeId) ?? {};
+        return originChunk.some((o) => entry[o.participantId] === undefined);
+      });
+      if (!unfilled) continue;
+      const walkRows = await fetchRows(originChunk, chunk, "WALK");
+      if (walkRows) merge(walkRows, originChunk, chunk, "WALK", true);
     }
   }
   return result;

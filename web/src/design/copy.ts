@@ -37,6 +37,8 @@ export const AppCopy = {
   signedIn: 'ログイン中',
   retry: 'もう一度試す',
   networkError: '通信できませんでした。時間をおいて、もう一度お試しください。',
+  sessionExpiredError:
+    'セッションの有効期限が切れました。アプリを開き直すと、新しいセッションで続けられます。',
   save: '保存する',
   cancel: 'キャンセル',
   continueAction: '続ける',
@@ -332,7 +334,15 @@ export function cuisineLabel(value: string): string | null {
  */
 export function errorMessage(error: unknown): string {
   const description = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase()
-  // Credentials first, and before the generic `invalid` branch below would swallow it:
+  // A dead token comes back with JWT wording ("JWT expired", "invalid JWT") — an expired
+  // LOGIN, not a rule refusing. It used to fall through to the permission and validation
+  // branches, which told the person they were not allowed to do something they are
+  // allowed to do. Matched first, because "invalid jwt" also contains "invalid".
+  // Kept identical to AppCopy.errorMessage(for:) on iOS.
+  if (description.includes('jwt') || description.includes('unauthorized')) {
+    return AppCopy.sessionExpiredError
+  }
+  // Credentials next, and before the generic `invalid` branch below would swallow it:
   // GoTrue answers a wrong password with "Invalid login credentials", and telling somebody
   // 「内容を確認して、もう一度お試しください」 when the actual problem is their password is
   // unhelpful. Same order and same three probes as AppCopy.errorMessage(for:) on iOS.

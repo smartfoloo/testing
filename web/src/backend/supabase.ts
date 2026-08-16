@@ -210,7 +210,19 @@ export class SupabaseBackend implements Backend {
   /** Signs in anonymously when the SDK has no persisted session (Supa.ensureSession). */
   async ensureSession(): Promise<void> {
     const { data } = await this.client.auth.getSession()
-    if (data.session) return
+    if (data.session) {
+      // Proven against the server, not trusted — a persisted session can outlive its user
+      // (an auth reset in development, a revoked session in production), and the SDK hands
+      // back the cached tokens regardless: everything works until the access token expires,
+      // and from then on every call answers 401 while refresh can never succeed. Mirrors
+      // Supa.ensureSession in SupabaseClient.swift.
+      const { error: refreshError } = await this.client.auth.refreshSession()
+      if (!refreshError) return
+      // Only a server that answered "no" proves the identity is gone. Fetch failures carry
+      // no status (or 0), and a 5xx is the server's problem — both keep the stored session.
+      if (!refreshError.status || refreshError.status >= 500) return
+      await this.client.auth.signOut()
+    }
     const { error } = await this.client.auth.signInAnonymously()
     if (error) throw new Error(error.message)
   }
